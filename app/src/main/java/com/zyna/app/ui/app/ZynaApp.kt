@@ -16,6 +16,7 @@ fun ZynaApp(
     onOpenRoom: (MatrixRoomSummary) -> Unit,
     onRefreshChat: () -> Unit,
     onCloseChat: () -> Unit,
+    onLoadOlderChatMessages: () -> Unit,
     onSendChatMessage: (String) -> Boolean,
     onLogout: () -> Unit
 ) {
@@ -43,11 +44,14 @@ fun ZynaApp(
             roomId = route.roomId,
             messages = state.chatMessages,
             isLoading = state.isLoadingChat,
+            isLoadingOlder = state.isLoadingOlderChatMessages,
+            canLoadOlder = state.canLoadOlderChatMessages,
             errorMessage = state.chatErrorMessage,
             isSendingMessage = state.isSendingChatMessage,
             sendErrorMessage = state.chatSendErrorMessage,
             onRefresh = onRefreshChat,
             onBack = onCloseChat,
+            onLoadOlder = onLoadOlderChatMessages,
             onSendMessage = onSendChatMessage
         )
     }

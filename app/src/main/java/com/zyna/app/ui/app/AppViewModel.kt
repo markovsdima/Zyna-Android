@@ -35,6 +35,8 @@ data class AppUiState(
     val recoveryErrorMessage: String? = null,
     val chatMessages: List<MatrixChatMessage> = emptyList(),
     val isLoadingChat: Boolean = false,
+    val isLoadingOlderChatMessages: Boolean = false,
+    val canLoadOlderChatMessages: Boolean = true,
     val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
     val chatSendErrorMessage: String? = null
@@ -53,6 +55,7 @@ class AppViewModel(
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
     private var chatTimelineJob: Job? = null
+    private var chatPaginationJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -75,6 +78,16 @@ class AppViewModel(
                         },
                         chatMessages = if (shouldClearChat) emptyList() else current.chatMessages,
                         isLoadingChat = if (shouldClearChat) false else current.isLoadingChat,
+                        isLoadingOlderChatMessages = if (shouldClearChat) {
+                            false
+                        } else {
+                            current.isLoadingOlderChatMessages
+                        },
+                        canLoadOlderChatMessages = if (shouldClearChat) {
+                            true
+                        } else {
+                            current.canLoadOlderChatMessages
+                        },
                         chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage
@@ -157,6 +170,8 @@ class AppViewModel(
                 ),
                 chatMessages = emptyList(),
                 isLoadingChat = true,
+                isLoadingOlderChatMessages = false,
+                canLoadOlderChatMessages = true,
                 chatErrorMessage = null,
                 isSendingChatMessage = false,
                 chatSendErrorMessage = null
@@ -172,6 +187,8 @@ class AppViewModel(
                 route = AppRoute.Rooms,
                 chatMessages = emptyList(),
                 isLoadingChat = false,
+                isLoadingOlderChatMessages = false,
+                canLoadOlderChatMessages = true,
                 chatErrorMessage = null,
                 isSendingChatMessage = false,
                 chatSendErrorMessage = null
@@ -228,6 +245,47 @@ class AppViewModel(
         return true
     }
 
+    fun loadOlderChatMessages() {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val state = _uiState.value
+        if (
+            state.isLoadingChat ||
+            state.isLoadingOlderChatMessages ||
+            !state.canLoadOlderChatMessages ||
+            chatPaginationJob?.isActive == true
+        ) {
+            return
+        }
+
+        _uiState.update {
+            if (!it.isRouteForRoom(route.roomId)) {
+                it
+            } else it.copy(isLoadingOlderChatMessages = true)
+        }
+
+        chatPaginationJob = viewModelScope.launch {
+            try {
+                val hasReachedStart = matrixClientService.paginateRoomTimelineBackwards(route.roomId)
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        canLoadOlderChatMessages = !hasReachedStart
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(isLoadingOlderChatMessages = false)
+                }
+            }
+        }
+    }
+
     fun logout() {
         stopChatTimeline()
         viewModelScope.launch {
@@ -271,11 +329,15 @@ class AppViewModel(
 
     private fun startChatTimeline(roomId: String, resetMessages: Boolean) {
         chatTimelineJob?.cancel()
+        chatPaginationJob?.cancel()
+        chatPaginationJob = null
         chatTimelineJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     chatMessages = if (resetMessages) emptyList() else it.chatMessages,
                     isLoadingChat = true,
+                    isLoadingOlderChatMessages = false,
+                    canLoadOlderChatMessages = true,
                     chatErrorMessage = null
                 )
             }
@@ -288,6 +350,7 @@ class AppViewModel(
                         } else it.copy(
                             chatMessages = messages,
                             isLoadingChat = false,
+                            isLoadingOlderChatMessages = false,
                             chatErrorMessage = null
                         )
                     }
@@ -300,6 +363,7 @@ class AppViewModel(
                         it
                     } else it.copy(
                         isLoadingChat = false,
+                        isLoadingOlderChatMessages = false,
                         chatErrorMessage = error.message ?: error.javaClass.simpleName
                     )
                 }
@@ -310,6 +374,8 @@ class AppViewModel(
     private fun stopChatTimeline() {
         chatTimelineJob?.cancel()
         chatTimelineJob = null
+        chatPaginationJob?.cancel()
+        chatPaginationJob = null
     }
 
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {

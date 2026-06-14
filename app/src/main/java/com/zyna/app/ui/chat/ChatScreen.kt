@@ -40,11 +40,14 @@ fun ChatScreen(
     roomId: String,
     messages: List<MatrixChatMessage>,
     isLoading: Boolean,
+    isLoadingOlder: Boolean,
+    canLoadOlder: Boolean,
     errorMessage: String?,
     isSendingMessage: Boolean = false,
     sendErrorMessage: String? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
+    onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean = { false }
 ) {
     val glassPalette = chatGlassPalette()
@@ -100,10 +103,13 @@ fun ChatScreen(
             else -> ChatMessageList(
                 messages = messages,
                 isLoading = isLoading,
+                isLoadingOlder = isLoadingOlder,
+                canLoadOlder = canLoadOlder,
                 isSendingMessage = isSendingMessage,
                 sendErrorMessage = sendErrorMessage,
                 sendErrorColor = sendErrorColor,
                 palette = glassPalette,
+                onLoadOlder = onLoadOlder,
                 onSendMessage = onSendMessage,
                 modifier = Modifier
                     .fillMaxSize()
@@ -117,10 +123,13 @@ fun ChatScreen(
 private fun ChatMessageList(
     messages: List<MatrixChatMessage>,
     isLoading: Boolean,
+    isLoadingOlder: Boolean,
+    canLoadOlder: Boolean,
     isSendingMessage: Boolean,
     sendErrorMessage: String?,
     sendErrorColor: Int,
     palette: GlassPalette,
+    onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
@@ -138,8 +147,13 @@ private fun ChatMessageList(
         factory = { context ->
             GlassChatLayout(context).apply {
                 recyclerView.adapter = ChatMessageAdapter(colors)
+                onLoadOlderMessages = onLoadOlder
                 inputBar.onSendMessage = onSendMessage
                 setPalette(palette)
+                setPaginationState(
+                    isLoadingOlder = isLoadingOlder,
+                    canLoadOlder = canLoadOlder && !isLoading
+                )
                 setEmptyState(messages.isEmpty(), isLoading)
                 setComposerState(
                     isSending = isSendingMessage,
@@ -150,7 +164,12 @@ private fun ChatMessageList(
         },
         update = { chatLayout ->
             chatLayout.setPalette(palette)
+            chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.setPaginationState(
+                isLoadingOlder = isLoadingOlder,
+                canLoadOlder = canLoadOlder && !isLoading
+            )
             chatLayout.setEmptyState(messages.isEmpty(), isLoading)
             chatLayout.setComposerState(
                 isSending = isSendingMessage,

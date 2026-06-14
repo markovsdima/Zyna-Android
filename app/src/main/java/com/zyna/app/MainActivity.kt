@@ -42,6 +42,7 @@ class MainActivity : ComponentActivity() {
                     onOpenRoom = appViewModel::openRoom,
                     onRefreshChat = appViewModel::refreshCurrentChat,
                     onCloseChat = appViewModel::closeChat,
+                    onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
                     onSendChatMessage = appViewModel::sendChatMessage,
                     onLogout = appViewModel::logout
                 )
@@ -97,6 +98,7 @@ fun AppPreview() {
             onOpenRoom = {},
             onRefreshChat = {},
             onCloseChat = {},
+            onLoadOlderChatMessages = {},
             onSendChatMessage = { false },
             onLogout = {}
         )

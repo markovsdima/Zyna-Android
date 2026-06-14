@@ -270,6 +270,14 @@ class MatrixClientService(
         }
     }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
 
+    suspend fun paginateRoomTimelineBackwards(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        val activeTimeline = synchronized(activeTimelineLock) {
+            activeRoomTimelines[roomId]
+        } ?: error("Chat timeline is not ready")
+
+        activeTimeline.paginateBackwards(TIMELINE_PAGE_SIZE.toUShort())
+    }
+
     suspend fun sendTextMessage(roomId: String, body: String) = withContext(Dispatchers.IO) {
         val text = body.trim()
         require(text.isNotEmpty()) { "Message is empty" }
@@ -498,7 +506,7 @@ class MatrixClientService(
 
     private companion object {
         const val TIMELINE_PAGE_SIZE = 50
-        const val TIMELINE_MAX_VISIBLE_MESSAGES = 80
+        const val TIMELINE_MAX_VISIBLE_MESSAGES = 500
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
     }
 }

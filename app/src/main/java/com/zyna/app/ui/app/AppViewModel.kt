@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
+import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixRoomSummary
@@ -29,7 +30,10 @@ data class AppUiState(
     val rooms: List<MatrixRoomSummary> = emptyList(),
     val isRefreshingRooms: Boolean = false,
     val isRecovering: Boolean = false,
-    val recoveryErrorMessage: String? = null
+    val recoveryErrorMessage: String? = null,
+    val chatMessages: List<MatrixChatMessage> = emptyList(),
+    val isLoadingChat: Boolean = false,
+    val chatErrorMessage: String? = null
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -133,13 +137,29 @@ class AppViewModel(
                 route = AppRoute.Chat(
                     roomId = room.id,
                     displayName = room.displayName
-                )
+                ),
+                chatMessages = emptyList(),
+                isLoadingChat = true,
+                chatErrorMessage = null
+            )
+        }
+        loadTimeline(room.id)
+    }
+
+    fun closeChat() {
+        _uiState.update {
+            it.copy(
+                route = AppRoute.Rooms,
+                chatMessages = emptyList(),
+                isLoadingChat = false,
+                chatErrorMessage = null
             )
         }
     }
 
-    fun closeChat() {
-        _uiState.update { it.copy(route = AppRoute.Rooms) }
+    fun refreshCurrentChat() {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        loadTimeline(route.roomId)
     }
 
     fun logout() {
@@ -180,6 +200,43 @@ class AppViewModel(
             MatrixClientState.LoggingIn,
             MatrixClientState.RestoringSession -> currentRoute
         }
+    }
+
+    private fun loadTimeline(roomId: String) {
+        viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    isLoadingChat = true,
+                    chatErrorMessage = null
+                )
+            }
+
+            try {
+                val messages = matrixClientService.roomTimelineSnapshot(roomId)
+                _uiState.update {
+                    if (!it.isRouteForRoom(roomId)) {
+                        it
+                    } else it.copy(
+                        chatMessages = messages,
+                        isLoadingChat = false,
+                        chatErrorMessage = null
+                    )
+                }
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingChat = false,
+                        chatErrorMessage = error.message ?: error.javaClass.simpleName
+                    )
+                }
+            }
+        }
+    }
+
+    private fun AppUiState.isRouteForRoom(roomId: String): Boolean {
+        return (route as? AppRoute.Chat)?.roomId == roomId
     }
 }
 

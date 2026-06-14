@@ -1,5 +1,11 @@
 package com.zyna.app.ui.chat
 
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,14 +19,28 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.ListAdapter
+import androidx.recyclerview.widget.RecyclerView
+import com.zyna.app.data.matrix.MatrixChatMessage
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     roomName: String,
     roomId: String,
+    messages: List<MatrixChatMessage>,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onRefresh: () -> Unit,
     onBack: () -> Unit
 ) {
     Scaffold(
@@ -46,21 +66,217 @@ fun ChatScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
+                },
+                actions = {
+                    TextButton(
+                        onClick = onRefresh,
+                        enabled = !isLoading
+                    ) {
+                        Text(if (isLoading) "Loading" else "Refresh")
+                    }
                 }
             )
         }
     ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "No messages",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+        when {
+            errorMessage != null -> Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = errorMessage,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            messages.isEmpty() -> Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (isLoading) "Loading messages" else "No messages",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            else -> ChatMessageList(
+                messages = messages,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
             )
         }
     }
+}
+
+@Composable
+private fun ChatMessageList(
+    messages: List<MatrixChatMessage>,
+    modifier: Modifier = Modifier
+) {
+    val colors = ChatMessageColors(
+        ownBubble = MaterialTheme.colorScheme.primaryContainer.toArgb(),
+        ownText = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
+        ownMetadata = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
+        otherBubble = MaterialTheme.colorScheme.surfaceVariant.toArgb(),
+        otherText = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
+        otherMetadata = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
+    )
+
+    AndroidView(
+        modifier = modifier,
+        factory = { context ->
+            RecyclerView(context).apply {
+                clipToPadding = false
+                setPadding(
+                    context.dpToPx(12),
+                    context.dpToPx(12),
+                    context.dpToPx(12),
+                    context.dpToPx(12)
+                )
+                layoutManager = LinearLayoutManager(context).apply {
+                    stackFromEnd = true
+                }
+                adapter = ChatMessageAdapter(colors)
+            }
+        },
+        update = { recyclerView ->
+            val adapter = recyclerView.adapter as ChatMessageAdapter
+            val colorsChanged = adapter.colors != colors
+            adapter.colors = colors
+            adapter.submitList(messages) {
+                if (messages.isNotEmpty()) {
+                    recyclerView.scrollToPosition(messages.lastIndex)
+                }
+            }
+            if (colorsChanged) {
+                adapter.notifyDataSetChanged()
+            }
+        }
+    )
+}
+
+private data class ChatMessageColors(
+    val ownBubble: Int,
+    val ownText: Int,
+    val ownMetadata: Int,
+    val otherBubble: Int,
+    val otherText: Int,
+    val otherMetadata: Int
+)
+
+private class ChatMessageAdapter(
+    var colors: ChatMessageColors
+) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
+        return ChatMessageViewHolder(parent)
+    }
+
+    override fun onBindViewHolder(holder: ChatMessageViewHolder, position: Int) {
+        holder.bind(getItem(position), colors)
+    }
+}
+
+private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
+    LinearLayout(parent.context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        layoutParams = RecyclerView.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            bottomMargin = parent.context.dpToPx(8)
+        }
+    }
+) {
+    private val row = itemView as LinearLayout
+    private val maxContentWidth = parent.context.chatBubbleTextMaxWidthPx()
+    private val bubble = LinearLayout(parent.context).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(
+            context.dpToPx(14),
+            context.dpToPx(10),
+            context.dpToPx(14),
+            context.dpToPx(10)
+        )
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+    }
+    private val senderView = TextView(parent.context).apply {
+        setTypeface(typeface, Typeface.BOLD)
+        textSize = 12f
+        maxLines = 1
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        maxWidth = maxContentWidth
+    }
+    private val bodyView = TextView(parent.context).apply {
+        textSize = 16f
+        maxWidth = maxContentWidth
+    }
+    private val timeView = TextView(parent.context).apply {
+        textSize = 11f
+        gravity = Gravity.END
+        maxWidth = maxContentWidth
+    }
+
+    init {
+        bubble.addView(senderView)
+        bubble.addView(bodyView)
+        bubble.addView(timeView)
+        row.addView(bubble)
+    }
+
+    fun bind(message: MatrixChatMessage, colors: ChatMessageColors) {
+        row.gravity = if (message.isOwn) Gravity.END else Gravity.START
+
+        val backgroundColor = if (message.isOwn) colors.ownBubble else colors.otherBubble
+        val textColor = if (message.isOwn) colors.ownText else colors.otherText
+        val metadataColor = if (message.isOwn) colors.ownMetadata else colors.otherMetadata
+        bubble.background = GradientDrawable().apply {
+            cornerRadius = itemView.context.dpToPx(18).toFloat()
+            setColor(backgroundColor)
+        }
+
+        senderView.text = if (message.isOwn) "You" else message.sender
+        senderView.setTextColor(metadataColor)
+        bodyView.text = message.body
+        bodyView.setTextColor(textColor)
+        timeView.text = message.timestampMillis.formatMessageTime()
+        timeView.setTextColor(metadataColor)
+    }
+}
+
+private fun Long.formatMessageTime(): String {
+    return MESSAGE_TIME_FORMATTER.format(
+        Instant.ofEpochMilli(this).atZone(ZoneId.systemDefault())
+    )
+}
+
+private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {
+    override fun areItemsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {
+        return oldItem.id == newItem.id
+    }
+
+    override fun areContentsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {
+        return oldItem == newItem
+    }
+}
+
+private fun android.content.Context.dpToPx(dp: Int): Int {
+    return (dp * resources.displayMetrics.density).toInt()
+}
+
+private fun android.content.Context.chatBubbleTextMaxWidthPx(): Int {
+    val screenWidth = resources.displayMetrics.widthPixels
+    val horizontalChrome = dpToPx(96)
+    return (screenWidth - horizontalChrome)
+        .coerceAtLeast(dpToPx(180))
+        .coerceAtMost(dpToPx(520))
 }

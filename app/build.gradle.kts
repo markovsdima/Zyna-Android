@@ -48,6 +48,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
+    implementation(libs.androidx.recyclerview)
     implementation(libs.matrix.sdk)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

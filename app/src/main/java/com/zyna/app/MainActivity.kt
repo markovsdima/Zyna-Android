@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
                     onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
                     onRefreshRooms = appViewModel::refreshRooms,
                     onOpenRoom = appViewModel::openRoom,
+                    onRefreshChat = appViewModel::refreshCurrentChat,
                     onCloseChat = appViewModel::closeChat,
                     onLogout = appViewModel::logout
                 )
@@ -52,6 +53,7 @@ fun AppPreview() {
             onSubmitRecoveryKey = {},
             onRefreshRooms = {},
             onOpenRoom = {},
+            onRefreshChat = {},
             onCloseChat = {},
             onLogout = {}
         )

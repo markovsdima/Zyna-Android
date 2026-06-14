@@ -14,6 +14,7 @@ fun ZynaApp(
     onSubmitRecoveryKey: (String) -> Unit,
     onRefreshRooms: () -> Unit,
     onOpenRoom: (MatrixRoomSummary) -> Unit,
+    onRefreshChat: () -> Unit,
     onCloseChat: () -> Unit,
     onLogout: () -> Unit
 ) {
@@ -39,6 +40,10 @@ fun ZynaApp(
         is AppRoute.Chat -> ChatScreen(
             roomName = route.displayName,
             roomId = route.roomId,
+            messages = state.chatMessages,
+            isLoading = state.isLoadingChat,
+            errorMessage = state.chatErrorMessage,
+            onRefresh = onRefreshChat,
             onBack = onCloseChat
         )
     }

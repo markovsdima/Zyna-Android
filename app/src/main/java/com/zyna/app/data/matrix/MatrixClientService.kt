@@ -2,6 +2,7 @@ package com.zyna.app.data.matrix
 
 import android.content.Context
 import com.zyna.app.data.session.MatrixSessionStore
+import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -35,7 +36,8 @@ data class MatrixRoomSummary(
 
 class MatrixClientService(
     private val context: Context,
-    private val sessionStore: MatrixSessionStore
+    private val sessionStore: MatrixSessionStore,
+    private val storePassphraseStore: MatrixStorePassphraseStore
 ) {
     private val _state = MutableStateFlow<MatrixClientState>(MatrixClientState.LoggedOut)
     val state: StateFlow<MatrixClientState> = _state.asStateFlow()
@@ -48,18 +50,22 @@ class MatrixClientService(
     suspend fun restoreSessionIfAvailable() {
         val session = sessionStore.loadLastSession()
         if (session == null) {
+            clearStoredMatrixState()
             _state.value = MatrixClientState.LoggedOut
             return
         }
 
         _state.value = MatrixClientState.RestoringSession
+        var restoredClient: Client? = null
         try {
-            val restoredClient = buildClient(session.homeserverUrl)
+            restoredClient = buildClient(session.homeserverUrl)
             restoredClient.restoreSession(session)
             client = restoredClient
+            restoredClient = null
             _state.value = MatrixClientState.LoggedIn(session.userId)
             startSync()
         } catch (error: Throwable) {
+            restoredClient?.close()
             client = null
             syncService = null
             _state.value = MatrixClientState.Error(error.displayMessage())
@@ -71,7 +77,6 @@ class MatrixClientService(
         var loginClient: Client? = null
         try {
             resetClientForFreshLogin()
-            sessionStore.clear()
             loginClient = buildClient(normalizeHomeserver(homeserver))
             loginClient.login(
                 username = username.trim(),
@@ -90,23 +95,27 @@ class MatrixClientService(
             loginClient?.close()
             client = null
             syncService = null
+            clearStoredMatrixState()
             _state.value = MatrixClientState.Error(error.displayMessage())
         }
     }
 
     private suspend fun resetClientForFreshLogin() {
         syncService?.stop()
+        syncService?.close()
         syncService = null
         client?.close()
         client = null
-        clearMatrixStoreDirectories()
+        clearStoredMatrixState()
     }
 
     suspend fun logout() {
         syncService?.stop()
+        syncService?.close()
         syncService = null
+        client?.close()
         client = null
-        sessionStore.clear()
+        clearStoredMatrixState()
         _state.value = MatrixClientState.LoggedOut
     }
 
@@ -146,18 +155,45 @@ class MatrixClientService(
             ?: emptyList()
     }
 
-    private suspend fun buildClient(homeserver: String): Client = withContext(Dispatchers.IO) {
-        val paths = matrixStorePaths()
-        ClientBuilder()
-            .serverNameOrHomeserverUrl(homeserver)
-            .sqliteStore(SqliteStoreBuilder(paths.dataPath, paths.cachePath))
-            .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.DISCOVER_NATIVE)
-            .setSessionDelegate(sessionDelegate)
-            .autoEnableCrossSigning(true)
-            .autoEnableBackups(true)
-            .backupDownloadStrategy(BackupDownloadStrategy.AFTER_DECRYPTION_FAILURE)
-            .userAgent("Zyna Android")
-            .build()
+    private suspend fun buildClient(homeserver: String): Client {
+        val storePassphrase = prepareStorePassphrase()
+
+        return withContext(Dispatchers.IO) {
+            val paths = matrixStorePaths()
+            ClientBuilder()
+                .serverNameOrHomeserverUrl(homeserver)
+                .sqliteStore(
+                    SqliteStoreBuilder(paths.dataPath, paths.cachePath)
+                        .passphrase(storePassphrase)
+                )
+                .slidingSyncVersionBuilder(SlidingSyncVersionBuilder.DISCOVER_NATIVE)
+                .setSessionDelegate(sessionDelegate)
+                .autoEnableCrossSigning(true)
+                .autoEnableBackups(true)
+                .backupDownloadStrategy(BackupDownloadStrategy.AFTER_DECRYPTION_FAILURE)
+                .userAgent("Zyna Android")
+                .build()
+        }
+    }
+
+    private suspend fun prepareStorePassphrase(): String {
+        val existing = withContext(Dispatchers.IO) {
+            storePassphraseStore.loadPassphraseOrNull()
+        }
+        if (existing != null) {
+            return existing
+        }
+
+        clearMatrixStoreDirectories()
+        return withContext(Dispatchers.IO) {
+            storePassphraseStore.createPassphrase()
+        }
+    }
+
+    private suspend fun clearStoredMatrixState() {
+        sessionStore.clear()
+        storePassphraseStore.clear()
+        clearMatrixStoreDirectories()
     }
 
     private suspend fun startSync() {

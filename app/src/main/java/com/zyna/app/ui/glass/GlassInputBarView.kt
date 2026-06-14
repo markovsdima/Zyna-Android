@@ -48,7 +48,9 @@ class GlassInputBarView @JvmOverloads constructor(
         imeOptions = EditorInfo.IME_ACTION_SEND
     }
 
-    var onSendMessage: (String) -> Unit = {}
+    var onSendMessage: (String) -> Boolean = { false }
+    private var isSending = false
+    private var pendingSentText: String? = null
     private var palette: GlassPalette? = null
 
     init {
@@ -139,6 +141,20 @@ class GlassInputBarView @JvmOverloads constructor(
         )
     }
 
+    fun setSending(sending: Boolean, sendFailed: Boolean) {
+        val wasSending = isSending
+        if (wasSending && !sending) {
+            finishPendingSend(sendFailed)
+        }
+
+        if (isSending != sending) {
+            isSending = sending
+            sendButton.isEnabled = !sending
+            sendButton.alpha = if (sending) 0.48f else 1f
+            sendButton.setText(if (sending) "..." else ">")
+        }
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = MeasureSpec.getSize(widthMeasureSpec)
         val availableEditWidth = (
@@ -189,11 +205,29 @@ class GlassInputBarView @JvmOverloads constructor(
     }
 
     private fun sendDraft() {
+        if (isSending) {
+            return
+        }
         val text = editText.text?.toString()?.trim().orEmpty()
         if (text.isEmpty()) {
             return
         }
-        onSendMessage(text)
-        editText.text?.clear()
+        if (onSendMessage(text)) {
+            pendingSentText = text
+            setSending(sending = true, sendFailed = false)
+        }
+    }
+
+    private fun finishPendingSend(sendFailed: Boolean) {
+        val pendingText = pendingSentText ?: return
+        pendingSentText = null
+        if (sendFailed) {
+            return
+        }
+
+        val currentText = editText.text?.toString()?.trim().orEmpty()
+        if (currentText == pendingText) {
+            editText.text?.clear()
+        }
     }
 }

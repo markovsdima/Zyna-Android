@@ -16,6 +16,7 @@ fun ZynaApp(
     onOpenRoom: (MatrixRoomSummary) -> Unit,
     onRefreshChat: () -> Unit,
     onCloseChat: () -> Unit,
+    onSendChatMessage: (String) -> Boolean,
     onLogout: () -> Unit
 ) {
     when (val route = state.route) {
@@ -43,8 +44,11 @@ fun ZynaApp(
             messages = state.chatMessages,
             isLoading = state.isLoadingChat,
             errorMessage = state.chatErrorMessage,
+            isSendingMessage = state.isSendingChatMessage,
+            sendErrorMessage = state.chatSendErrorMessage,
             onRefresh = onRefreshChat,
-            onBack = onCloseChat
+            onBack = onCloseChat,
+            onSendMessage = onSendChatMessage
         )
     }
 }

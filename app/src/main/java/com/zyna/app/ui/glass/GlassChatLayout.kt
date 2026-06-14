@@ -26,11 +26,18 @@ class GlassChatLayout @JvmOverloads constructor(
         textSize = 15f
         includeFontPadding = true
     }
+    private val composerErrorView = TextView(context).apply {
+        gravity = Gravity.START
+        textSize = 12f
+        includeFontPadding = true
+        visibility = GONE
+    }
 
     private var palette = defaultPalette()
     private var imeBottomInset = 0
     private var navBottomInset = 0
     private var paletteApplied = false
+    private var composerErrorMessage: String? = null
     private val source = RecyclerViewGlassBackdropSource(recyclerView, palette.background)
 
     init {
@@ -59,6 +66,7 @@ class GlassChatLayout @JvmOverloads constructor(
         glassController.source = source
         addView(recyclerView)
         addView(emptyView)
+        addView(composerErrorView)
         addView(inputBar)
 
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -99,6 +107,25 @@ class GlassChatLayout @JvmOverloads constructor(
         emptyView.visibility = if (isEmpty) VISIBLE else GONE
     }
 
+    fun setComposerState(isSending: Boolean, errorMessage: String?, errorColor: Int) {
+        val normalizedError = errorMessage?.takeIf { it.isNotBlank() }
+        inputBar.setSending(
+            sending = isSending,
+            sendFailed = normalizedError != null
+        )
+
+        if (composerErrorMessage == normalizedError && composerErrorView.currentTextColor == errorColor) {
+            return
+        }
+
+        composerErrorMessage = normalizedError
+        composerErrorView.text = normalizedError.orEmpty()
+        composerErrorView.setTextColor(errorColor)
+        composerErrorView.visibility = if (normalizedError == null) GONE else VISIBLE
+        requestLayout()
+        glassController.invalidateRegions()
+    }
+
     fun invalidateGlassContent() {
         glassController.invalidateBackdrop()
     }
@@ -132,6 +159,10 @@ class GlassChatLayout @JvmOverloads constructor(
             MeasureSpec.makeMeasureSpec((width - 48.dpToPx(density)).coerceAtLeast(0), MeasureSpec.AT_MOST),
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST)
         )
+        composerErrorView.measure(
+            MeasureSpec.makeMeasureSpec((width - 32.dpToPx(density)).coerceAtLeast(0), MeasureSpec.AT_MOST),
+            MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST)
+        )
 
         setMeasuredDimension(width, height)
     }
@@ -146,22 +177,41 @@ class GlassChatLayout @JvmOverloads constructor(
         val inputTop = (height - bottomInset - bottomMargin - inputBar.measuredHeight)
             .coerceAtLeast(0)
         inputBar.layout(0, inputTop, width, inputTop + inputBar.measuredHeight)
+        val contentBottom = layoutComposerError(inputTop, width)
 
         val emptyWidth = emptyView.measuredWidth
         val emptyHeight = emptyView.measuredHeight
         val emptyLeft = (width - emptyWidth) / 2
-        val availableBottom = inputTop.coerceAtLeast(0)
+        val availableBottom = contentBottom.coerceAtLeast(0)
         val emptyTop = ((availableBottom - emptyHeight) / 2).coerceAtLeast(0)
         emptyView.layout(emptyLeft, emptyTop, emptyLeft + emptyWidth, emptyTop + emptyHeight)
 
-        updateRecyclerPadding(inputTop)
+        updateRecyclerPadding(contentBottom)
         glassController.invalidateRegions()
     }
 
-    private fun updateRecyclerPadding(inputTop: Int) {
+    private fun layoutComposerError(inputTop: Int, width: Int): Int {
+        if (composerErrorView.visibility != VISIBLE) {
+            return inputTop
+        }
+
+        val horizontal = 16.dpToPx(density)
+        val gap = 4.dpToPx(density)
+        val errorBottom = (inputTop - gap).coerceAtLeast(0)
+        val errorTop = (errorBottom - composerErrorView.measuredHeight).coerceAtLeast(0)
+        composerErrorView.layout(
+            horizontal,
+            errorTop,
+            (width - horizontal).coerceAtLeast(horizontal),
+            errorTop + composerErrorView.measuredHeight
+        )
+        return errorTop
+    }
+
+    private fun updateRecyclerPadding(contentBottom: Int) {
         val horizontal = 12.dpToPx(density)
         val top = 12.dpToPx(density)
-        val bottom = (height - inputTop) + 12.dpToPx(density)
+        val bottom = (height - contentBottom) + 12.dpToPx(density)
         if (
             recyclerView.paddingLeft != horizontal ||
             recyclerView.paddingTop != top ||

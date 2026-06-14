@@ -33,6 +33,7 @@ import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.TaskHandle
+import org.matrix.rustcomponents.sdk.TextMessageContent
 import org.matrix.rustcomponents.sdk.Timeline
 import org.matrix.rustcomponents.sdk.TimelineConfiguration
 import org.matrix.rustcomponents.sdk.TimelineDiff
@@ -41,6 +42,7 @@ import org.matrix.rustcomponents.sdk.TimelineFocus
 import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
+import org.matrix.rustcomponents.sdk.contentWithoutRelationFromMessage
 import org.matrix.rustcomponents.sdk.use
 import uniffi.matrix_sdk.BackupDownloadStrategy
 import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
@@ -80,6 +82,8 @@ class MatrixClientService(
 
     private var client: Client? = null
     private var syncService: SyncService? = null
+    private val activeTimelineLock = Any()
+    private val activeRoomTimelines = mutableMapOf<String, Timeline>()
 
     suspend fun restoreSessionIfAvailable() {
         val session = sessionStore.loadLastSession()
@@ -210,6 +214,11 @@ class MatrixClientService(
         fun cleanup() {
             if (hasCleanedUp.compareAndSet(false, true)) {
                 listenerHandle?.cancelAndDestroy()
+                synchronized(activeTimelineLock) {
+                    if (activeRoomTimelines[roomId] === timeline) {
+                        activeRoomTimelines.remove(roomId)
+                    }
+                }
                 timeline?.destroy()
                 room.destroy()
             }
@@ -217,16 +226,12 @@ class MatrixClientService(
 
         try {
             val openedTimeline = room.timelineWithConfiguration(
-                TimelineConfiguration(
-                    focus = TimelineFocus.Live(hideThreadedEvents = false),
-                    filter = TimelineFilter.All,
-                    internalIdPrefix = "room_$roomId",
-                    dateDividerMode = DateDividerMode.DAILY,
-                    trackReadReceipts = TimelineReadReceiptTracking.ALL_EVENTS,
-                    reportUtds = false
-                )
+                liveTimelineConfiguration(roomId)
             )
             timeline = openedTimeline
+            synchronized(activeTimelineLock) {
+                activeRoomTimelines[roomId] = openedTimeline
+            }
 
             listenerHandle = openedTimeline.addListener(
                 object : TimelineListener {
@@ -264,6 +269,34 @@ class MatrixClientService(
             throw error
         }
     }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
+
+    suspend fun sendTextMessage(roomId: String, body: String) = withContext(Dispatchers.IO) {
+        val text = body.trim()
+        require(text.isNotEmpty()) { "Message is empty" }
+        val activeTimeline = synchronized(activeTimelineLock) {
+            activeRoomTimelines[roomId]
+        } ?: error("Chat timeline is not ready")
+
+        val messageContent = MessageContent(
+            msgType = MessageType.Text(
+                TextMessageContent(
+                    body = text,
+                    formatted = null
+                )
+            ),
+            body = text,
+            isEdited = false,
+            mentions = null
+        )
+
+        try {
+            contentWithoutRelationFromMessage(messageContent).use { content ->
+                activeTimeline.send(content).destroy()
+            }
+        } finally {
+            messageContent.destroy()
+        }
+    }
 
     private fun MutableList<MatrixChatMessage?>.applyTimelineDiff(diff: TimelineDiff) {
         when (diff) {
@@ -358,6 +391,17 @@ class MatrixClientService(
     private fun TaskHandle.cancelAndDestroy() {
         cancel()
         destroy()
+    }
+
+    private fun liveTimelineConfiguration(roomId: String): TimelineConfiguration {
+        return TimelineConfiguration(
+            focus = TimelineFocus.Live(hideThreadedEvents = false),
+            filter = TimelineFilter.All,
+            internalIdPrefix = "room_$roomId",
+            dateDividerMode = DateDividerMode.DAILY,
+            trackReadReceipts = TimelineReadReceiptTracking.ALL_EVENTS,
+            reportUtds = false
+        )
     }
 
     private suspend fun buildClient(homeserver: String): Client {

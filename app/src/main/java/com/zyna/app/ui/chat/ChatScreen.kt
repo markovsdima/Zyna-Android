@@ -41,11 +41,14 @@ fun ChatScreen(
     messages: List<MatrixChatMessage>,
     isLoading: Boolean,
     errorMessage: String?,
+    isSendingMessage: Boolean = false,
+    sendErrorMessage: String? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
-    onSendMessage: (String) -> Unit = {}
+    onSendMessage: (String) -> Boolean = { false }
 ) {
     val glassPalette = chatGlassPalette()
+    val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
     Scaffold(
         topBar = {
             TopAppBar(
@@ -97,6 +100,9 @@ fun ChatScreen(
             else -> ChatMessageList(
                 messages = messages,
                 isLoading = isLoading,
+                isSendingMessage = isSendingMessage,
+                sendErrorMessage = sendErrorMessage,
+                sendErrorColor = sendErrorColor,
                 palette = glassPalette,
                 onSendMessage = onSendMessage,
                 modifier = Modifier
@@ -111,8 +117,11 @@ fun ChatScreen(
 private fun ChatMessageList(
     messages: List<MatrixChatMessage>,
     isLoading: Boolean,
+    isSendingMessage: Boolean,
+    sendErrorMessage: String?,
+    sendErrorColor: Int,
     palette: GlassPalette,
-    onSendMessage: (String) -> Unit,
+    onSendMessage: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
     val colors = ChatMessageColors(
@@ -132,12 +141,22 @@ private fun ChatMessageList(
                 inputBar.onSendMessage = onSendMessage
                 setPalette(palette)
                 setEmptyState(messages.isEmpty(), isLoading)
+                setComposerState(
+                    isSending = isSendingMessage,
+                    errorMessage = sendErrorMessage,
+                    errorColor = sendErrorColor
+                )
             }
         },
         update = { chatLayout ->
             chatLayout.setPalette(palette)
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.setEmptyState(messages.isEmpty(), isLoading)
+            chatLayout.setComposerState(
+                isSending = isSendingMessage,
+                errorMessage = sendErrorMessage,
+                errorColor = sendErrorColor
+            )
 
             val recyclerView = chatLayout.recyclerView
             val adapter = recyclerView.adapter as ChatMessageAdapter

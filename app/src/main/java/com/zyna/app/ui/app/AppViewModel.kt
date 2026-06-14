@@ -35,7 +35,9 @@ data class AppUiState(
     val recoveryErrorMessage: String? = null,
     val chatMessages: List<MatrixChatMessage> = emptyList(),
     val isLoadingChat: Boolean = false,
-    val chatErrorMessage: String? = null
+    val chatErrorMessage: String? = null,
+    val isSendingChatMessage: Boolean = false,
+    val chatSendErrorMessage: String? = null
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -73,7 +75,9 @@ class AppViewModel(
                         },
                         chatMessages = if (shouldClearChat) emptyList() else current.chatMessages,
                         isLoadingChat = if (shouldClearChat) false else current.isLoadingChat,
-                        chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage
+                        chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
+                        isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
+                        chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage
                     )
                 }
 
@@ -153,7 +157,9 @@ class AppViewModel(
                 ),
                 chatMessages = emptyList(),
                 isLoadingChat = true,
-                chatErrorMessage = null
+                chatErrorMessage = null,
+                isSendingChatMessage = false,
+                chatSendErrorMessage = null
             )
         }
         startChatTimeline(room.id, resetMessages = true)
@@ -166,7 +172,9 @@ class AppViewModel(
                 route = AppRoute.Rooms,
                 chatMessages = emptyList(),
                 isLoadingChat = false,
-                chatErrorMessage = null
+                chatErrorMessage = null,
+                isSendingChatMessage = false,
+                chatSendErrorMessage = null
             )
         }
     }
@@ -174,6 +182,50 @@ class AppViewModel(
     fun refreshCurrentChat() {
         val route = _uiState.value.route as? AppRoute.Chat ?: return
         startChatTimeline(route.roomId, resetMessages = false)
+    }
+
+    fun sendChatMessage(body: String): Boolean {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return false
+        val text = body.trim()
+        if (text.isEmpty() || _uiState.value.isSendingChatMessage) {
+            return false
+        }
+
+        _uiState.update {
+            if (!it.isRouteForRoom(route.roomId)) {
+                it
+            } else it.copy(
+                isSendingChatMessage = true,
+                chatSendErrorMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                matrixClientService.sendTextMessage(route.roomId, text)
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isSendingChatMessage = false,
+                        chatSendErrorMessage = null
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isSendingChatMessage = false,
+                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
+                    )
+                }
+            }
+        }
+
+        return true
     }
 
     fun logout() {

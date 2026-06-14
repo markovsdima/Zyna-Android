@@ -24,10 +24,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.recyclerview.widget.DiffUtil
-import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.ui.glass.GlassChatLayout
+import com.zyna.app.ui.glass.GlassPalette
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -41,8 +42,10 @@ fun ChatScreen(
     isLoading: Boolean,
     errorMessage: String?,
     onRefresh: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onSendMessage: (String) -> Unit = {}
 ) {
+    val glassPalette = chatGlassPalette()
     Scaffold(
         topBar = {
             TopAppBar(
@@ -91,20 +94,11 @@ fun ChatScreen(
                     color = MaterialTheme.colorScheme.error
                 )
             }
-            messages.isEmpty() -> Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = if (isLoading) "Loading messages" else "No messages",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
             else -> ChatMessageList(
                 messages = messages,
+                isLoading = isLoading,
+                palette = glassPalette,
+                onSendMessage = onSendMessage,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
@@ -116,6 +110,9 @@ fun ChatScreen(
 @Composable
 private fun ChatMessageList(
     messages: List<MatrixChatMessage>,
+    isLoading: Boolean,
+    palette: GlassPalette,
+    onSendMessage: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val colors = ChatMessageColors(
@@ -130,33 +127,49 @@ private fun ChatMessageList(
     AndroidView(
         modifier = modifier,
         factory = { context ->
-            RecyclerView(context).apply {
-                clipToPadding = false
-                setPadding(
-                    context.dpToPx(12),
-                    context.dpToPx(12),
-                    context.dpToPx(12),
-                    context.dpToPx(12)
-                )
-                layoutManager = LinearLayoutManager(context).apply {
-                    stackFromEnd = true
-                }
-                adapter = ChatMessageAdapter(colors)
+            GlassChatLayout(context).apply {
+                recyclerView.adapter = ChatMessageAdapter(colors)
+                inputBar.onSendMessage = onSendMessage
+                setPalette(palette)
+                setEmptyState(messages.isEmpty(), isLoading)
             }
         },
-        update = { recyclerView ->
+        update = { chatLayout ->
+            chatLayout.setPalette(palette)
+            chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.setEmptyState(messages.isEmpty(), isLoading)
+
+            val recyclerView = chatLayout.recyclerView
             val adapter = recyclerView.adapter as ChatMessageAdapter
+            val wasAtBottom = !recyclerView.canScrollVertically(1)
+            val wasEmpty = adapter.itemCount == 0
             val colorsChanged = adapter.colors != colors
             adapter.colors = colors
             adapter.submitList(messages) {
                 if (messages.isNotEmpty()) {
-                    recyclerView.scrollToPosition(messages.lastIndex)
+                    if (wasAtBottom || wasEmpty) {
+                        chatLayout.scrollToBottom(animated = false)
+                    }
                 }
+                chatLayout.invalidateGlassContent()
             }
             if (colorsChanged) {
                 adapter.notifyDataSetChanged()
             }
         }
+    )
+}
+
+@Composable
+private fun chatGlassPalette(): GlassPalette {
+    val scheme = MaterialTheme.colorScheme
+    return GlassPalette(
+        background = scheme.surface.toArgb(),
+        glassTint = scheme.surface.copy(alpha = 0.18f).toArgb(),
+        glassTintStrong = scheme.surfaceContainerHighest.copy(alpha = 0.24f).toArgb(),
+        stroke = scheme.onSurface.copy(alpha = 0.18f).toArgb(),
+        text = scheme.onSurface.toArgb(),
+        hint = scheme.onSurfaceVariant.copy(alpha = 0.72f).toArgb()
     )
 }
 

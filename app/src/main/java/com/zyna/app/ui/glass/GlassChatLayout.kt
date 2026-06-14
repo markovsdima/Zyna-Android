@@ -1,0 +1,185 @@
+package com.zyna.app.ui.glass
+
+import android.content.Context
+import android.util.AttributeSet
+import android.view.Gravity
+import android.widget.FrameLayout
+import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import kotlin.math.max
+
+/** Chat view shell that gives the list and input glass a shared backdrop source. */
+class GlassChatLayout @JvmOverloads constructor(
+    context: Context,
+    attrs: AttributeSet? = null
+) : FrameLayout(context, attrs) {
+    private val density = resources.displayMetrics.density
+    val glassController = GlassBackdropController(this)
+    val recyclerView = RecyclerView(context)
+    val inputBar = GlassInputBarView(context, glassController)
+
+    private val emptyView = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 15f
+        includeFontPadding = true
+    }
+
+    private var palette = defaultPalette()
+    private var imeBottomInset = 0
+    private var navBottomInset = 0
+    private var paletteApplied = false
+    private val source = RecyclerViewGlassBackdropSource(recyclerView, palette.background)
+
+    init {
+        clipChildren = false
+        clipToPadding = false
+        setBackgroundColor(palette.background)
+
+        recyclerView.apply {
+            clipToPadding = false
+            overScrollMode = OVER_SCROLL_NEVER
+            itemAnimator = null
+            layoutManager = LinearLayoutManager(context).apply {
+                stackFromEnd = true
+            }
+            addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    glassController.invalidateBackdrop()
+                }
+
+                override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    glassController.invalidateBackdrop()
+                }
+            })
+        }
+
+        glassController.source = source
+        addView(recyclerView)
+        addView(emptyView)
+        addView(inputBar)
+
+        ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            val nav = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            if (imeBottomInset != ime || navBottomInset != nav) {
+                imeBottomInset = ime
+                navBottomInset = nav
+                requestLayout()
+                glassController.invalidateRegions()
+            }
+            insets
+        }
+
+        setPalette(palette)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        ViewCompat.requestApplyInsets(this)
+    }
+
+    fun setPalette(newPalette: GlassPalette) {
+        if (paletteApplied && palette == newPalette) {
+            return
+        }
+        paletteApplied = true
+        palette = newPalette
+        source.fallbackColor = newPalette.background
+        setBackgroundColor(newPalette.background)
+        emptyView.setTextColor(newPalette.hint)
+        inputBar.setPalette(newPalette)
+        glassController.invalidateBackdrop()
+    }
+
+    fun setEmptyState(isEmpty: Boolean, isLoading: Boolean) {
+        emptyView.text = if (isLoading) "Loading messages" else "No messages"
+        emptyView.visibility = if (isEmpty) VISIBLE else GONE
+    }
+
+    fun invalidateGlassContent() {
+        glassController.invalidateBackdrop()
+    }
+
+    fun scrollToBottom(animated: Boolean) {
+        val last = (recyclerView.adapter?.itemCount ?: 0) - 1
+        if (last < 0) {
+            return
+        }
+        if (animated) {
+            recyclerView.smoothScrollToPosition(last)
+        } else {
+            recyclerView.scrollToPosition(last)
+        }
+        glassController.invalidateBackdrop()
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val width = MeasureSpec.getSize(widthMeasureSpec)
+        val height = MeasureSpec.getSize(heightMeasureSpec)
+
+        recyclerView.measure(
+            MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+        )
+        inputBar.measure(
+            MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(max(1, height / 2), MeasureSpec.AT_MOST)
+        )
+        emptyView.measure(
+            MeasureSpec.makeMeasureSpec((width - 48.dpToPx(density)).coerceAtLeast(0), MeasureSpec.AT_MOST),
+            MeasureSpec.makeMeasureSpec(height, MeasureSpec.AT_MOST)
+        )
+
+        setMeasuredDimension(width, height)
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        val width = right - left
+        val height = bottom - top
+        recyclerView.layout(0, 0, width, height)
+
+        val bottomInset = if (imeBottomInset > 0) imeBottomInset else navBottomInset
+        val bottomMargin = 6.dpToPx(density)
+        val inputTop = (height - bottomInset - bottomMargin - inputBar.measuredHeight)
+            .coerceAtLeast(0)
+        inputBar.layout(0, inputTop, width, inputTop + inputBar.measuredHeight)
+
+        val emptyWidth = emptyView.measuredWidth
+        val emptyHeight = emptyView.measuredHeight
+        val emptyLeft = (width - emptyWidth) / 2
+        val availableBottom = inputTop.coerceAtLeast(0)
+        val emptyTop = ((availableBottom - emptyHeight) / 2).coerceAtLeast(0)
+        emptyView.layout(emptyLeft, emptyTop, emptyLeft + emptyWidth, emptyTop + emptyHeight)
+
+        updateRecyclerPadding(inputTop)
+        glassController.invalidateRegions()
+    }
+
+    private fun updateRecyclerPadding(inputTop: Int) {
+        val horizontal = 12.dpToPx(density)
+        val top = 12.dpToPx(density)
+        val bottom = (height - inputTop) + 12.dpToPx(density)
+        if (
+            recyclerView.paddingLeft != horizontal ||
+            recyclerView.paddingTop != top ||
+            recyclerView.paddingRight != horizontal ||
+            recyclerView.paddingBottom != bottom
+        ) {
+            recyclerView.setPadding(horizontal, top, horizontal, bottom)
+        }
+    }
+}
+
+private fun defaultPalette(): GlassPalette {
+    return GlassPalette(
+        background = 0xfffbfbff.toInt(),
+        glassTint = 0xb8ffffff.toInt(),
+        glassTintStrong = 0xd9ffffff.toInt(),
+        stroke = 0x24000000,
+        text = 0xff15151a.toInt(),
+        hint = 0x9915151a.toInt()
+    )
+}

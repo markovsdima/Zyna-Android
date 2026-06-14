@@ -4,15 +4,21 @@ import android.content.Context
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import uniffi.matrix_sdk.BackupDownloadStrategy
 import org.matrix.rustcomponents.sdk.DateDividerMode
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
@@ -36,6 +42,7 @@ import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.use
+import uniffi.matrix_sdk.BackupDownloadStrategy
 import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
 
 sealed interface MatrixClientState {
@@ -182,16 +189,34 @@ class MatrixClientService(
             ?: emptyList()
     }
 
-    suspend fun roomTimelineSnapshot(roomId: String): List<MatrixChatMessage> = withContext(Dispatchers.IO) {
-        val activeClient = client ?: return@withContext emptyList()
-        val room = activeClient.getRoom(roomId) ?: return@withContext emptyList()
+    fun roomTimelineMessages(roomId: String): Flow<List<MatrixChatMessage>> = callbackFlow {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         var timeline: Timeline? = null
         var listenerHandle: TaskHandle? = null
-        val updates = Channel<Unit>(Channel.UNLIMITED)
         val entries = mutableListOf<MatrixChatMessage?>()
+        val hasEmittedInitialState = AtomicBoolean(false)
+        val hasCleanedUp = AtomicBoolean(false)
+
+        fun currentMessages(): List<MatrixChatMessage> = synchronized(entries) {
+            entries.visibleChatMessages()
+        }
+
+        fun sendCurrentMessages() {
+            hasEmittedInitialState.set(true)
+            trySendBlocking(currentMessages())
+        }
+
+        fun cleanup() {
+            if (hasCleanedUp.compareAndSet(false, true)) {
+                listenerHandle?.cancelAndDestroy()
+                timeline?.destroy()
+                room.destroy()
+            }
+        }
 
         try {
-            timeline = room.timelineWithConfiguration(
+            val openedTimeline = room.timelineWithConfiguration(
                 TimelineConfiguration(
                     focus = TimelineFocus.Live(hideThreadedEvents = false),
                     filter = TimelineFilter.All,
@@ -201,41 +226,44 @@ class MatrixClientService(
                     reportUtds = false
                 )
             )
+            timeline = openedTimeline
 
-            listenerHandle = timeline.addListener(
+            listenerHandle = openedTimeline.addListener(
                 object : TimelineListener {
                     override fun onUpdate(diff: List<TimelineDiff>) {
                         synchronized(entries) {
                             diff.forEach { entries.applyTimelineDiff(it) }
                         }
-                        updates.trySend(Unit)
+                        sendCurrentMessages()
                     }
                 }
             )
 
-            withTimeoutOrNull(TIMELINE_UPDATE_TIMEOUT_MS) {
-                updates.receive()
-            }
-            runCatching {
-                timeline.paginateBackwards(TIMELINE_PAGE_SIZE.toUShort())
-            }
-            withTimeoutOrNull(TIMELINE_UPDATE_TIMEOUT_MS) {
-                updates.receive()
+            val initialLoadingFallbackJob = launch {
+                delay(TIMELINE_UPDATE_TIMEOUT_MS)
+                if (hasEmittedInitialState.compareAndSet(false, true)) {
+                    trySend(currentMessages())
+                }
             }
 
-            synchronized(entries) {
-                entries
-                    .filterNotNull()
-                    .takeLast(TIMELINE_MAX_VISIBLE_MESSAGES)
+            val paginationJob = launch(Dispatchers.IO) {
+                runCatching {
+                    openedTimeline.paginateBackwards(TIMELINE_PAGE_SIZE.toUShort())
+                }.onFailure { error ->
+                    close(error)
+                }
             }
-        } finally {
-            updates.close()
-            listenerHandle?.cancel()
-            listenerHandle?.destroy()
-            timeline?.destroy()
-            room.destroy()
+
+            awaitClose {
+                initialLoadingFallbackJob.cancel()
+                paginationJob.cancel()
+                cleanup()
+            }
+        } catch (error: Throwable) {
+            cleanup()
+            throw error
         }
-    }
+    }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
 
     private fun MutableList<MatrixChatMessage?>.applyTimelineDiff(diff: TimelineDiff) {
         when (diff) {
@@ -278,6 +306,10 @@ class MatrixClientService(
         }
     }
 
+    private fun List<MatrixChatMessage?>.visibleChatMessages(): List<MatrixChatMessage> {
+        return filterNotNull().takeLast(TIMELINE_MAX_VISIBLE_MESSAGES)
+    }
+
     private fun TimelineItem.toChatMessageOrNull(): MatrixChatMessage? = use { item ->
         val event = item.asEvent() ?: return@use null
         event.toChatMessageOrNull()
@@ -286,13 +318,16 @@ class MatrixClientService(
     private fun EventTimelineItem.toChatMessageOrNull(): MatrixChatMessage? {
         val content = (content as? TimelineItemContent.MsgLike)?.content
             ?: return null
-        val kind = content.kind as? MsgLikeKind.Message
-            ?: return null
+        val body = when (val kind = content.kind) {
+            is MsgLikeKind.Message -> kind.content.displayBody()
+            is MsgLikeKind.UnableToDecrypt -> "Unable to decrypt message"
+            else -> return null
+        }
 
         return MatrixChatMessage(
             id = eventOrTransactionId.stableId(),
             sender = sender,
-            body = kind.content.displayBody(),
+            body = body,
             timestampMillis = timestamp.toLong(),
             isOwn = isOwn
         )
@@ -318,6 +353,11 @@ class MatrixClientService(
             is MessageType.Location -> type.content.body
             is MessageType.Other -> type.body
         }
+    }
+
+    private fun TaskHandle.cancelAndDestroy() {
+        cancel()
+        destroy()
     }
 
     private suspend fun buildClient(homeserver: String): Client {

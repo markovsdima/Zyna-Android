@@ -8,6 +8,8 @@ import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,11 +50,19 @@ class AppViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+    private var chatTimelineJob: Job? = null
 
     init {
         viewModelScope.launch {
             matrixClientService.state.collect { matrixState ->
+                if (matrixState is MatrixClientState.LoggedOut || matrixState is MatrixClientState.Error) {
+                    stopChatTimeline()
+                }
+
                 _uiState.update { current ->
+                    val shouldClearChat = matrixState is MatrixClientState.LoggedOut ||
+                        matrixState is MatrixClientState.Error
+
                     current.copy(
                         matrixState = matrixState,
                         route = routeForState(matrixState, current.route),
@@ -60,7 +70,10 @@ class AppViewModel(
                             emptyList()
                         } else {
                             current.rooms
-                        }
+                        },
+                        chatMessages = if (shouldClearChat) emptyList() else current.chatMessages,
+                        isLoadingChat = if (shouldClearChat) false else current.isLoadingChat,
+                        chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage
                     )
                 }
 
@@ -143,10 +156,11 @@ class AppViewModel(
                 chatErrorMessage = null
             )
         }
-        loadTimeline(room.id)
+        startChatTimeline(room.id, resetMessages = true)
     }
 
     fun closeChat() {
+        stopChatTimeline()
         _uiState.update {
             it.copy(
                 route = AppRoute.Rooms,
@@ -159,10 +173,11 @@ class AppViewModel(
 
     fun refreshCurrentChat() {
         val route = _uiState.value.route as? AppRoute.Chat ?: return
-        loadTimeline(route.roomId)
+        startChatTimeline(route.roomId, resetMessages = false)
     }
 
     fun logout() {
+        stopChatTimeline()
         viewModelScope.launch {
             matrixClientService.logout()
         }
@@ -202,26 +217,31 @@ class AppViewModel(
         }
     }
 
-    private fun loadTimeline(roomId: String) {
-        viewModelScope.launch {
+    private fun startChatTimeline(roomId: String, resetMessages: Boolean) {
+        chatTimelineJob?.cancel()
+        chatTimelineJob = viewModelScope.launch {
             _uiState.update {
                 it.copy(
+                    chatMessages = if (resetMessages) emptyList() else it.chatMessages,
                     isLoadingChat = true,
                     chatErrorMessage = null
                 )
             }
 
             try {
-                val messages = matrixClientService.roomTimelineSnapshot(roomId)
-                _uiState.update {
-                    if (!it.isRouteForRoom(roomId)) {
-                        it
-                    } else it.copy(
-                        chatMessages = messages,
-                        isLoadingChat = false,
-                        chatErrorMessage = null
-                    )
+                matrixClientService.roomTimelineMessages(roomId).collect { messages ->
+                    _uiState.update {
+                        if (!it.isRouteForRoom(roomId)) {
+                            it
+                        } else it.copy(
+                            chatMessages = messages,
+                            isLoadingChat = false,
+                            chatErrorMessage = null
+                        )
+                    }
                 }
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Throwable) {
                 _uiState.update {
                     if (!it.isRouteForRoom(roomId)) {
@@ -233,6 +253,11 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    private fun stopChatTimeline() {
+        chatTimelineJob?.cancel()
+        chatTimelineJob = null
     }
 
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {

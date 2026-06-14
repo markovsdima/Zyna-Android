@@ -29,7 +29,10 @@ class MainActivity : ComponentActivity() {
         val appContainer = (application as ZynaApplication).appContainer
         setContent {
             val appViewModel: AppViewModel = viewModel(
-                factory = AppViewModelFactory(appContainer.matrixClientService)
+                factory = AppViewModelFactory(
+                    matrixClientService = appContainer.matrixClientService,
+                    localCacheRepository = appContainer.localCacheRepository
+                )
             )
             val state by appViewModel.uiState.collectAsState()
 

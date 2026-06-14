@@ -1,9 +1,11 @@
 package com.zyna.app.ui.app
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
+import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
@@ -50,28 +52,48 @@ data class AppUiState(
 }
 
 class AppViewModel(
-    private val matrixClientService: MatrixClientService
+    private val matrixClientService: MatrixClientService,
+    private val localCacheRepository: LocalCacheRepository
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
     private var chatTimelineJob: Job? = null
     private var chatPaginationJob: Job? = null
+    private var chatCacheJob: Job? = null
+    private var roomCacheJob: Job? = null
+    private var roomCacheUserId: String? = null
 
     init {
         viewModelScope.launch {
             matrixClientService.state.collect { matrixState ->
-                if (matrixState is MatrixClientState.LoggedOut || matrixState is MatrixClientState.Error) {
+                val previousUserId = _uiState.value.matrixState.userIdOrNull()
+                val nextUserId = matrixState.userIdOrNull()
+                val didChangeUser = previousUserId != null &&
+                    nextUserId != null &&
+                    previousUserId != nextUserId
+                if (
+                    nextUserId == null ||
+                    didChangeUser ||
+                    matrixState is MatrixClientState.Error
+                ) {
                     stopChatTimeline()
+                }
+                if (nextUserId == null) {
+                    stopRoomCache()
                 }
 
                 _uiState.update { current ->
-                    val shouldClearChat = matrixState is MatrixClientState.LoggedOut ||
+                    val shouldClearSessionData = nextUserId == null || didChangeUser
+                    val shouldClearChat = shouldClearSessionData ||
                         matrixState is MatrixClientState.Error
 
                     current.copy(
                         matrixState = matrixState,
-                        route = routeForState(matrixState, current.route),
-                        rooms = if (matrixState is MatrixClientState.LoggedOut) {
+                        route = routeForState(
+                            matrixState,
+                            if (didChangeUser) AppRoute.Login else current.route
+                        ),
+                        rooms = if (shouldClearSessionData) {
                             emptyList()
                         } else {
                             current.rooms
@@ -92,6 +114,10 @@ class AppViewModel(
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage
                     )
+                }
+
+                if (nextUserId != null) {
+                    startRoomCache(nextUserId)
                 }
 
                 if (matrixState is MatrixClientState.Syncing) {
@@ -121,12 +147,18 @@ class AppViewModel(
     fun refreshRooms() {
         viewModelScope.launch {
             _uiState.update { it.copy(isRefreshingRooms = true) }
-            val rooms = matrixClientService.roomsSnapshot()
-            _uiState.update {
-                it.copy(
-                    rooms = rooms,
-                    isRefreshingRooms = false
-                )
+            try {
+                val userId = _uiState.value.matrixState.userIdOrNull() ?: return@launch
+                val rooms = matrixClientService.roomsSnapshot()
+                localCacheRepository.cacheRoomsSnapshot(userId, rooms)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to refresh rooms", error)
+            } finally {
+                _uiState.update {
+                    it.copy(isRefreshingRooms = false)
+                }
             }
         }
     }
@@ -162,6 +194,7 @@ class AppViewModel(
     }
 
     fun openRoom(room: MatrixRoomSummary) {
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         _uiState.update {
             it.copy(
                 route = AppRoute.Chat(
@@ -177,7 +210,7 @@ class AppViewModel(
                 chatSendErrorMessage = null
             )
         }
-        startChatTimeline(room.id, resetMessages = true)
+        startChatTimeline(userId, room.id, resetMessages = true)
     }
 
     fun closeChat() {
@@ -198,7 +231,8 @@ class AppViewModel(
 
     fun refreshCurrentChat() {
         val route = _uiState.value.route as? AppRoute.Chat ?: return
-        startChatTimeline(route.roomId, resetMessages = false)
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        startChatTimeline(userId, route.roomId, resetMessages = false)
     }
 
     fun sendChatMessage(body: String): Boolean {
@@ -288,7 +322,9 @@ class AppViewModel(
 
     fun logout() {
         stopChatTimeline()
+        stopRoomCache()
         viewModelScope.launch {
+            localCacheRepository.clearAll()
             matrixClientService.logout()
         }
     }
@@ -327,28 +363,40 @@ class AppViewModel(
         }
     }
 
-    private fun startChatTimeline(roomId: String, resetMessages: Boolean) {
+    private fun startChatTimeline(userId: String, roomId: String, resetMessages: Boolean) {
         chatTimelineJob?.cancel()
         chatPaginationJob?.cancel()
         chatPaginationJob = null
-        chatTimelineJob = viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    chatMessages = if (resetMessages) emptyList() else it.chatMessages,
-                    isLoadingChat = true,
-                    isLoadingOlderChatMessages = false,
-                    canLoadOlderChatMessages = true,
-                    chatErrorMessage = null
-                )
+        chatCacheJob?.cancel()
+        chatCacheJob = null
+        _uiState.update {
+            it.copy(
+                chatMessages = if (resetMessages) emptyList() else it.chatMessages,
+                isLoadingChat = true,
+                isLoadingOlderChatMessages = false,
+                canLoadOlderChatMessages = true,
+                chatErrorMessage = null
+            )
+        }
+        chatCacheJob = viewModelScope.launch {
+            localCacheRepository.observeRoomTimeline(userId, roomId).collect { messages ->
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, roomId)) {
+                        it
+                    } else it.copy(chatMessages = messages)
+                }
             }
-
+        }
+        chatTimelineJob = viewModelScope.launch {
             try {
                 matrixClientService.roomTimelineMessages(roomId).collect { messages ->
+                    if (messages.isNotEmpty()) {
+                        localCacheRepository.cacheRoomTimelineWindow(userId, roomId, messages)
+                    }
                     _uiState.update {
-                        if (!it.isRouteForRoom(roomId)) {
+                        if (!it.isRouteForRoom(userId, roomId)) {
                             it
                         } else it.copy(
-                            chatMessages = messages,
                             isLoadingChat = false,
                             isLoadingOlderChatMessages = false,
                             chatErrorMessage = null
@@ -359,7 +407,7 @@ class AppViewModel(
                 throw error
             } catch (error: Throwable) {
                 _uiState.update {
-                    if (!it.isRouteForRoom(roomId)) {
+                    if (!it.isRouteForRoom(userId, roomId)) {
                         it
                     } else it.copy(
                         isLoadingChat = false,
@@ -374,22 +422,73 @@ class AppViewModel(
     private fun stopChatTimeline() {
         chatTimelineJob?.cancel()
         chatTimelineJob = null
+        chatCacheJob?.cancel()
+        chatCacheJob = null
         chatPaginationJob?.cancel()
         chatPaginationJob = null
+    }
+
+    private fun startRoomCache(userId: String) {
+        if (roomCacheUserId == userId && roomCacheJob?.isActive == true) {
+            return
+        }
+
+        roomCacheJob?.cancel()
+        roomCacheUserId = userId
+        roomCacheJob = viewModelScope.launch {
+            localCacheRepository.observeRooms(userId).collect { rooms ->
+                _uiState.update {
+                    if (it.matrixState.userIdOrNull() == userId) {
+                        it.copy(rooms = rooms)
+                    } else {
+                        it
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopRoomCache() {
+        roomCacheJob?.cancel()
+        roomCacheJob = null
+        roomCacheUserId = null
     }
 
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {
         return (route as? AppRoute.Chat)?.roomId == roomId
     }
+
+    private fun AppUiState.isRouteForRoom(userId: String, roomId: String): Boolean {
+        return matrixState.userIdOrNull() == userId && isRouteForRoom(roomId)
+    }
+
+    private fun MatrixClientState.userIdOrNull(): String? {
+        return when (this) {
+            is MatrixClientState.LoggedIn -> userId
+            is MatrixClientState.Syncing -> userId
+            MatrixClientState.LoggedOut,
+            is MatrixClientState.Error,
+            MatrixClientState.LoggingIn,
+            MatrixClientState.RestoringSession -> null
+        }
+    }
+
+    private companion object {
+        const val TAG = "AppViewModel"
+    }
 }
 
 class AppViewModelFactory(
-    private val matrixClientService: MatrixClientService
+    private val matrixClientService: MatrixClientService,
+    private val localCacheRepository: LocalCacheRepository
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
         if (modelClass.isAssignableFrom(AppViewModel::class.java)) {
-            return AppViewModel(matrixClientService) as T
+            return AppViewModel(
+                matrixClientService = matrixClientService,
+                localCacheRepository = localCacheRepository
+            ) as T
         }
         error("Unknown ViewModel class: ${modelClass.name}")
     }

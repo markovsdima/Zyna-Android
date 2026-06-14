@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -268,7 +269,9 @@ class MatrixClientService(
             cleanup()
             throw error
         }
-    }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
+    }.distinctUntilChanged()
+        .buffer(Channel.UNLIMITED)
+        .flowOn(Dispatchers.IO)
 
     suspend fun paginateRoomTimelineBackwards(roomId: String): Boolean = withContext(Dispatchers.IO) {
         val activeTimeline = synchronized(activeTimelineLock) {

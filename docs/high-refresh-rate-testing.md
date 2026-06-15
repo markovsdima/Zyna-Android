@@ -75,6 +75,22 @@ Useful signs in `cmd display get-displays`:
 
 The system FPS overlay should also show 120 while Zyna is open.
 
+## Recover after HyperOS reset
+
+If the device falls back to 60 Hz while the other overrides are still set, it is
+usually enough to stop the HyperOS power services and restore
+`miui_refresh_rate`:
+
+```sh
+adb shell am force-stop com.miui.powerkeeper
+adb shell am force-stop com.xiaomi.joyose
+adb shell settings put secure miui_refresh_rate 120
+```
+
+This was observed when `miui_refresh_rate` returned to `60` while
+`min_refresh_rate`, `peak_refresh_rate`, `user_preferred_refresh_rate`, and
+`peak_refresh_rate_default` were still `120`.
+
 ## Caveats
 
 - This can reset after reboot or after MIUI/HyperOS power services restart.

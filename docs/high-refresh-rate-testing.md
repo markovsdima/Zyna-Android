@@ -36,6 +36,12 @@ adb devices
 
 ## Force 120 Hz for testing
 
+The scripted version is:
+
+```sh
+./scripts/force-poco-120hz.sh --full
+```
+
 Run these commands from the development machine:
 
 ```sh
@@ -80,6 +86,12 @@ The system FPS overlay should also show 120 while Zyna is open.
 If the device falls back to 60 Hz while the other overrides are still set, it is
 usually enough to stop the HyperOS power services and restore
 `miui_refresh_rate`:
+
+```sh
+./scripts/force-poco-120hz.sh
+```
+
+Manual equivalent:
 
 ```sh
 adb shell am force-stop com.miui.powerkeeper

@@ -26,6 +26,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        preferMaxRefreshRate()
         val appContainer = (application as ZynaApplication).appContainer
         setContent {
             val appViewModel: AppViewModel = viewModel(
@@ -53,6 +54,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        preferMaxRefreshRate()
+    }
+
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if (event.action == MotionEvent.ACTION_DOWN) {
             hideKeyboardIfTapOutsideInput(event)
@@ -70,6 +76,31 @@ class MainActivity : ComponentActivity() {
         focusedView.clearFocus()
         getSystemService(InputMethodManager::class.java)
             ?.hideSoftInputFromWindow(focusedView.windowToken, 0)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun preferMaxRefreshRate() {
+        val display = windowManager.defaultDisplay
+        val currentMode = display.mode
+        val preferredMode = display.supportedModes
+            .filter {
+                it.physicalWidth == currentMode.physicalWidth &&
+                    it.physicalHeight == currentMode.physicalHeight
+            }
+            .maxByOrNull { it.refreshRate }
+            ?: display.supportedModes.maxByOrNull { it.refreshRate }
+            ?: return
+        val maxRefreshRate = preferredMode.refreshRate
+
+        val attributes = window.attributes
+        if (
+            attributes.preferredDisplayModeId != preferredMode.modeId ||
+            attributes.preferredRefreshRate != maxRefreshRate
+        ) {
+            attributes.preferredDisplayModeId = preferredMode.modeId
+            attributes.preferredRefreshRate = maxRefreshRate
+            window.attributes = attributes
+        }
     }
 }
 

@@ -22,6 +22,20 @@ interface OutgoingEnvelopeDao {
         """
         SELECT * FROM outgoing_envelopes
         WHERE userId = :userId
+            AND roomId = :roomId
+            AND transportState != 'RETIRED'
+        ORDER BY createdAtMillis ASC, id ASC
+        """
+    )
+    suspend fun activeRoomEnvelopesSnapshot(
+        userId: String,
+        roomId: String
+    ): List<OutgoingEnvelopeEntity>
+
+    @Query(
+        """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
             AND kind = 'TEXT'
             AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
         ORDER BY createdAtMillis ASC, id ASC

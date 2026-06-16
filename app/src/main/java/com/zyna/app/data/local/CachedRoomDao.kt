@@ -10,8 +10,30 @@ interface CachedRoomDao {
     @Query("SELECT * FROM rooms WHERE userId = :userId")
     fun observeRooms(userId: String): Flow<List<CachedRoomEntity>>
 
+    @Query("SELECT * FROM rooms WHERE userId = :userId")
+    suspend fun roomsSnapshot(userId: String): List<CachedRoomEntity>
+
     @Upsert
     suspend fun upsertRooms(rooms: List<CachedRoomEntity>)
+
+    @Query(
+        """
+        UPDATE rooms
+        SET lastMessageText = :lastMessageText,
+            lastMessageSenderName = :lastMessageSenderName,
+            lastMessageAtMillis = :lastMessageAtMillis,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId AND id = :roomId
+        """
+    )
+    suspend fun updateRoomPreview(
+        userId: String,
+        roomId: String,
+        lastMessageText: String?,
+        lastMessageSenderName: String?,
+        lastMessageAtMillis: Long?,
+        updatedAtMillis: Long
+    ): Int
 
     @Query("DELETE FROM rooms WHERE userId = :userId")
     suspend fun clearRooms(userId: String)

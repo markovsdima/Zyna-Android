@@ -23,6 +23,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -94,7 +98,8 @@ private fun RoomRow(
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.Top
     ) {
         Column(
             modifier = Modifier.weight(1f),
@@ -107,12 +112,38 @@ private fun RoomRow(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = room.id,
+                text = room.previewText(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
         }
+        room.lastMessageAtMillis?.let { timestampMillis ->
+            Text(
+                text = timestampMillis.formatRoomTimestamp(),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
     }
 }
+
+private fun MatrixRoomSummary.previewText(): String {
+    return lastMessageText?.takeIf { it.isNotBlank() } ?: "No messages"
+}
+
+private fun Long.formatRoomTimestamp(): String {
+    val zone = ZoneId.systemDefault()
+    val dateTime = Instant.ofEpochMilli(this).atZone(zone)
+    val today = LocalDate.now(zone)
+    return when (dateTime.toLocalDate()) {
+        today -> ROOM_TIME_FORMATTER.format(dateTime)
+        today.minusDays(1) -> "Yesterday"
+        else -> ROOM_DATE_FORMATTER.format(dateTime)
+    }
+}
+
+private val ROOM_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+private val ROOM_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d")

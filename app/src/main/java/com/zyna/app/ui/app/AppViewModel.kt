@@ -65,7 +65,9 @@ class AppViewModel(
     private var chatPaginationJob: Job? = null
     private var chatCacheJob: Job? = null
     private var roomCacheJob: Job? = null
+    private var roomListStateJob: Job? = null
     private var roomCacheUserId: String? = null
+    private var roomListStateUserId: String? = null
 
     init {
         outgoingTextOutboxService.start(viewModelScope)
@@ -86,6 +88,7 @@ class AppViewModel(
                 }
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     stopRoomCache()
+                    stopRoomListStateRefresh()
                 }
 
                 _uiState.update { current ->
@@ -129,6 +132,7 @@ class AppViewModel(
                 if (matrixState is MatrixClientState.Syncing) {
                     val userId = matrixState.userId
                     if (matrixClientService.isRecoveryComplete(userId)) {
+                        startRoomListStateRefresh(userId)
                         refreshRooms()
                     }
                 }
@@ -197,6 +201,8 @@ class AppViewModel(
                         recoveryErrorMessage = null
                     )
                 }
+                val userId = matrixClientService.state.value.userIdOrNull() ?: return@launch
+                startRoomListStateRefresh(userId)
                 refreshRooms()
                 outgoingTextOutboxService.kick(reason = "recovery-complete")
             } catch (error: Throwable) {
@@ -445,6 +451,7 @@ class AppViewModel(
     fun logout() {
         stopChatTimeline()
         stopRoomCache()
+        stopRoomListStateRefresh()
         viewModelScope.launch {
             localCacheRepository.clearAll()
             matrixClientService.logout()
@@ -574,6 +581,34 @@ class AppViewModel(
         roomCacheJob?.cancel()
         roomCacheJob = null
         roomCacheUserId = null
+    }
+
+    private fun startRoomListStateRefresh(userId: String) {
+        if (roomListStateUserId == userId && roomListStateJob?.isActive == true) {
+            return
+        }
+
+        roomListStateJob?.cancel()
+        roomListStateUserId = userId
+        roomListStateJob = viewModelScope.launch {
+            try {
+                matrixClientService.roomListRunningSignals().collect {
+                    if (matrixClientService.isRecoveryComplete(userId)) {
+                        refreshRooms()
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to observe room list state", error)
+            }
+        }
+    }
+
+    private fun stopRoomListStateRefresh() {
+        roomListStateJob?.cancel()
+        roomListStateJob = null
+        roomListStateUserId = null
     }
 
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {

@@ -29,9 +29,14 @@ import org.matrix.rustcomponents.sdk.ClientBuilder
 import org.matrix.rustcomponents.sdk.ClientSessionDelegate
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.EventTimelineItem
+import org.matrix.rustcomponents.sdk.LatestEventValue
 import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeKind
+import org.matrix.rustcomponents.sdk.ProfileDetails
+import org.matrix.rustcomponents.sdk.RoomListService
+import org.matrix.rustcomponents.sdk.RoomListServiceState
+import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
 import org.matrix.rustcomponents.sdk.Session
 import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
@@ -63,7 +68,10 @@ sealed interface MatrixClientState {
 data class MatrixRoomSummary(
     val id: String,
     val displayName: String,
-    val avatarUrl: String?
+    val avatarUrl: String?,
+    val lastMessageText: String? = null,
+    val lastMessageSenderName: String? = null,
+    val lastMessageAtMillis: Long? = null
 )
 
 enum class MatrixMessageDeliveryState {
@@ -96,6 +104,7 @@ class MatrixClientService(
 
     private var client: Client? = null
     private var syncService: SyncService? = null
+    private var roomListService: RoomListService? = null
     private val activeTimelineLock = Any()
     private val activeRoomTimelines = mutableMapOf<String, Timeline>()
     private val timelinePaginationMutex = Mutex()
@@ -120,6 +129,8 @@ class MatrixClientService(
         } catch (error: Throwable) {
             restoredClient?.close()
             client = null
+            roomListService?.close()
+            roomListService = null
             syncService = null
             _state.value = MatrixClientState.Error(error.displayMessage())
         }
@@ -147,6 +158,8 @@ class MatrixClientService(
         } catch (error: Throwable) {
             loginClient?.close()
             client = null
+            roomListService?.close()
+            roomListService = null
             syncService = null
             clearStoredMatrixState()
             _state.value = MatrixClientState.Error(error.displayMessage())
@@ -154,6 +167,8 @@ class MatrixClientService(
     }
 
     private suspend fun resetClientForFreshLogin() {
+        roomListService?.close()
+        roomListService = null
         syncService?.stop()
         syncService?.close()
         syncService = null
@@ -163,6 +178,8 @@ class MatrixClientService(
     }
 
     suspend fun logout() {
+        roomListService?.close()
+        roomListService = null
         syncService?.stop()
         syncService?.close()
         syncService = null
@@ -198,15 +215,46 @@ class MatrixClientService(
     suspend fun roomsSnapshot(): List<MatrixRoomSummary> = withContext(Dispatchers.IO) {
         client?.rooms()
             ?.map { room ->
-                MatrixRoomSummary(
-                    id = room.id(),
-                    displayName = room.displayName()?.takeIf { it.isNotBlank() } ?: room.id(),
-                    avatarUrl = room.avatarUrl()
-                )
+                room.use { activeRoom ->
+                    val latestPreview = activeRoom.latestEvent().toRoomPreview()
+                    MatrixRoomSummary(
+                        id = activeRoom.id(),
+                        displayName = activeRoom.displayName()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: activeRoom.id(),
+                        avatarUrl = activeRoom.avatarUrl(),
+                        lastMessageText = latestPreview.body,
+                        lastMessageSenderName = latestPreview.senderName,
+                        lastMessageAtMillis = latestPreview.timestampMillis
+                    )
+                }
             }
             ?.sortedBy { it.displayName.lowercase() }
             ?: emptyList()
     }
+
+    fun roomListRunningSignals(): Flow<Unit> = callbackFlow {
+        val service = roomListService
+        if (service == null) {
+            close(IllegalStateException("Matrix room list service is not ready"))
+            return@callbackFlow
+        }
+
+        val listenerHandle = service.state(
+            object : RoomListServiceStateListener {
+                override fun onUpdate(state: RoomListServiceState) {
+                    if (state == RoomListServiceState.RUNNING) {
+                        trySendBlocking(Unit)
+                    }
+                }
+            }
+        )
+
+        awaitClose {
+            listenerHandle.cancelAndDestroy()
+        }
+    }.buffer(Channel.UNLIMITED)
+        .flowOn(Dispatchers.IO)
 
     fun roomTimelineMessages(roomId: String): Flow<List<MatrixChatMessage>> = callbackFlow {
         val activeClient = client ?: error("Matrix client is not ready")
@@ -440,6 +488,67 @@ class MatrixClientService(
         }
     }
 
+    private fun LatestEventValue.toRoomPreview(): MatrixRoomPreview = use { latestEvent ->
+        when (latestEvent) {
+            LatestEventValue.None -> MatrixRoomPreview()
+            is LatestEventValue.Remote -> MatrixRoomPreview(
+                body = latestEvent.content.roomPreviewBody() ?: "",
+                senderName = latestEvent.sender.previewSenderName(
+                    isOwn = latestEvent.isOwn,
+                    profile = latestEvent.profile
+                ),
+                timestampMillis = latestEvent.timestamp.toLong()
+            )
+            is LatestEventValue.Local -> MatrixRoomPreview(
+                body = latestEvent.content.roomPreviewBody() ?: "",
+                senderName = latestEvent.sender.previewSenderName(
+                    isOwn = true,
+                    profile = latestEvent.profile
+                ),
+                timestampMillis = latestEvent.timestamp.toLong()
+            )
+            is LatestEventValue.RemoteInvite -> MatrixRoomPreview(
+                timestampMillis = latestEvent.timestamp.toLong()
+            )
+        }
+    }
+
+    private fun TimelineItemContent.roomPreviewBody(): String? {
+        val messageContent = (this as? TimelineItemContent.MsgLike)?.content
+            ?: return null
+        return when (val kind = messageContent.kind) {
+            is MsgLikeKind.Message -> kind.content.roomPreviewBody()
+            is MsgLikeKind.Sticker -> "Sticker"
+            is MsgLikeKind.Poll -> "Poll: ${kind.question}"
+            MsgLikeKind.Redacted -> "Deleted message"
+            is MsgLikeKind.UnableToDecrypt -> "Unable to decrypt message"
+            is MsgLikeKind.LiveLocation -> "Live location"
+            is MsgLikeKind.Other -> null
+        }
+    }
+
+    private fun MessageContent.roomPreviewBody(): String {
+        return when (val type = msgType) {
+            is MessageType.Text -> type.content.body
+            is MessageType.Notice -> type.content.body
+            is MessageType.Emote -> type.content.body
+            is MessageType.Image -> "Photo"
+            is MessageType.Audio -> "Audio"
+            is MessageType.Video -> "Video"
+            is MessageType.File -> "File"
+            is MessageType.Location -> "Location"
+            is MessageType.Gallery,
+            is MessageType.Other -> "Message"
+        }
+    }
+
+    private fun String.previewSenderName(isOwn: Boolean, profile: ProfileDetails): String {
+        if (isOwn) return OWN_MESSAGE_PREVIEW_SENDER
+
+        val displayName = (profile as? ProfileDetails.Ready)?.displayName
+        return displayName?.takeIf { it.isNotBlank() } ?: this
+    }
+
     private fun TaskHandle.cancelAndDestroy() {
         cancel()
         destroy()
@@ -509,7 +618,9 @@ class MatrixClientService(
                 .withOfflineMode()
                 .finish()
         }
+        val roomList = service.roomListService()
         syncService = service
+        roomListService = roomList
         service.start()
         _state.value = MatrixClientState.Syncing(activeClient.userId())
     }
@@ -548,6 +659,12 @@ class MatrixClientService(
         val cachePath: String
     )
 
+    private data class MatrixRoomPreview(
+        val body: String? = null,
+        val senderName: String? = null,
+        val timestampMillis: Long? = null
+    )
+
     private companion object {
         const val TIMELINE_PAGE_SIZE = 100
         const val TIMELINE_INITIAL_BACKFILL_PAGES = 5
@@ -555,6 +672,7 @@ class MatrixClientService(
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
+        const val OWN_MESSAGE_PREVIEW_SENDER = "You"
     }
 }
 

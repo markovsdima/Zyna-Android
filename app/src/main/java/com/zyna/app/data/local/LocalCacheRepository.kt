@@ -22,21 +22,28 @@ class LocalCacheRepository(
     fun observeRooms(userId: String): Flow<List<MatrixRoomSummary>> {
         return roomDao.observeRooms(userId).map { rooms ->
             rooms.map { it.toRoomSummary() }
-                .sortedBy { it.displayName.lowercase(Locale.ROOT) }
+                .sortedWith(RoomSummaryComparator)
         }
     }
 
     suspend fun cacheRoomsSnapshot(userId: String, rooms: List<MatrixRoomSummary>) {
         val now = System.currentTimeMillis()
         database.withTransaction {
+            val existingRoomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
             roomDao.clearRooms(userId)
             roomDao.upsertRooms(
                 rooms.map { room ->
+                    val existingRoom = existingRoomsById[room.id]
                     CachedRoomEntity(
                         userId = userId,
                         id = room.id,
                         displayName = room.displayName,
                         avatarUrl = room.avatarUrl,
+                        lastMessageText = room.lastMessageText ?: existingRoom?.lastMessageText,
+                        lastMessageSenderName = room.lastMessageSenderName
+                            ?: existingRoom?.lastMessageSenderName,
+                        lastMessageAtMillis = room.lastMessageAtMillis
+                            ?: existingRoom?.lastMessageAtMillis,
                         updatedAtMillis = now
                     )
                 }
@@ -66,6 +73,7 @@ class LocalCacheRepository(
         database.withTransaction {
             messageDao.upsertMessages(messages.toEntities(userId, roomId, now))
             retireOutgoingEnvelopesDeliveredBy(messages, userId, roomId, now)
+            updateRoomPreview(userId, roomId, now)
         }
     }
 
@@ -77,21 +85,24 @@ class LocalCacheRepository(
         body: String
     ) {
         val now = System.currentTimeMillis()
-        outgoingDao.upsertEnvelope(
-            OutgoingEnvelopeEntity(
-                userId = userId,
-                roomId = roomId,
-                id = envelopeId,
-                kind = OutgoingEnvelopeKind.TEXT.name,
-                transportState = OutgoingTransportState.QUEUED.name,
-                transactionId = transactionId,
-                eventId = null,
-                body = body,
-                createdAtMillis = now,
-                updatedAtMillis = now,
-                failureMessage = null
+        database.withTransaction {
+            outgoingDao.upsertEnvelope(
+                OutgoingEnvelopeEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = envelopeId,
+                    kind = OutgoingEnvelopeKind.TEXT.name,
+                    transportState = OutgoingTransportState.QUEUED.name,
+                    transactionId = transactionId,
+                    eventId = null,
+                    body = body,
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    failureMessage = null
+                )
             )
-        )
+            updateRoomPreview(userId, roomId, now)
+        }
     }
 
     suspend fun markOutgoingDispatchStarted(userId: String, roomId: String, envelopeId: String) {
@@ -136,6 +147,7 @@ class LocalCacheRepository(
             if (messageDao.hasMessage(userId, roomId, eventId)) {
                 retireOutgoingEnvelopesByEventIds(userId, roomId, listOf(eventId), now)
             }
+            updateRoomPreview(userId, roomId, now)
         }
     }
 
@@ -202,6 +214,7 @@ class LocalCacheRepository(
                 if (hiddenIds.isNotEmpty()) {
                     messageDao.deleteMessagesByIds(userId, roomId, hiddenIds)
                 }
+                updateRoomPreview(userId, roomId, System.currentTimeMillis())
             }
             didDelete
         }
@@ -231,7 +244,10 @@ class LocalCacheRepository(
         return MatrixRoomSummary(
             id = id,
             displayName = displayName,
-            avatarUrl = avatarUrl
+            avatarUrl = avatarUrl,
+            lastMessageText = lastMessageText,
+            lastMessageSenderName = lastMessageSenderName,
+            lastMessageAtMillis = lastMessageAtMillis
         )
     }
 
@@ -315,6 +331,24 @@ class LocalCacheRepository(
         }
     }
 
+    private suspend fun updateRoomPreview(
+        userId: String,
+        roomId: String,
+        updatedAtMillis: Long
+    ) {
+        val messages = messageDao.roomMessagesSnapshot(userId, roomId)
+        val outgoingEnvelopes = outgoingDao.activeRoomEnvelopesSnapshot(userId, roomId)
+        val latestMessage = mergeTimelineWithOutgoing(messages, outgoingEnvelopes).lastOrNull()
+        roomDao.updateRoomPreview(
+            userId = userId,
+            roomId = roomId,
+            lastMessageText = latestMessage?.body,
+            lastMessageSenderName = latestMessage?.previewSenderName(),
+            lastMessageAtMillis = latestMessage?.timestampMillis,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
+
     private fun mergeTimelineWithOutgoing(
         messages: List<CachedTimelineMessageEntity>,
         outgoingEnvelopes: List<OutgoingEnvelopeEntity>
@@ -350,6 +384,14 @@ class LocalCacheRepository(
             canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
             canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
         )
+    }
+
+    private fun MatrixChatMessage.previewSenderName(): String? {
+        return if (isOwn) {
+            OWN_MESSAGE_PREVIEW_SENDER
+        } else {
+            sender.takeIf { it.isNotBlank() }
+        }
     }
 
     private fun OutgoingEnvelopeEntity.toOutgoingTextEnvelopeOrNull(): OutgoingTextEnvelope? {
@@ -390,7 +432,12 @@ class LocalCacheRepository(
     }
 
     private companion object {
+        val RoomSummaryComparator = compareByDescending<MatrixRoomSummary> { it.lastMessageAtMillis }
+            .thenBy { it.displayName.lowercase(Locale.ROOT) }
+            .thenBy { it.id }
+
         const val EVENT_ID_PREFIX = "$"
         const val LOCAL_MESSAGE_ID_PREFIX = "local:"
+        const val OWN_MESSAGE_PREVIEW_SENDER = "You"
     }
 }

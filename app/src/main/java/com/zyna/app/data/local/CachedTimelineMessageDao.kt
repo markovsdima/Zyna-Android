@@ -16,6 +16,15 @@ interface CachedTimelineMessageDao {
     )
     fun observeRoomMessages(userId: String, roomId: String): Flow<List<CachedTimelineMessageEntity>>
 
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId AND roomId = :roomId
+        ORDER BY timestampMillis ASC, id ASC
+        """
+    )
+    suspend fun roomMessagesSnapshot(userId: String, roomId: String): List<CachedTimelineMessageEntity>
+
     @Query("DELETE FROM timeline_messages WHERE userId = :userId AND roomId = :roomId")
     suspend fun clearRoomMessages(userId: String, roomId: String)
 

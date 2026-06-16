@@ -89,7 +89,10 @@ class GlassBackdropController(
         tmpTargetRoot.offset(tmpPoint.x, tmpPoint.y)
 
         ensureRegions()
-        val region = findRegionFor(tmpTargetRoot) ?: return
+        val region = findRegionFor(tmpTargetRoot) ?: run {
+            canvas.drawColor(style.tintColor)
+            return
+        }
         region.updateIfNeeded(backdropSource, root, style, contentVersion)
         region.draw(canvas, tmpTargetRoot, localBounds)
     }
@@ -135,7 +138,7 @@ class GlassBackdropController(
 
         forEachSurface { surface ->
             val view = surface.view
-            if (!view.isShown || view.alpha <= 0f || view.width <= 0 || view.height <= 0) {
+            if (!surface.shouldCaptureBackdrop || view.width <= 0 || view.height <= 0) {
                 return@forEachSurface
             }
             if (!view.offsetInRoot(root, tmpPoint)) {
@@ -211,6 +214,8 @@ class GlassBackdropController(
 interface GlassBackdropSurface {
     val view: View
     val glassStyle: GlassStyle
+    val shouldCaptureBackdrop: Boolean
+        get() = view.isShown && view.alpha > 0f
 }
 
 /** Cached backing content for one merged root-relative capture area. */

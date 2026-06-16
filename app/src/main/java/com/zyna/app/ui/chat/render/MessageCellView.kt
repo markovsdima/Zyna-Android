@@ -6,11 +6,14 @@ import android.graphics.RectF
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import kotlin.math.max
 import kotlin.math.min
 
 internal class MessageCellView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+    private val contextCancelDistance = touchSlop * 2f
     private val bubbleRenderer = BubbleRenderer(density)
     private val textRenderer = TextMessageRenderer(context)
     private val contentRenderers: List<MessageContentRenderer> = listOf(textRenderer)
@@ -24,8 +27,26 @@ internal class MessageCellView(context: Context) : View(context) {
     private var lastMeasuredWidth = 0
     private var lastTouchX = 0f
     private var lastTouchY = 0f
+    private var lastTouchRawX = 0f
+    private var lastTouchRawY = 0f
+    private var downTouchX = 0f
+    private var downTouchY = 0f
+    private var isContextMenuCandidate = false
+    private var isContextMenuPreviewing = false
+    private var isContextMenuOpened = false
+    private var isContextMenuSourceHidden = false
+    private var isDrawingContextMenuCopy = false
 
-    var onContextMenuRequested: ((message: MessageRenderModel, bubbleBoundsInScreen: RectF) -> Unit)? = null
+    var onContextMenuPreviewRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
+    var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
+    var onContextMenuGestureEvent: ((action: Int, rawX: Float, rawY: Float) -> Unit)? = null
+
+    private val beginContextMenuPreviewRunnable = Runnable {
+        beginContextMenuPreview()
+    }
+    private val openContextMenuRunnable = Runnable {
+        openContextMenu()
+    }
 
     private val outerHorizontalPadding = 12.dpToPx(density)
     private val outerTopPadding = 2.dpToPx(density)
@@ -38,20 +59,9 @@ internal class MessageCellView(context: Context) : View(context) {
     private val maxTextMaxWidth = 520.dpToPx(density)
 
     init {
-        isLongClickable = true
+        isClickable = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
         setWillNotDraw(false)
-        setOnLongClickListener {
-            val model = renderModel ?: return@setOnLongClickListener false
-            val callback = onContextMenuRequested ?: return@setOnLongClickListener false
-            if (hitTest(lastTouchX, lastTouchY) != MessageHitTarget.BUBBLE) {
-                return@setOnLongClickListener false
-            }
-            bubbleBoundsInScreen(screenBubbleRect)
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-            callback(model, screenBubbleRect)
-            true
-        }
     }
 
     fun bind(model: MessageRenderModel, theme: MessageRenderTheme) {
@@ -76,6 +86,9 @@ internal class MessageCellView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        if (isContextMenuSourceHidden && !isDrawingContextMenuCopy) {
+            return
+        }
         val model = renderModel ?: return
         val theme = renderTheme ?: return
         val currentLayout = layout ?: buildLayout(lastMeasuredWidth.takeIf { it > 0 } ?: width).also {
@@ -99,8 +112,61 @@ internal class MessageCellView(context: Context) : View(context) {
         if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_MOVE) {
             lastTouchX = event.x
             lastTouchY = event.y
+            lastTouchRawX = event.rawX
+            lastTouchRawY = event.rawY
+        }
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (hitTest(event.x, event.y) == MessageHitTarget.BUBBLE && renderModel != null) {
+                    downTouchX = event.x
+                    downTouchY = event.y
+                    isContextMenuCandidate = true
+                    isContextMenuPreviewing = false
+                    isContextMenuOpened = false
+                    removeCallbacks(beginContextMenuPreviewRunnable)
+                    removeCallbacks(openContextMenuRunnable)
+                    postDelayed(beginContextMenuPreviewRunnable, CONTEXT_MENU_PREVIEW_DELAY_MS)
+                    postDelayed(openContextMenuRunnable, ViewConfiguration.getLongPressTimeout().toLong())
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (isContextMenuCandidate && !isContextMenuPreviewing && movedPastTouchSlop(event.x, event.y)) {
+                    cancelContextMenuCandidate()
+                }
+                if (isContextMenuPreviewing && !isContextMenuOpened && movedPastContextCancelDistance(event.x, event.y)) {
+                    cancelContextMenuCandidate()
+                    return true
+                }
+                if (isContextMenuPreviewing || isContextMenuOpened) {
+                    onContextMenuGestureEvent?.invoke(event.actionMasked, event.rawX, event.rawY)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_CANCEL -> {
+                val wasContextMenuGesture = isContextMenuPreviewing || isContextMenuOpened
+                removeCallbacks(beginContextMenuPreviewRunnable)
+                removeCallbacks(openContextMenuRunnable)
+                if (wasContextMenuGesture) {
+                    onContextMenuGestureEvent?.invoke(event.actionMasked, event.rawX, event.rawY)
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                }
+                resetContextMenuTouchState()
+                if (wasContextMenuGesture) {
+                    return true
+                }
+            }
         }
         return super.onTouchEvent(event)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(beginContextMenuPreviewRunnable)
+        removeCallbacks(openContextMenuRunnable)
+        resetContextMenuTouchState()
+        isContextMenuSourceHidden = false
+        super.onDetachedFromWindow()
     }
 
     fun hitTest(x: Float, y: Float): MessageHitTarget {
@@ -117,6 +183,106 @@ internal class MessageCellView(context: Context) : View(context) {
         out.set(currentLayout.bubbleRect)
         out.offset(screenLocation[0].toFloat(), screenLocation[1].toFloat())
         return true
+    }
+
+    fun setContextMenuSourceHidden(hidden: Boolean) {
+        if (isContextMenuSourceHidden == hidden) {
+            return
+        }
+        isContextMenuSourceHidden = hidden
+        invalidate()
+    }
+
+    fun drawForContextMenu(canvas: Canvas) {
+        val wasDrawingContextMenuCopy = isDrawingContextMenuCopy
+        isDrawingContextMenuCopy = true
+        try {
+            draw(canvas)
+        } finally {
+            isDrawingContextMenuCopy = wasDrawingContextMenuCopy
+        }
+    }
+
+    private fun beginContextMenuPreview() {
+        if (!isContextMenuCandidate || isContextMenuPreviewing || movedPastTouchSlop(lastTouchX, lastTouchY)) {
+            return
+        }
+        val request = buildContextMenuRequest() ?: run {
+            cancelContextMenuCandidate()
+            return
+        }
+        val didBegin = onContextMenuPreviewRequested?.invoke(request) ?: false
+        if (!didBegin) {
+            cancelContextMenuCandidate()
+            return
+        }
+        isContextMenuPreviewing = true
+        parent?.requestDisallowInterceptTouchEvent(true)
+    }
+
+    private fun openContextMenu() {
+        if (!isContextMenuCandidate) {
+            return
+        }
+        if (!isContextMenuPreviewing) {
+            beginContextMenuPreview()
+        }
+        if (!isContextMenuPreviewing || isContextMenuOpened) {
+            return
+        }
+        val request = buildContextMenuRequest() ?: run {
+            cancelContextMenuCandidate()
+            return
+        }
+        val didOpen = onContextMenuRequested?.invoke(request) ?: false
+        if (!didOpen) {
+            cancelContextMenuCandidate()
+            return
+        }
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        isContextMenuOpened = true
+    }
+
+    private fun buildContextMenuRequest(): MessageContextMenuRequest? {
+        val model = renderModel ?: return null
+        if (!bubbleBoundsInScreen(screenBubbleRect)) {
+            return null
+        }
+        return MessageContextMenuRequest(
+            cell = this,
+            message = model,
+            bubbleBoundsInScreen = RectF(screenBubbleRect),
+            touchRawX = lastTouchRawX,
+            touchRawY = lastTouchRawY
+        )
+    }
+
+    private fun movedPastTouchSlop(x: Float, y: Float): Boolean {
+        val dx = x - downTouchX
+        val dy = y - downTouchY
+        return dx * dx + dy * dy > touchSlop * touchSlop
+    }
+
+    private fun movedPastContextCancelDistance(x: Float, y: Float): Boolean {
+        val dx = x - downTouchX
+        val dy = y - downTouchY
+        return dx * dx + dy * dy > contextCancelDistance * contextCancelDistance
+    }
+
+    private fun cancelContextMenuCandidate() {
+        removeCallbacks(beginContextMenuPreviewRunnable)
+        removeCallbacks(openContextMenuRunnable)
+        if (isContextMenuPreviewing || isContextMenuOpened) {
+            onContextMenuGestureEvent?.invoke(MotionEvent.ACTION_CANCEL, lastTouchRawX, lastTouchRawY)
+            parent?.requestDisallowInterceptTouchEvent(false)
+        }
+        resetContextMenuTouchState()
+    }
+
+    private fun resetContextMenuTouchState() {
+        isContextMenuCandidate = false
+        isContextMenuPreviewing = false
+        isContextMenuOpened = false
     }
 
     private fun buildLayout(width: Int): MessageCellLayout {
@@ -209,3 +375,13 @@ private data class MessageCellLayout(
     val renderer: MessageContentRenderer,
     val contentLayout: MessageContentLayout
 )
+
+internal data class MessageContextMenuRequest(
+    val cell: MessageCellView,
+    val message: MessageRenderModel,
+    val bubbleBoundsInScreen: RectF,
+    val touchRawX: Float,
+    val touchRawY: Float
+)
+
+private const val CONTEXT_MENU_PREVIEW_DELAY_MS = 90L

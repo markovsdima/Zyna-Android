@@ -26,6 +26,7 @@ import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
+import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
 import com.zyna.app.ui.chat.render.RenderDeliveryState
@@ -147,22 +148,27 @@ private fun ChatMessageList(
     AndroidView(
         modifier = modifier,
         factory = { context ->
-            GlassChatLayout(context).apply {
-                recyclerView.adapter = ChatMessageAdapter(messageTheme)
-                onLoadOlderMessages = onLoadOlder
-                inputBar.onSendMessage = onSendMessage
-                setPalette(palette)
-                setPaginationState(
-                    isLoadingOlder = isLoadingOlder,
-                    canLoadOlder = canLoadOlder && !isLoading
-                )
-                setEmptyState(messages.isEmpty(), isLoading)
-                setComposerState(
-                    isSending = isSendingMessage,
-                    errorMessage = sendErrorMessage,
-                    errorColor = sendErrorColor
-                )
-            }
+            val chatLayout = GlassChatLayout(context)
+            chatLayout.recyclerView.adapter = ChatMessageAdapter(
+                messageTheme = messageTheme,
+                onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
+                onContextMenuRequested = chatLayout::showMessageContextMenu,
+                onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
+            )
+            chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.setPalette(palette)
+            chatLayout.setPaginationState(
+                isLoadingOlder = isLoadingOlder,
+                canLoadOlder = canLoadOlder && !isLoading
+            )
+            chatLayout.setEmptyState(messages.isEmpty(), isLoading)
+            chatLayout.setComposerState(
+                isSending = isSendingMessage,
+                errorMessage = sendErrorMessage,
+                errorColor = sendErrorColor
+            )
+            chatLayout
         },
         update = { chatLayout ->
             chatLayout.setPalette(palette)
@@ -181,6 +187,9 @@ private fun ChatMessageList(
 
             val recyclerView = chatLayout.recyclerView
             val adapter = recyclerView.adapter as ChatMessageAdapter
+            adapter.onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture
+            adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
+            adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
             val displayedMessages = messages.asReversed()
             val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
             val nextNewestMessageId = displayedMessages.firstOrNull()?.id
@@ -225,14 +234,23 @@ private fun chatGlassPalette(): GlassPalette {
 }
 
 private class ChatMessageAdapter(
-    var messageTheme: MessageRenderTheme
+    var messageTheme: MessageRenderTheme,
+    var onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
+    var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
+    var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
         return ChatMessageViewHolder(parent)
     }
 
     override fun onBindViewHolder(holder: ChatMessageViewHolder, position: Int) {
-        holder.bind(getItem(position).toRenderModel(), messageTheme)
+        holder.bind(
+            message = getItem(position).toRenderModel(),
+            theme = messageTheme,
+            onContextMenuPreviewRequested = onContextMenuPreviewRequested,
+            onContextMenuRequested = onContextMenuRequested,
+            onContextMenuGestureEvent = onContextMenuGestureEvent
+        )
     }
 }
 
@@ -246,7 +264,16 @@ private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder
 ) {
     private val messageView = itemView as MessageCellView
 
-    fun bind(message: MessageRenderModel, theme: MessageRenderTheme) {
+    fun bind(
+        message: MessageRenderModel,
+        theme: MessageRenderTheme,
+        onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
+        onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
+        onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit
+    ) {
+        messageView.onContextMenuPreviewRequested = onContextMenuPreviewRequested
+        messageView.onContextMenuRequested = onContextMenuRequested
+        messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
         messageView.bind(message, theme)
     }
 }

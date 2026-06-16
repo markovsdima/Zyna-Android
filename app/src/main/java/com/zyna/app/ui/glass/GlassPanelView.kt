@@ -23,6 +23,18 @@ class GlassPanelView @JvmOverloads constructor(
     override val view: View
         get() = this
 
+    var captureBackdropWhenTransparent: Boolean = false
+        set(value) {
+            if (field == value) {
+                return
+            }
+            field = value
+            controller.invalidateRegions()
+        }
+
+    override val shouldCaptureBackdrop: Boolean
+        get() = isShown && (alpha > 0f || captureBackdropWhenTransparent)
+
     override var glassStyle: GlassStyle = defaultStyle()
         set(value) {
             if (field == value) {

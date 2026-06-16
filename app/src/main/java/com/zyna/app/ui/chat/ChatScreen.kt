@@ -1,11 +1,6 @@
 package com.zyna.app.ui.chat
 
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.view.Gravity
 import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.TextView
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +24,11 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
+import com.zyna.app.ui.chat.render.MessageCellView
+import com.zyna.app.ui.chat.render.MessageContent
+import com.zyna.app.ui.chat.render.MessageRenderModel
+import com.zyna.app.ui.chat.render.MessageRenderTheme
+import com.zyna.app.ui.chat.render.RenderDeliveryState
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
 import java.time.Instant
@@ -135,20 +135,20 @@ private fun ChatMessageList(
     onSendMessage: (String) -> Boolean,
     modifier: Modifier = Modifier
 ) {
-    val colors = ChatMessageColors(
-        ownBubble = MaterialTheme.colorScheme.primaryContainer.toArgb(),
-        ownText = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
-        ownMetadata = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
-        otherBubble = MaterialTheme.colorScheme.surfaceVariant.toArgb(),
-        otherText = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
-        otherMetadata = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
+    val messageTheme = MessageRenderTheme(
+        outgoingBubble = MaterialTheme.colorScheme.primaryContainer.toArgb(),
+        outgoingText = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
+        outgoingMetadata = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
+        incomingBubble = MaterialTheme.colorScheme.surfaceVariant.toArgb(),
+        incomingText = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
+        incomingMetadata = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
     )
 
     AndroidView(
         modifier = modifier,
         factory = { context ->
             GlassChatLayout(context).apply {
-                recyclerView.adapter = ChatMessageAdapter(colors)
+                recyclerView.adapter = ChatMessageAdapter(messageTheme)
                 onLoadOlderMessages = onLoadOlder
                 inputBar.onSendMessage = onSendMessage
                 setPalette(palette)
@@ -193,8 +193,8 @@ private fun ChatMessageList(
             val wasAtBottom = firstVisiblePosition != RecyclerView.NO_POSITION &&
                 firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
             val wasEmpty = adapter.itemCount == 0
-            val colorsChanged = adapter.colors != colors
-            adapter.colors = colors
+            val themeChanged = adapter.messageTheme != messageTheme
+            adapter.messageTheme = messageTheme
             adapter.submitList(displayedMessages) {
                 if (displayedMessages.isNotEmpty()) {
                     if (wasEmpty || (wasAtBottom && hasNewerMessage)) {
@@ -204,7 +204,7 @@ private fun ChatMessageList(
                 chatLayout.invalidateGlassContent()
                 chatLayout.prefetchOlderMessagesIfNeeded()
             }
-            if (colorsChanged) {
+            if (themeChanged) {
                 adapter.notifyDataSetChanged()
             }
         }
@@ -224,103 +224,49 @@ private fun chatGlassPalette(): GlassPalette {
     )
 }
 
-private data class ChatMessageColors(
-    val ownBubble: Int,
-    val ownText: Int,
-    val ownMetadata: Int,
-    val otherBubble: Int,
-    val otherText: Int,
-    val otherMetadata: Int
-)
-
 private class ChatMessageAdapter(
-    var colors: ChatMessageColors
+    var messageTheme: MessageRenderTheme
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
         return ChatMessageViewHolder(parent)
     }
 
     override fun onBindViewHolder(holder: ChatMessageViewHolder, position: Int) {
-        holder.bind(getItem(position), colors)
+        holder.bind(getItem(position).toRenderModel(), messageTheme)
     }
 }
 
 private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
-    LinearLayout(parent.context).apply {
-        orientation = LinearLayout.HORIZONTAL
+    MessageCellView(parent.context).apply {
         layoutParams = RecyclerView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
-        ).apply {
-            bottomMargin = parent.context.dpToPx(8)
-        }
+        )
     }
 ) {
-    private val row = itemView as LinearLayout
-    private val maxContentWidth = parent.context.chatBubbleTextMaxWidthPx()
-    private val bubble = LinearLayout(parent.context).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(
-            context.dpToPx(14),
-            context.dpToPx(10),
-            context.dpToPx(14),
-            context.dpToPx(10)
-        )
-        layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        )
-    }
-    private val senderView = TextView(parent.context).apply {
-        setTypeface(typeface, Typeface.BOLD)
-        textSize = 12f
-        maxLines = 1
-        ellipsize = android.text.TextUtils.TruncateAt.END
-        maxWidth = maxContentWidth
-    }
-    private val bodyView = TextView(parent.context).apply {
-        textSize = 16f
-        maxWidth = maxContentWidth
-    }
-    private val timeView = TextView(parent.context).apply {
-        textSize = 11f
-        gravity = Gravity.END
-        maxWidth = maxContentWidth
-    }
+    private val messageView = itemView as MessageCellView
 
-    init {
-        bubble.addView(senderView)
-        bubble.addView(bodyView)
-        bubble.addView(timeView)
-        row.addView(bubble)
-    }
-
-    fun bind(message: MatrixChatMessage, colors: ChatMessageColors) {
-        row.gravity = if (message.isOwn) Gravity.END else Gravity.START
-
-        val backgroundColor = if (message.isOwn) colors.ownBubble else colors.otherBubble
-        val textColor = if (message.isOwn) colors.ownText else colors.otherText
-        val metadataColor = if (message.isOwn) colors.ownMetadata else colors.otherMetadata
-        bubble.background = GradientDrawable().apply {
-            cornerRadius = itemView.context.dpToPx(18).toFloat()
-            setColor(backgroundColor)
-        }
-
-        senderView.text = if (message.isOwn) "You" else message.sender
-        senderView.setTextColor(metadataColor)
-        bodyView.text = message.body
-        bodyView.setTextColor(textColor)
-        timeView.text = message.formatMessageMetadata()
-        timeView.setTextColor(metadataColor)
+    fun bind(message: MessageRenderModel, theme: MessageRenderTheme) {
+        messageView.bind(message, theme)
     }
 }
 
-private fun MatrixChatMessage.formatMessageMetadata(): String {
-    val time = timestampMillis.formatMessageTime()
-    return when (deliveryState) {
-        MatrixMessageDeliveryState.SENT -> time
-        MatrixMessageDeliveryState.SENDING -> "$time - sending"
-        MatrixMessageDeliveryState.FAILED -> "$time - failed"
+private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
+    return MessageRenderModel(
+        id = id,
+        senderText = if (isOwn) "You" else sender,
+        content = MessageContent.Text(body),
+        timestampText = timestampMillis.formatMessageTime(),
+        isOutgoing = isOwn,
+        deliveryState = deliveryState.toRenderDeliveryState()
+    )
+}
+
+private fun MatrixMessageDeliveryState.toRenderDeliveryState(): RenderDeliveryState {
+    return when (this) {
+        MatrixMessageDeliveryState.SENT -> RenderDeliveryState.SENT
+        MatrixMessageDeliveryState.SENDING -> RenderDeliveryState.SENDING
+        MatrixMessageDeliveryState.FAILED -> RenderDeliveryState.FAILED
     }
 }
 
@@ -342,16 +288,4 @@ private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage
     override fun areContentsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {
         return oldItem == newItem
     }
-}
-
-private fun android.content.Context.dpToPx(dp: Int): Int {
-    return (dp * resources.displayMetrics.density).toInt()
-}
-
-private fun android.content.Context.chatBubbleTextMaxWidthPx(): Int {
-    val screenWidth = resources.displayMetrics.widthPixels
-    val horizontalChrome = dpToPx(96)
-    return (screenWidth - horizontalChrome)
-        .coerceAtLeast(dpToPx(180))
-        .coerceAtMost(dpToPx(520))
 }

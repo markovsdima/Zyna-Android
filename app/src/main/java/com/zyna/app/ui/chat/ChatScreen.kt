@@ -51,7 +51,10 @@ fun ChatScreen(
     onRefresh: () -> Unit,
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
-    onSendMessage: (String) -> Boolean = { false }
+    onSendMessage: (String) -> Boolean = { false },
+    onRetryOutgoingEnvelope: (String) -> Unit = {},
+    onDiscardOutgoingEnvelope: (String) -> Unit = {},
+    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
 ) {
     val glassPalette = chatGlassPalette()
     val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
@@ -114,6 +117,9 @@ fun ChatScreen(
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
                 onSendMessage = onSendMessage,
+                onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
+                onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
+                onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
@@ -134,6 +140,9 @@ private fun ChatMessageList(
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean,
+    onRetryOutgoingEnvelope: (String) -> Unit,
+    onDiscardOutgoingEnvelope: (String) -> Unit,
+    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val messageTheme = MessageRenderTheme(
@@ -156,6 +165,9 @@ private fun ChatMessageList(
                 onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
             )
             chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
+            chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
+            chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.setPalette(palette)
             chatLayout.setPaginationState(
@@ -173,6 +185,9 @@ private fun ChatMessageList(
         update = { chatLayout ->
             chatLayout.setPalette(palette)
             chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
+            chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
+            chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
@@ -285,7 +300,10 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         content = MessageContent.Text(body),
         timestampText = timestampMillis.formatMessageTime(),
         isOutgoing = isOwn,
-        deliveryState = deliveryState.toRenderDeliveryState()
+        deliveryState = deliveryState.toRenderDeliveryState(),
+        outgoingEnvelopeId = outgoingEnvelopeId,
+        canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
+        canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
     )
 }
 

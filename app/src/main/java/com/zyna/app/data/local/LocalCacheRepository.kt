@@ -154,6 +154,59 @@ class LocalCacheRepository(
         )
     }
 
+    suspend fun retryFailedOutgoingTextEnvelope(
+        userId: String,
+        roomId: String,
+        envelopeId: String
+    ): Boolean {
+        return outgoingDao.markFailedTextEnvelopeQueued(
+            userId = userId,
+            roomId = roomId,
+            id = envelopeId,
+            updatedAtMillis = System.currentTimeMillis()
+        ) > 0
+    }
+
+    suspend fun debugMarkOutgoingTextEnvelopeFailed(
+        userId: String,
+        roomId: String,
+        envelopeId: String
+    ): Boolean {
+        return outgoingDao.debugMarkActiveTextEnvelopeFailed(
+            userId = userId,
+            roomId = roomId,
+            id = envelopeId,
+            failureMessage = "Debug forced send failure",
+            updatedAtMillis = System.currentTimeMillis()
+        ) > 0
+    }
+
+    suspend fun discardFailedOutgoingTextEnvelope(
+        userId: String,
+        roomId: String,
+        envelopeId: String
+    ): Boolean {
+        return database.withTransaction {
+            val envelope = outgoingDao.failedTextEnvelope(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId
+            )
+            val didDelete = outgoingDao.deleteFailedTextEnvelope(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId
+            ) > 0
+            if (didDelete && envelope != null) {
+                val hiddenIds = listOfNotNull(envelope.transactionId, envelope.eventId)
+                if (hiddenIds.isNotEmpty()) {
+                    messageDao.deleteMessagesByIds(userId, roomId, hiddenIds)
+                }
+            }
+            didDelete
+        }
+    }
+
     suspend fun outgoingTextDispatchCandidates(
         userId: String,
         envelopeIds: Set<String>? = null
@@ -284,6 +337,7 @@ class LocalCacheRepository(
 
     private fun OutgoingEnvelopeEntity.toChatMessageOrNull(): MatrixChatMessage? {
         if (kind != OutgoingEnvelopeKind.TEXT.name) return null
+        val state = transportState.toOutgoingTransportState()
 
         return MatrixChatMessage(
             id = "outgoing:$id",
@@ -291,7 +345,10 @@ class LocalCacheRepository(
             body = body,
             timestampMillis = createdAtMillis,
             isOwn = true,
-            deliveryState = transportState.toOutgoingDeliveryState()
+            deliveryState = state.toOutgoingDeliveryState(),
+            outgoingEnvelopeId = id,
+            canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
+            canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
         )
     }
 
@@ -321,8 +378,8 @@ class LocalCacheRepository(
             .getOrDefault(OutgoingTransportState.FAILED)
     }
 
-    private fun String.toOutgoingDeliveryState(): MatrixMessageDeliveryState {
-        return when (toOutgoingTransportState()) {
+    private fun OutgoingTransportState.toOutgoingDeliveryState(): MatrixMessageDeliveryState {
+        return when (this) {
             OutgoingTransportState.QUEUED,
             OutgoingTransportState.SENDING,
             OutgoingTransportState.RETRYING -> MatrixMessageDeliveryState.SENDING

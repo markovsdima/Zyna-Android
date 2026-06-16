@@ -24,9 +24,11 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.zyna.app.BuildConfig
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
+import com.zyna.app.ui.chat.render.RenderDeliveryState
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -297,6 +299,19 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             if (message.copyableText() != null) {
                 add(MessageContextMenuAction.COPY)
             }
+            if (message.outgoingEnvelopeId != null && message.canRetryOutgoingEnvelope) {
+                add(MessageContextMenuAction.RETRY_SEND)
+            }
+            if (message.outgoingEnvelopeId != null && message.canDiscardOutgoingEnvelope) {
+                add(MessageContextMenuAction.REMOVE_FAILED_SEND)
+            }
+            if (
+                BuildConfig.DEBUG &&
+                message.outgoingEnvelopeId != null &&
+                message.deliveryState != RenderDeliveryState.FAILED
+            ) {
+                add(MessageContextMenuAction.DEBUG_MARK_FAILED)
+            }
         }
 
         actions.forEachIndexed { index, action ->
@@ -326,7 +341,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             ellipsize = TextUtils.TruncateAt.END
             minWidth = 156.dpToPx(density)
             minHeight = 44.dpToPx(density)
-            setTextColor(palette.text)
+            setTextColor(action.textColor(palette))
             setPadding(
                 16.dpToPx(density),
                 0,
@@ -424,7 +439,8 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         for (index in 0 until menuContainer.childCount) {
             val child = menuContainer.getChildAt(index)
             if (child is TextView) {
-                child.setTextColor(nextPalette.text)
+                val action = child.tag as? MessageContextMenuAction
+                child.setTextColor(action?.textColor(nextPalette) ?: nextPalette.text)
             } else if (child is MenuDivider) {
                 child.setPalette(nextPalette)
             }
@@ -597,9 +613,17 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
 }
 
 internal enum class MessageContextMenuAction(
-    val title: String
+    val title: String,
+    val isDestructive: Boolean = false
 ) {
-    COPY("Copy")
+    COPY("Copy"),
+    RETRY_SEND("Retry Send"),
+    REMOVE_FAILED_SEND("Remove Failed Send", true),
+    DEBUG_MARK_FAILED("Debug Mark Failed")
+}
+
+private fun MessageContextMenuAction.textColor(palette: GlassPalette): Int {
+    return if (isDestructive) DESTRUCTIVE_TEXT_COLOR else palette.text
 }
 
 private class MenuDivider(
@@ -646,6 +670,7 @@ private const val CELL_PRESSED_SCALE = 0.96f
 private const val PREVIEW_SHRINK_DURATION_MS = 170L
 private const val OPEN_ANIMATION_DURATION_MS = 260L
 private const val DISMISS_ANIMATION_DURATION_MS = 170L
+private val DESTRUCTIVE_TEXT_COLOR = Color.rgb(211, 47, 47)
 
 private fun defaultMenuPalette(): GlassPalette {
     return GlassPalette(

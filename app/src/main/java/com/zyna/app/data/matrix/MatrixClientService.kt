@@ -78,7 +78,10 @@ data class MatrixChatMessage(
     val body: String,
     val timestampMillis: Long,
     val isOwn: Boolean,
-    val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT
+    val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
+    val outgoingEnvelopeId: String? = null,
+    val canRetryOutgoingEnvelope: Boolean = false,
+    val canDiscardOutgoingEnvelope: Boolean = false
 )
 
 class MatrixClientService(

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
+import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
@@ -306,6 +307,98 @@ class AppViewModel(
         }
 
         return true
+    }
+
+    fun retryOutgoingEnvelope(envelopeId: String) {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+
+        viewModelScope.launch {
+            try {
+                val didRetry = localCacheRepository.retryFailedOutgoingTextEnvelope(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId
+                )
+                if (!didRetry) {
+                    return@launch
+                }
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = null)
+                }
+                outgoingTextOutboxService.kick(
+                    reason = "manual-retry",
+                    envelopeId = envelopeId
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
+                }
+            }
+        }
+    }
+
+    fun discardOutgoingEnvelope(envelopeId: String) {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+
+        viewModelScope.launch {
+            try {
+                val didDiscard = localCacheRepository.discardFailedOutgoingTextEnvelope(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId
+                )
+                if (!didDiscard) {
+                    return@launch
+                }
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = null)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
+                }
+            }
+        }
+    }
+
+    fun debugMarkOutgoingEnvelopeFailed(envelopeId: String) {
+        if (!BuildConfig.DEBUG) {
+            return
+        }
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+
+        viewModelScope.launch {
+            try {
+                localCacheRepository.debugMarkOutgoingTextEnvelopeFailed(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
+                }
+            }
+        }
     }
 
     fun loadOlderChatMessages() {

@@ -29,6 +29,9 @@ class GlassChatLayout @JvmOverloads constructor(
     val recyclerView = RecyclerView(context)
     val inputBar = GlassInputBarView(context, glassController)
     var onLoadOlderMessages: () -> Unit = {}
+    var onRetryOutgoingEnvelope: (String) -> Unit = {}
+    var onDiscardOutgoingEnvelope: (String) -> Unit = {}
+    var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
 
     private val emptyView = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -329,6 +332,15 @@ class GlassChatLayout @JvmOverloads constructor(
     ) {
         when (action) {
             MessageContextMenuAction.COPY -> copyMessageText(message)
+            MessageContextMenuAction.RETRY_SEND -> {
+                message.outgoingEnvelopeId?.let(onRetryOutgoingEnvelope)
+            }
+            MessageContextMenuAction.REMOVE_FAILED_SEND -> {
+                message.outgoingEnvelopeId?.let(onDiscardOutgoingEnvelope)
+            }
+            MessageContextMenuAction.DEBUG_MARK_FAILED -> {
+                message.outgoingEnvelopeId?.let(onDebugMarkOutgoingEnvelopeFailed)
+            }
         }
     }
 

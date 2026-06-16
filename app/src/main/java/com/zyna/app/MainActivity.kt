@@ -49,6 +49,9 @@ class MainActivity : ComponentActivity() {
                     onCloseChat = appViewModel::closeChat,
                     onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
                     onSendChatMessage = appViewModel::sendChatMessage,
+                    onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
+                    onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
+                    onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
                     onLogout = appViewModel::logout
                 )
             }
@@ -135,6 +138,9 @@ fun AppPreview() {
             onCloseChat = {},
             onLoadOlderChatMessages = {},
             onSendChatMessage = { false },
+            onRetryOutgoingEnvelope = {},
+            onDiscardOutgoingEnvelope = {},
+            onDebugMarkOutgoingEnvelopeFailed = {},
             onLogout = {}
         )
     }

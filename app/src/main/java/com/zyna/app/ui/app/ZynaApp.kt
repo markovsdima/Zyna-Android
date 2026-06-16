@@ -18,6 +18,9 @@ fun ZynaApp(
     onCloseChat: () -> Unit,
     onLoadOlderChatMessages: () -> Unit,
     onSendChatMessage: (String) -> Boolean,
+    onRetryOutgoingEnvelope: (String) -> Unit,
+    onDiscardOutgoingEnvelope: (String) -> Unit,
+    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
     onLogout: () -> Unit
 ) {
     when (val route = state.route) {
@@ -52,7 +55,10 @@ fun ZynaApp(
             onRefresh = onRefreshChat,
             onBack = onCloseChat,
             onLoadOlder = onLoadOlderChatMessages,
-            onSendMessage = onSendChatMessage
+            onSendMessage = onSendChatMessage,
+            onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
+            onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
+            onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
         )
     }
 }

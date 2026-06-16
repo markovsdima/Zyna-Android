@@ -139,6 +139,80 @@ interface OutgoingEnvelopeDao {
     @Query(
         """
         UPDATE outgoing_envelopes
+        SET transportState = 'FAILED',
+            failureMessage = :failureMessage,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+            AND kind = 'TEXT'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+        """
+    )
+    suspend fun debugMarkActiveTextEnvelopeFailed(
+        userId: String,
+        roomId: String,
+        id: String,
+        failureMessage: String?,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE outgoing_envelopes
+        SET transportState = 'QUEUED',
+            failureMessage = NULL,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+            AND kind = 'TEXT'
+            AND transportState = 'FAILED'
+        """
+    )
+    suspend fun markFailedTextEnvelopeQueued(
+        userId: String,
+        roomId: String,
+        id: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        DELETE FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+            AND kind = 'TEXT'
+            AND transportState = 'FAILED'
+        """
+    )
+    suspend fun deleteFailedTextEnvelope(
+        userId: String,
+        roomId: String,
+        id: String
+    ): Int
+
+    @Query(
+        """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+            AND kind = 'TEXT'
+            AND transportState = 'FAILED'
+        LIMIT 1
+        """
+    )
+    suspend fun failedTextEnvelope(
+        userId: String,
+        roomId: String,
+        id: String
+    ): OutgoingEnvelopeEntity?
+
+    @Query(
+        """
+        UPDATE outgoing_envelopes
         SET transportState = 'RETIRED',
             updatedAtMillis = :updatedAtMillis
         WHERE userId = :userId

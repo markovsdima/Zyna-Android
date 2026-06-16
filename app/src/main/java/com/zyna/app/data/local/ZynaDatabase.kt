@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import net.zetetic.database.sqlcipher.SQLiteConnection
 import net.zetetic.database.sqlcipher.SQLiteDatabaseHook
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
@@ -11,15 +13,18 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 @Database(
     entities = [
         CachedRoomEntity::class,
-        CachedTimelineMessageEntity::class
+        CachedTimelineMessageEntity::class,
+        OutgoingEnvelopeEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
     abstract fun cachedRoomDao(): CachedRoomDao
 
     abstract fun cachedTimelineMessageDao(): CachedTimelineMessageDao
+
+    abstract fun outgoingEnvelopeDao(): OutgoingEnvelopeDao
 
     companion object {
         fun create(context: Context, passphraseStore: LocalDatabasePassphraseStore): ZynaDatabase {
@@ -41,6 +46,7 @@ abstract class ZynaDatabase : RoomDatabase() {
                         false
                     )
                 )
+                .addMigrations(MIGRATION_1_2)
                 .build()
         }
 
@@ -65,6 +71,54 @@ abstract class ZynaDatabase : RoomDatabase() {
         private const val DATABASE_NAME = "zyna-secure-cache.db"
         private const val LEGACY_PLAINTEXT_DATABASE_NAME = "zyna.db"
         private const val LEGACY_UNSCOPED_DATABASE_NAME = "zyna-secure.db"
+
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    ALTER TABLE timeline_messages
+                    ADD COLUMN deliveryState TEXT NOT NULL DEFAULT 'SENT'
+                    """.trimIndent()
+                )
+                db.execSQL("DELETE FROM timeline_messages WHERE id LIKE 'local:%'")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS outgoing_envelopes (
+                        userId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        id TEXT NOT NULL,
+                        kind TEXT NOT NULL,
+                        transportState TEXT NOT NULL,
+                        transactionId TEXT NOT NULL,
+                        eventId TEXT,
+                        body TEXT NOT NULL,
+                        createdAtMillis INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        failureMessage TEXT,
+                        PRIMARY KEY(userId, roomId, id)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_outgoing_envelopes_userId_roomId_transportState
+                    ON outgoing_envelopes(userId, roomId, transportState)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS index_outgoing_envelopes_userId_roomId_transactionId
+                    ON outgoing_envelopes(userId, roomId, transactionId)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_outgoing_envelopes_userId_roomId_eventId
+                    ON outgoing_envelopes(userId, roomId, eventId)
+                    """.trimIndent()
+                )
+            }
+        }
     }
 }
 

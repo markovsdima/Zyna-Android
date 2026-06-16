@@ -20,5 +20,6 @@ data class CachedTimelineMessageEntity(
     val body: String,
     val timestampMillis: Long,
     val isOwn: Boolean,
+    val deliveryState: String,
     val updatedAtMillis: Long
 )

@@ -10,6 +10,9 @@ import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.outgoing.OutgoingTextEnvelope
+import com.zyna.app.data.outgoing.OutgoingTransportState
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,6 +65,8 @@ class AppViewModel(
     private var chatCacheJob: Job? = null
     private var roomCacheJob: Job? = null
     private var roomCacheUserId: String? = null
+    private var outgoingDispatchJob: Job? = null
+    private val outgoingDispatchInFlight = mutableSetOf<String>()
 
     init {
         viewModelScope.launch {
@@ -78,8 +83,9 @@ class AppViewModel(
                 ) {
                     stopChatTimeline()
                 }
-                if (nextUserId == null) {
+                if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     stopRoomCache()
+                    stopOutgoingDispatch()
                 }
 
                 _uiState.update { current ->
@@ -124,6 +130,7 @@ class AppViewModel(
                     val userId = matrixState.userId
                     if (matrixClientService.isRecoveryComplete(userId)) {
                         refreshRooms()
+                        dispatchPendingOutgoingText(userId)
                     }
                 }
             }
@@ -237,10 +244,13 @@ class AppViewModel(
 
     fun sendChatMessage(body: String): Boolean {
         val route = _uiState.value.route as? AppRoute.Chat ?: return false
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
         val text = body.trim()
         if (text.isEmpty() || _uiState.value.isSendingChatMessage) {
             return false
         }
+        val envelopeId = "text:${UUID.randomUUID()}"
+        val transactionId = matrixClientService.prepareTransactionId()
 
         _uiState.update {
             if (!it.isRouteForRoom(route.roomId)) {
@@ -253,7 +263,26 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                matrixClientService.sendTextMessage(route.roomId, text)
+                localCacheRepository.createOutgoingTextEnvelope(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    body = text
+                )
+                dispatchOutgoingText(
+                    OutgoingTextEnvelope(
+                        userId = userId,
+                        roomId = route.roomId,
+                        id = envelopeId,
+                        transportState = OutgoingTransportState.QUEUED,
+                        transactionId = transactionId,
+                        eventId = null,
+                        body = text,
+                        createdAtMillis = System.currentTimeMillis(),
+                        failureMessage = null
+                    )
+                )
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it
@@ -265,6 +294,12 @@ class AppViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                localCacheRepository.markOutgoingDispatchFailed(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId,
+                    failureMessage = error.message ?: error.javaClass.simpleName
+                )
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it
@@ -426,6 +461,77 @@ class AppViewModel(
         chatCacheJob = null
         chatPaginationJob?.cancel()
         chatPaginationJob = null
+    }
+
+    private fun dispatchPendingOutgoingText(userId: String) {
+        if (outgoingDispatchJob?.isActive == true) {
+            return
+        }
+
+        outgoingDispatchJob = viewModelScope.launch {
+            try {
+                val candidates = localCacheRepository.outgoingTextDispatchCandidates(userId)
+                for (candidate in candidates) {
+                    if (_uiState.value.matrixState.userIdOrNull() != userId) {
+                        return@launch
+                    }
+                    try {
+                        dispatchOutgoingText(candidate)
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        Log.w(TAG, "Failed to dispatch outgoing text", error)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to scan outgoing text outbox", error)
+            }
+        }
+    }
+
+    private suspend fun dispatchOutgoingText(envelope: OutgoingTextEnvelope) {
+        if (!outgoingDispatchInFlight.add(envelope.id)) {
+            return
+        }
+
+        try {
+            localCacheRepository.markOutgoingDispatchStarted(
+                userId = envelope.userId,
+                roomId = envelope.roomId,
+                envelopeId = envelope.id
+            )
+            val eventId = matrixClientService.sendTextMessage(
+                roomId = envelope.roomId,
+                body = envelope.body,
+                transactionId = envelope.transactionId
+            )
+            localCacheRepository.markOutgoingDispatchAccepted(
+                userId = envelope.userId,
+                roomId = envelope.roomId,
+                envelopeId = envelope.id,
+                eventId = eventId
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            localCacheRepository.markOutgoingDispatchFailed(
+                userId = envelope.userId,
+                roomId = envelope.roomId,
+                envelopeId = envelope.id,
+                failureMessage = error.message ?: error.javaClass.simpleName
+            )
+            throw error
+        } finally {
+            outgoingDispatchInFlight.remove(envelope.id)
+        }
+    }
+
+    private fun stopOutgoingDispatch() {
+        outgoingDispatchJob?.cancel()
+        outgoingDispatchJob = null
+        outgoingDispatchInFlight.clear()
     }
 
     private fun startRoomCache(userId: String) {

@@ -19,6 +19,28 @@ interface CachedTimelineMessageDao {
     @Query("DELETE FROM timeline_messages WHERE userId = :userId AND roomId = :roomId")
     suspend fun clearRoomMessages(userId: String, roomId: String)
 
+    @Query(
+        """
+        DELETE FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id IN (:ids)
+        """
+    )
+    suspend fun deleteMessagesByIds(userId: String, roomId: String, ids: List<String>)
+
+    @Query(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM timeline_messages
+            WHERE userId = :userId
+                AND roomId = :roomId
+                AND id = :id
+        )
+        """
+    )
+    suspend fun hasMessage(userId: String, roomId: String, id: String): Boolean
+
     @Query("DELETE FROM timeline_messages WHERE userId = :userId")
     suspend fun clearMessages(userId: String)
 

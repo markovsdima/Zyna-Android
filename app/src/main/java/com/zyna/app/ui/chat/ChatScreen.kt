@@ -28,6 +28,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
 import java.time.Instant
@@ -309,8 +310,17 @@ private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder
         senderView.setTextColor(metadataColor)
         bodyView.text = message.body
         bodyView.setTextColor(textColor)
-        timeView.text = message.timestampMillis.formatMessageTime()
+        timeView.text = message.formatMessageMetadata()
         timeView.setTextColor(metadataColor)
+    }
+}
+
+private fun MatrixChatMessage.formatMessageMetadata(): String {
+    val time = timestampMillis.formatMessageTime()
+    return when (deliveryState) {
+        MatrixMessageDeliveryState.SENT -> time
+        MatrixMessageDeliveryState.SENDING -> "$time - sending"
+        MatrixMessageDeliveryState.FAILED -> "$time - failed"
     }
 }
 

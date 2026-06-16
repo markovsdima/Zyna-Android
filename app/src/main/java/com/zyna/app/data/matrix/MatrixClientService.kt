@@ -37,7 +37,6 @@ import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.TaskHandle
-import org.matrix.rustcomponents.sdk.TextMessageContent
 import org.matrix.rustcomponents.sdk.Timeline
 import org.matrix.rustcomponents.sdk.TimelineConfiguration
 import org.matrix.rustcomponents.sdk.TimelineDiff
@@ -46,8 +45,9 @@ import org.matrix.rustcomponents.sdk.TimelineFocus
 import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
-import org.matrix.rustcomponents.sdk.contentWithoutRelationFromMessage
+import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
+import org.json.JSONObject
 import uniffi.matrix_sdk.BackupDownloadStrategy
 import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
 
@@ -66,12 +66,19 @@ data class MatrixRoomSummary(
     val avatarUrl: String?
 )
 
+enum class MatrixMessageDeliveryState {
+    SENT,
+    SENDING,
+    FAILED
+}
+
 data class MatrixChatMessage(
     val id: String,
     val sender: String,
     val body: String,
     val timestampMillis: Long,
-    val isOwn: Boolean
+    val isOwn: Boolean,
+    val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT
 )
 
 class MatrixClientService(
@@ -314,32 +321,30 @@ class MatrixClientService(
         }
     }
 
-    suspend fun sendTextMessage(roomId: String, body: String) = withContext(Dispatchers.IO) {
+    fun prepareTransactionId(): String {
+        return genTransactionId()
+    }
+
+    suspend fun sendTextMessage(
+        roomId: String,
+        body: String,
+        transactionId: String
+    ): String = withContext(Dispatchers.IO) {
         val text = body.trim()
         require(text.isNotEmpty()) { "Message is empty" }
-        val activeTimeline = synchronized(activeTimelineLock) {
-            activeRoomTimelines[roomId]
-        } ?: error("Chat timeline is not ready")
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val content = JSONObject()
+            .put("msgtype", "m.text")
+            .put("body", text)
+            .put(TRANSACTION_ID_CONTENT_KEY, transactionId)
+            .toString()
 
-        val messageContent = MessageContent(
-            msgType = MessageType.Text(
-                TextMessageContent(
-                    body = text,
-                    formatted = null
-                )
-            ),
-            body = text,
-            isEdited = false,
-            mentions = null
+        room.sendRawWithTransactionIdReturningEventId(
+            eventType = "m.room.message",
+            content = content,
+            transactionId = transactionId
         )
-
-        try {
-            contentWithoutRelationFromMessage(messageContent).use { content ->
-                activeTimeline.send(content).destroy()
-            }
-        } finally {
-            messageContent.destroy()
-        }
     }
 
     private fun MutableList<MatrixChatMessage?>.applyTimelineDiff(diff: TimelineDiff) {
@@ -546,6 +551,7 @@ class MatrixClientService(
         const val TIMELINE_INTERACTIVE_BACKFILL_PAGES = 3
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
+        const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
     }
 }
 

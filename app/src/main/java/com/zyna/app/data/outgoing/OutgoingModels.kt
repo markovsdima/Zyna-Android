@@ -1,7 +1,8 @@
 package com.zyna.app.data.outgoing
 
 enum class OutgoingEnvelopeKind {
-    TEXT
+    TEXT,
+    REDACTION
 }
 
 enum class OutgoingTransportState {
@@ -21,6 +22,21 @@ data class OutgoingTextEnvelope(
     val transactionId: String,
     val eventId: String?,
     val body: String,
+    val createdAtMillis: Long,
+    val failureMessage: String?
+)
+
+data class OutgoingRedactionEnvelope(
+    val userId: String,
+    val roomId: String,
+    val id: String,
+    val transportState: OutgoingTransportState,
+    val transactionId: String,
+    val redactionEventId: String?,
+    val targetEventId: String,
+    val targetTransactionId: String?,
+    val targetBody: String,
+    val targetContentType: String,
     val createdAtMillis: Long,
     val failureMessage: String?
 )

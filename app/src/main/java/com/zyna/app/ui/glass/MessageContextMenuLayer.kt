@@ -299,6 +299,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             if (message.copyableText() != null) {
                 add(MessageContextMenuAction.COPY)
             }
+            if (message.redactionTargetMessageId != null) {
+                add(MessageContextMenuAction.DELETE)
+            }
             if (message.outgoingEnvelopeId != null && message.canRetryOutgoingEnvelope) {
                 add(MessageContextMenuAction.RETRY_SEND)
             }
@@ -617,6 +620,7 @@ internal enum class MessageContextMenuAction(
     val isDestructive: Boolean = false
 ) {
     COPY("Copy"),
+    DELETE("Delete", true),
     RETRY_SEND("Retry Send"),
     REMOVE_FAILED_SEND("Remove Failed Send", true),
     DEBUG_MARK_FAILED("Debug Mark Failed")

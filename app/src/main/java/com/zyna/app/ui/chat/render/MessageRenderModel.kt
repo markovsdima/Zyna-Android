@@ -8,6 +8,7 @@ internal data class MessageRenderModel(
     val isOutgoing: Boolean,
     val deliveryState: RenderDeliveryState,
     val outgoingEnvelopeId: String? = null,
+    val redactionTargetMessageId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
     val attributes: MessageRenderAttributes = MessageRenderAttributes(),

@@ -18,22 +18,22 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import org.matrix.rustcomponents.sdk.ClientException
 
-data class OutgoingTextOutboxFailure(
+data class OutgoingOutboxFailure(
     val roomId: String,
     val message: String
 )
 
-class OutgoingTextOutboxService(
+class OutgoingOutboxService(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository
 ) {
     private val retryBackoff = OutgoingRetryBackoff<String>()
     private val inFlight = OutgoingInFlightTracker<String>()
-    private val _sendFailures = MutableSharedFlow<OutgoingTextOutboxFailure>(
+    private val _sendFailures = MutableSharedFlow<OutgoingOutboxFailure>(
         extraBufferCapacity = 16
     )
 
-    val sendFailures: SharedFlow<OutgoingTextOutboxFailure> = _sendFailures.asSharedFlow()
+    val sendFailures: SharedFlow<OutgoingOutboxFailure> = _sendFailures.asSharedFlow()
 
     private var scope: CoroutineScope? = null
     private var stateJob: Job? = null
@@ -148,26 +148,41 @@ class OutgoingTextOutboxService(
 
     private suspend fun runScan(reason: String, envelopeIds: Set<String>?) {
         val userId = syncingUserIdOrNull() ?: return
-        val candidates = localCacheRepository.outgoingTextDispatchCandidates(
+        val textCandidates = localCacheRepository.outgoingTextDispatchCandidates(
             userId = userId,
             envelopeIds = envelopeIds
         )
-        if (candidates.isEmpty()) {
+        val redactionCandidates = localCacheRepository.outgoingRedactionDispatchCandidates(
+            userId = userId,
+            envelopeIds = envelopeIds
+        )
+        if (textCandidates.isEmpty() && redactionCandidates.isEmpty()) {
             Log.d(TAG, "outbox scan reason=$reason count=0")
             return
         }
 
-        Log.d(TAG, "outbox scan reason=$reason count=${candidates.size}")
-        for (candidate in candidates) {
+        Log.d(
+            TAG,
+            "outbox scan reason=$reason text=${textCandidates.size} " +
+                "redactions=${redactionCandidates.size}"
+        )
+        for (candidate in textCandidates) {
             currentCoroutineContext().ensureActive()
             if (!canScan()) {
                 return
             }
-            sendIfEligible(candidate, reason)
+            sendTextIfEligible(candidate, reason)
+        }
+        for (candidate in redactionCandidates) {
+            currentCoroutineContext().ensureActive()
+            if (!canScan()) {
+                return
+            }
+            sendRedactionIfEligible(candidate, reason)
         }
     }
 
-    private suspend fun sendIfEligible(candidate: OutgoingTextEnvelope, reason: String) {
+    private suspend fun sendTextIfEligible(candidate: OutgoingTextEnvelope, reason: String) {
         if (!inFlight.begin(candidate.id)) {
             return
         }
@@ -214,6 +229,60 @@ class OutgoingTextOutboxService(
         }
     }
 
+    private suspend fun sendRedactionIfEligible(
+        candidate: OutgoingRedactionEnvelope,
+        reason: String
+    ) {
+        if (!inFlight.begin(candidate.id)) {
+            return
+        }
+
+        try {
+            when (val decision = attemptDecision(candidate.transportState, candidate.id)) {
+                AttemptDecision.Send -> Unit
+                is AttemptDecision.Wait -> {
+                    Log.d(
+                        TAG,
+                        "outbox redaction wait reason=$reason envelope=${candidate.id} " +
+                            "state=${candidate.transportState} delayMillis=${decision.delayMillis}"
+                    )
+                    scheduleWake(decision.delayMillis, reason = "delayed-$reason")
+                    return
+                }
+                AttemptDecision.Skip -> return
+            }
+
+            localCacheRepository.markOutgoingDispatchStarted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id
+            )
+            val redactionEventId = matrixClientService.redactMessage(
+                roomId = candidate.roomId,
+                eventId = candidate.targetEventId,
+                transactionId = candidate.transactionId
+            )
+            retryBackoff.clear(candidate.id)
+            localCacheRepository.markOutgoingRedactionDispatchAccepted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id,
+                redactionEventId = redactionEventId
+            )
+            Log.d(
+                TAG,
+                "outbox redacted envelope=${candidate.id} target=${candidate.targetEventId} " +
+                    "event=$redactionEventId"
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            completeRedactionFailure(candidate, error)
+        } finally {
+            inFlight.end(candidate.id)
+        }
+    }
+
     private suspend fun completeFailure(candidate: OutgoingTextEnvelope, error: Throwable) {
         val failureMessage = error.message ?: error.javaClass.simpleName
         if (error.isRetryableTransportError()) {
@@ -237,7 +306,7 @@ class OutgoingTextOutboxService(
             failureMessage = failureMessage
         )
         _sendFailures.tryEmit(
-            OutgoingTextOutboxFailure(
+            OutgoingOutboxFailure(
                 roomId = candidate.roomId,
                 message = failureMessage
             )
@@ -245,12 +314,67 @@ class OutgoingTextOutboxService(
         Log.w(TAG, "outbox failed envelope=${candidate.id}", error)
     }
 
+    private suspend fun completeRedactionFailure(
+        candidate: OutgoingRedactionEnvelope,
+        error: Throwable
+    ) {
+        val failureMessage = error.message ?: error.javaClass.simpleName
+        if (error.isAlreadyRedactedError()) {
+            retryBackoff.clear(candidate.id)
+            localCacheRepository.markOutgoingRedactionDispatchResolved(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id
+            )
+            Log.d(TAG, "outbox redaction already resolved envelope=${candidate.id}")
+            return
+        }
+
+        if (error.isRetryableTransportError()) {
+            localCacheRepository.markOutgoingDispatchRetrying(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id,
+                failureMessage = failureMessage
+            )
+            val delayMillis = retryBackoff.scheduleRetry(candidate.id)
+            scheduleWake(delayMillis, reason = "retryable-redaction-failure")
+            Log.d(
+                TAG,
+                "outbox redaction retrying envelope=${candidate.id} delayMillis=$delayMillis"
+            )
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        localCacheRepository.markOutgoingRedactionDispatchTerminalFailure(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            envelopeId = candidate.id,
+            failureMessage = failureMessage
+        )
+        _sendFailures.tryEmit(
+            OutgoingOutboxFailure(
+                roomId = candidate.roomId,
+                message = failureMessage
+            )
+        )
+        Log.w(TAG, "outbox redaction failed envelope=${candidate.id}", error)
+    }
+
     private fun attemptDecision(envelope: OutgoingTextEnvelope): AttemptDecision {
-        return when (envelope.transportState) {
+        return attemptDecision(envelope.transportState, envelope.id)
+    }
+
+    private fun attemptDecision(
+        transportState: OutgoingTransportState,
+        envelopeId: String
+    ): AttemptDecision {
+        return when (transportState) {
             OutgoingTransportState.QUEUED,
             OutgoingTransportState.SENDING -> AttemptDecision.Send
             OutgoingTransportState.RETRYING -> {
-                val delay = retryBackoff.waitDelayMillis(envelope.id)
+                val delay = retryBackoff.waitDelayMillis(envelopeId)
                 if (delay == null) AttemptDecision.Send else AttemptDecision.Wait(delay)
             }
             OutgoingTransportState.SENT,
@@ -277,7 +401,7 @@ class OutgoingTextOutboxService(
     }
 
     private companion object {
-        const val TAG = "OutgoingTextOutbox"
+        const val TAG = "OutgoingOutbox"
     }
 }
 
@@ -384,4 +508,16 @@ private fun Throwable.isRetryableTransportError(): Boolean {
         "too many requests",
         "limit_exceeded"
     ).any { text.contains(it) }
+}
+
+private fun Throwable.isAlreadyRedactedError(): Boolean {
+    val text = generateSequence(this) { it.cause }
+        .joinToString(separator = "\n") { error ->
+            "${error.javaClass.name}\n${error.message.orEmpty()}"
+        }
+        .lowercase()
+
+    return text.contains("already redacted") ||
+        text.contains("event already redacted") ||
+        text.contains("was already redacted")
 }

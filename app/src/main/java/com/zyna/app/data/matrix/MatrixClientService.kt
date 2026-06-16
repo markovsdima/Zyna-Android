@@ -447,6 +447,23 @@ class MatrixClientService(
         )
     }
 
+    suspend fun redactMessage(
+        roomId: String,
+        eventId: String,
+        transactionId: String,
+        reason: String? = null
+    ): String = withContext(Dispatchers.IO) {
+        require(eventId.isNotBlank()) { "Message event id is empty" }
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+
+        room.redactWithTransactionIdReturningEventId(
+            eventId = eventId,
+            reason = reason,
+            transactionId = transactionId
+        )
+    }
+
     suspend fun sendReadReceipt(
         roomId: String,
         eventId: String

@@ -35,6 +35,32 @@ interface CachedTimelineMessageDao {
 
     @Query(
         """
+        UPDATE timeline_messages
+        SET body = :body,
+            contentType = :contentType,
+            deliveryState = :deliveryState,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND (
+                id IN (:ids)
+                OR eventId IN (:ids)
+                OR transactionId IN (:ids)
+            )
+        """
+    )
+    suspend fun updateMessagesByIds(
+        userId: String,
+        roomId: String,
+        ids: List<String>,
+        body: String,
+        contentType: String,
+        deliveryState: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
         SELECT EXISTS(
             SELECT 1 FROM timeline_messages
             WHERE userId = :userId

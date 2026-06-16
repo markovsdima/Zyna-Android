@@ -57,6 +57,7 @@ fun ChatScreen(
     onSendMessage: (String) -> Boolean = { false },
     onRetryOutgoingEnvelope: (String) -> Unit = {},
     onDiscardOutgoingEnvelope: (String) -> Unit = {},
+    onRedactMessage: (String) -> Unit = {},
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {},
     onVisibleReadReceiptCandidate: (
         roomId: String,
@@ -128,6 +129,7 @@ fun ChatScreen(
                 onSendMessage = onSendMessage,
                 onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
                 onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
+                onRedactMessage = onRedactMessage,
                 onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
                 onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
                 modifier = Modifier
@@ -153,6 +155,7 @@ private fun ChatMessageList(
     onSendMessage: (String) -> Boolean,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
+    onRedactMessage: (String) -> Unit,
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
     onVisibleReadReceiptCandidate: (
         roomId: String,
@@ -183,6 +186,7 @@ private fun ChatMessageList(
             chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
+            chatLayout.onRedactMessage = onRedactMessage
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.onEvaluateVisibleReadReceiptCandidate = {
                 chatLayout.evaluateVisibleReadReceiptCandidate { eventId, canEstablishBaseline ->
@@ -208,6 +212,7 @@ private fun ChatMessageList(
             chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
+            chatLayout.onRedactMessage = onRedactMessage
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.onEvaluateVisibleReadReceiptCandidate = {
                 chatLayout.evaluateVisibleReadReceiptCandidate { eventId, canEstablishBaseline ->
@@ -393,9 +398,24 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
         outgoingEnvelopeId = outgoingEnvelopeId,
+        redactionTargetMessageId = redactionTargetMessageId(),
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
         canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
     )
+}
+
+private fun MatrixChatMessage.redactionTargetMessageId(): String? {
+    return if (
+        isOwn &&
+            eventId != null &&
+            outgoingEnvelopeId == null &&
+            contentType != MatrixMessageContentType.REDACTED &&
+            deliveryState == MatrixMessageDeliveryState.SENT
+    ) {
+        id
+    } else {
+        null
+    }
 }
 
 private fun MatrixMessageDeliveryState.toRenderDeliveryState(): RenderDeliveryState {

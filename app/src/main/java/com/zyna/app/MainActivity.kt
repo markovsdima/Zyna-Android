@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
                 factory = AppViewModelFactory(
                     matrixClientService = appContainer.matrixClientService,
                     localCacheRepository = appContainer.localCacheRepository,
-                    outgoingTextOutboxService = appContainer.outgoingTextOutboxService
+                    outgoingOutboxService = appContainer.outgoingOutboxService
                 )
             )
             val state by appViewModel.uiState.collectAsState()
@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
                     onSendChatMessage = appViewModel::sendChatMessage,
                     onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
                     onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
+                    onRedactMessage = appViewModel::redactMessage,
                     onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
                     onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
                     onLogout = appViewModel::logout
@@ -141,6 +142,7 @@ fun AppPreview() {
             onSendChatMessage = { false },
             onRetryOutgoingEnvelope = {},
             onDiscardOutgoingEnvelope = {},
+            onRedactMessage = {},
             onDebugMarkOutgoingEnvelopeFailed = {},
             onVisibleReadReceiptCandidate = { _, _, _ -> },
             onLogout = {}

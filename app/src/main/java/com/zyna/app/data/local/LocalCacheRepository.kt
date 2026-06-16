@@ -7,6 +7,7 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
+import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingTextEnvelope
 import com.zyna.app.data.outgoing.OutgoingTransportState
 import java.util.Locale
@@ -113,6 +114,10 @@ class LocalCacheRepository(
                     transportState = OutgoingTransportState.QUEUED.name,
                     transactionId = transactionId,
                     eventId = null,
+                    targetEventId = null,
+                    targetTransactionId = null,
+                    targetBody = null,
+                    targetContentType = null,
                     body = body,
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -121,6 +126,46 @@ class LocalCacheRepository(
             )
             updateRoomPreview(userId, roomId, now)
         }
+    }
+
+    suspend fun createOutgoingRedactionEnvelope(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        transactionId: String,
+        targetMessage: MatrixChatMessage
+    ): Boolean {
+        val targetEventId = targetMessage.eventId ?: return false
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.upsertEnvelope(
+                OutgoingEnvelopeEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = envelopeId,
+                    kind = OutgoingEnvelopeKind.REDACTION.name,
+                    transportState = OutgoingTransportState.QUEUED.name,
+                    transactionId = transactionId,
+                    eventId = null,
+                    targetEventId = targetEventId,
+                    targetTransactionId = targetMessage.transactionId,
+                    targetBody = targetMessage.body,
+                    targetContentType = targetMessage.contentType.name,
+                    body = "",
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    failureMessage = null
+                )
+            )
+            markCachedMessageRedacted(
+                userId = userId,
+                roomId = roomId,
+                ids = targetMessage.identityIds(),
+                updatedAtMillis = now
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+        return true
     }
 
     suspend fun markOutgoingDispatchStarted(userId: String, roomId: String, envelopeId: String) {
@@ -274,6 +319,86 @@ class LocalCacheRepository(
             envelopeIds.mapNotNull { id -> outgoingDao.textDispatchCandidate(userId, id) }
         }
         return entities.mapNotNull { it.toOutgoingTextEnvelopeOrNull() }
+    }
+
+    suspend fun outgoingRedactionDispatchCandidates(
+        userId: String,
+        envelopeIds: Set<String>? = null
+    ): List<OutgoingRedactionEnvelope> {
+        val entities = if (envelopeIds == null) {
+            outgoingDao.redactionDispatchCandidates(userId)
+        } else {
+            envelopeIds.mapNotNull { id -> outgoingDao.redactionDispatchCandidate(userId, id) }
+        }
+        return entities.mapNotNull { it.toOutgoingRedactionEnvelopeOrNull() }
+    }
+
+    suspend fun markOutgoingRedactionDispatchAccepted(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        redactionEventId: String
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.markDispatchAccepted(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                eventId = redactionEventId,
+                updatedAtMillis = now
+            )
+            outgoingDao.deleteEnvelope(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
+    suspend fun markOutgoingRedactionDispatchResolved(
+        userId: String,
+        roomId: String,
+        envelopeId: String
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.deleteEnvelope(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
+    suspend fun markOutgoingRedactionDispatchTerminalFailure(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        failureMessage: String?
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val envelope = outgoingDao.redactionDispatchCandidate(userId, envelopeId)
+            if (envelope != null) {
+                restoreCachedMessageFromRedaction(envelope, now)
+            }
+            outgoingDao.markDispatchFailed(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                failureMessage = failureMessage,
+                updatedAtMillis = now
+            )
+            outgoingDao.deleteEnvelope(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
     }
 
     suspend fun clearAll() {
@@ -456,6 +581,43 @@ class LocalCacheRepository(
         )
     }
 
+    private suspend fun markCachedMessageRedacted(
+        userId: String,
+        roomId: String,
+        ids: List<String>,
+        updatedAtMillis: Long
+    ) {
+        if (ids.isEmpty()) return
+
+        messageDao.updateMessagesByIds(
+            userId = userId,
+            roomId = roomId,
+            ids = ids,
+            body = REDACTED_MESSAGE_BODY,
+            contentType = MatrixMessageContentType.REDACTED.name,
+            deliveryState = MatrixMessageDeliveryState.SENT.name,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
+
+    private suspend fun restoreCachedMessageFromRedaction(
+        envelope: OutgoingEnvelopeEntity,
+        updatedAtMillis: Long
+    ) {
+        val ids = listOfNotNull(envelope.targetEventId, envelope.targetTransactionId)
+        if (ids.isEmpty()) return
+
+        messageDao.updateMessagesByIds(
+            userId = envelope.userId,
+            roomId = envelope.roomId,
+            ids = ids,
+            body = envelope.targetBody ?: "",
+            contentType = envelope.targetContentType ?: MatrixMessageContentType.TEXT.name,
+            deliveryState = MatrixMessageDeliveryState.SENT.name,
+            updatedAtMillis = updatedAtMillis
+        )
+    }
+
     private fun MatrixChatMessage.previewSenderName(): String? {
         return if (isOwn) {
             OWN_MESSAGE_PREVIEW_SENDER
@@ -490,6 +652,26 @@ class LocalCacheRepository(
         )
     }
 
+    private fun OutgoingEnvelopeEntity.toOutgoingRedactionEnvelopeOrNull(): OutgoingRedactionEnvelope? {
+        if (kind != OutgoingEnvelopeKind.REDACTION.name) return null
+        val redactionTargetEventId = targetEventId ?: return null
+
+        return OutgoingRedactionEnvelope(
+            userId = userId,
+            roomId = roomId,
+            id = id,
+            transportState = transportState.toOutgoingTransportState(),
+            transactionId = transactionId,
+            redactionEventId = eventId,
+            targetEventId = redactionTargetEventId,
+            targetTransactionId = targetTransactionId,
+            targetBody = targetBody.orEmpty(),
+            targetContentType = targetContentType ?: MatrixMessageContentType.TEXT.name,
+            createdAtMillis = createdAtMillis,
+            failureMessage = failureMessage
+        )
+    }
+
     private fun String.toMatrixDeliveryState(): MatrixMessageDeliveryState {
         return runCatching { MatrixMessageDeliveryState.valueOf(this) }
             .getOrDefault(MatrixMessageDeliveryState.SENT)
@@ -501,6 +683,10 @@ class LocalCacheRepository(
     }
 
     private fun CachedTimelineMessageEntity.identityIds(): List<String> {
+        return listOfNotNull(id, eventId, transactionId)
+    }
+
+    private fun MatrixChatMessage.identityIds(): List<String> {
         return listOfNotNull(id, eventId, transactionId)
     }
 

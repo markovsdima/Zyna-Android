@@ -31,6 +31,7 @@ class GlassChatLayout @JvmOverloads constructor(
     var onLoadOlderMessages: () -> Unit = {}
     var onRetryOutgoingEnvelope: (String) -> Unit = {}
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
+    var onRedactMessage: (String) -> Unit = {}
     var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
     var onEvaluateVisibleReadReceiptCandidate: () -> Unit = {}
 
@@ -351,6 +352,9 @@ class GlassChatLayout @JvmOverloads constructor(
     ) {
         when (action) {
             MessageContextMenuAction.COPY -> copyMessageText(message)
+            MessageContextMenuAction.DELETE -> {
+                message.redactionTargetMessageId?.let(onRedactMessage)
+            }
             MessageContextMenuAction.RETRY_SEND -> {
                 message.outgoingEnvelopeId?.let(onRetryOutgoingEnvelope)
             }

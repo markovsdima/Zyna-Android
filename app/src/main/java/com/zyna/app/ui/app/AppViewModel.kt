@@ -10,8 +10,9 @@ import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
+import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixRoomSummary
-import com.zyna.app.data.outgoing.OutgoingTextOutboxService
+import com.zyna.app.data.outgoing.OutgoingOutboxService
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -76,7 +77,7 @@ private sealed interface PendingReadReceiptSend {
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
-    private val outgoingTextOutboxService: OutgoingTextOutboxService
+    private val outgoingOutboxService: OutgoingOutboxService
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -92,7 +93,7 @@ class AppViewModel(
     private var pendingReadReceiptSend: PendingReadReceiptSend? = null
 
     init {
-        outgoingTextOutboxService.start(viewModelScope)
+        outgoingOutboxService.start(viewModelScope)
 
         viewModelScope.launch {
             matrixClientService.state.collect { matrixState ->
@@ -162,7 +163,7 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
-            outgoingTextOutboxService.sendFailures.collect { failure ->
+            outgoingOutboxService.sendFailures.collect { failure ->
                 _uiState.update {
                     if (!it.isRouteForRoom(failure.roomId)) {
                         it
@@ -230,7 +231,7 @@ class AppViewModel(
                 val userId = matrixClientService.state.value.userIdOrNull() ?: return@launch
                 startRoomListLiveRefresh(userId)
                 refreshRoomsNow()
-                outgoingTextOutboxService.kick(reason = "recovery-complete")
+                outgoingOutboxService.kick(reason = "recovery-complete")
             } catch (error: Throwable) {
                 _uiState.update {
                     it.copy(
@@ -313,7 +314,7 @@ class AppViewModel(
                     transactionId = transactionId,
                     body = text
                 )
-                outgoingTextOutboxService.kick(
+                outgoingOutboxService.kick(
                     reason = "new-envelope",
                     envelopeId = envelopeId
                 )
@@ -361,7 +362,7 @@ class AppViewModel(
                         it
                     } else it.copy(chatSendErrorMessage = null)
                 }
-                outgoingTextOutboxService.kick(
+                outgoingOutboxService.kick(
                     reason = "manual-retry",
                     envelopeId = envelopeId
                 )
@@ -396,6 +397,55 @@ class AppViewModel(
                         it
                     } else it.copy(chatSendErrorMessage = null)
                 }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
+                }
+            }
+        }
+    }
+
+    fun redactMessage(messageId: String) {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        val targetMessage = _uiState.value.chatMessages
+            .firstOrNull { it.id == messageId }
+            ?: return
+        if (
+            !targetMessage.isOwn ||
+            targetMessage.eventId == null ||
+            targetMessage.contentType == MatrixMessageContentType.REDACTED
+        ) {
+            return
+        }
+
+        val envelopeId = "redaction:${UUID.randomUUID()}"
+        val transactionId = matrixClientService.prepareTransactionId()
+        viewModelScope.launch {
+            try {
+                val didCreate = localCacheRepository.createOutgoingRedactionEnvelope(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    targetMessage = targetMessage
+                )
+                if (!didCreate) {
+                    return@launch
+                }
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = null)
+                }
+                outgoingOutboxService.kick(
+                    reason = "new-redaction",
+                    envelopeId = envelopeId
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -826,7 +876,7 @@ class AppViewModel(
 class AppViewModelFactory(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
-    private val outgoingTextOutboxService: OutgoingTextOutboxService
+    private val outgoingOutboxService: OutgoingOutboxService
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
@@ -834,7 +884,7 @@ class AppViewModelFactory(
             return AppViewModel(
                 matrixClientService = matrixClientService,
                 localCacheRepository = localCacheRepository,
-                outgoingTextOutboxService = outgoingTextOutboxService
+                outgoingOutboxService = outgoingOutboxService
             ) as T
         }
         error("Unknown ViewModel class: ${modelClass.name}")

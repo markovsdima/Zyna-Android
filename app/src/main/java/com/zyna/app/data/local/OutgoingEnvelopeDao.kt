@@ -57,6 +57,31 @@ interface OutgoingEnvelopeDao {
 
     @Query(
         """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND kind = 'REDACTION'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+            AND targetEventId IS NOT NULL
+        ORDER BY createdAtMillis ASC, id ASC
+        """
+    )
+    suspend fun redactionDispatchCandidates(userId: String): List<OutgoingEnvelopeEntity>
+
+    @Query(
+        """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND id = :id
+            AND kind = 'REDACTION'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+            AND targetEventId IS NOT NULL
+        LIMIT 1
+        """
+    )
+    suspend fun redactionDispatchCandidate(userId: String, id: String): OutgoingEnvelopeEntity?
+
+    @Query(
+        """
         SELECT transactionId FROM outgoing_envelopes
         WHERE userId = :userId
             AND roomId = :roomId
@@ -223,6 +248,20 @@ interface OutgoingEnvelopeDao {
         roomId: String,
         id: String
     ): OutgoingEnvelopeEntity?
+
+    @Query(
+        """
+        DELETE FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+        """
+    )
+    suspend fun deleteEnvelope(
+        userId: String,
+        roomId: String,
+        id: String
+    ): Int
 
     @Query(
         """

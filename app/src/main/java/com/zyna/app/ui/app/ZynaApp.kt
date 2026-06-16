@@ -20,6 +20,7 @@ fun ZynaApp(
     onSendChatMessage: (String) -> Boolean,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
+    onRedactMessage: (String) -> Unit,
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
     onVisibleReadReceiptCandidate: (
         roomId: String,
@@ -63,6 +64,7 @@ fun ZynaApp(
             onSendMessage = onSendChatMessage,
             onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
+            onRedactMessage = onRedactMessage,
             onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
             onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate
         )

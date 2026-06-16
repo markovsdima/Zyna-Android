@@ -1,6 +1,7 @@
 package com.zyna.app.ui.chat.render
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.RectF
 import android.view.HapticFeedbackConstants
@@ -203,6 +204,45 @@ internal class MessageCellView(context: Context) : View(context) {
         }
     }
 
+    fun capturePaintSplashTarget(root: View): PaintSplashTarget? {
+        val currentLayout = layout ?: return null
+        if (currentLayout.bubbleRect.width() <= 0f || currentLayout.bubbleRect.height() <= 0f) {
+            return null
+        }
+
+        if (!bubbleBoundsInScreen(screenBubbleRect)) {
+            return null
+        }
+
+        val bitmapWidth = currentLayout.bubbleRect.width().toInt().coerceAtLeast(1)
+        val bitmapHeight = currentLayout.bubbleRect.height().toInt().coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.translate(-currentLayout.bubbleRect.left, -currentLayout.bubbleRect.top)
+
+        val wasDrawingContextMenuCopy = isDrawingContextMenuCopy
+        isDrawingContextMenuCopy = true
+        try {
+            draw(canvas)
+        } finally {
+            isDrawingContextMenuCopy = wasDrawingContextMenuCopy
+        }
+
+        val rootLocation = IntArray(2)
+        root.getLocationOnScreen(rootLocation)
+        val boundsInRoot = RectF(screenBubbleRect)
+        boundsInRoot.offset(-rootLocation[0].toFloat(), -rootLocation[1].toFloat())
+
+        return PaintSplashTarget(
+            hideSource = {
+                setContextMenuSourceHidden(true)
+            },
+            bitmap = bitmap,
+            boundsInScreen = RectF(screenBubbleRect),
+            boundsInRoot = boundsInRoot
+        )
+    }
+
     private fun beginContextMenuPreview() {
         if (!isContextMenuCandidate || isContextMenuPreviewing || movedPastTouchSlop(lastTouchX, lastTouchY)) {
             return
@@ -382,6 +422,13 @@ internal data class MessageContextMenuRequest(
     val bubbleBoundsInScreen: RectF,
     val touchRawX: Float,
     val touchRawY: Float
+)
+
+internal data class PaintSplashTarget(
+    val hideSource: () -> Unit,
+    val bitmap: Bitmap,
+    val boundsInScreen: RectF,
+    val boundsInRoot: RectF
 )
 
 private const val CONTEXT_MENU_PREVIEW_DELAY_MS = 90L

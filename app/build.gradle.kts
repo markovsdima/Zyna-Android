@@ -6,6 +6,7 @@ plugins {
 
 android {
     namespace = "com.zyna.app"
+    ndkVersion = "29.0.14206865"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -36,6 +37,11 @@ android {
     buildFeatures {
         buildConfig = true
         compose = true
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
     }
 }
 

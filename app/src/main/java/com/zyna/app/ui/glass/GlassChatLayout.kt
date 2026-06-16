@@ -14,6 +14,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.zyna.app.BuildConfig
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
@@ -65,13 +66,17 @@ class GlassChatLayout @JvmOverloads constructor(
         reverseLayout = true
     }
     private val source = RecyclerViewGlassBackdropSource(recyclerView, palette.background)
+    private val vulkanOverlay = VulkanChatOverlayView(context).apply {
+        setDebugOverlayEnabled(BuildConfig.DEBUG && ENABLE_VULKAN_CHAT_DEBUG_OVERLAY)
+    }
     private val contextMenuLayer = MessageContextMenuLayer(context, glassController).apply {
         onDismissRequested = {
             dismissMessageContextMenu()
         }
         onActionSelected = { message, action ->
-            handleMessageContextAction(message, action)
-            dismissMessageContextMenu()
+            if (handleMessageContextAction(message, action)) {
+                dismissMessageContextMenu()
+            }
         }
     }
 
@@ -104,6 +109,7 @@ class GlassChatLayout @JvmOverloads constructor(
 
         glassController.source = source
         addView(recyclerView)
+        addView(vulkanOverlay)
         addView(emptyView)
         addView(composerErrorView)
         addView(inputBar)
@@ -301,6 +307,10 @@ class GlassChatLayout @JvmOverloads constructor(
             MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
         )
+        vulkanOverlay.measure(
+            MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+        )
         inputBar.measure(
             MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(max(1, height / 2), MeasureSpec.AT_MOST)
@@ -325,12 +335,19 @@ class GlassChatLayout @JvmOverloads constructor(
         val width = right - left
         val height = bottom - top
         recyclerView.layout(0, 0, width, height)
+        vulkanOverlay.layout(0, 0, width, height)
 
         val bottomInset = if (imeBottomInset > 0) imeBottomInset else navBottomInset
         val bottomMargin = 6.dpToPx(density)
         val inputTop = (height - bottomInset - bottomMargin - inputBar.measuredHeight)
             .coerceAtLeast(0)
         inputBar.layout(0, inputTop, width, inputTop + inputBar.measuredHeight)
+        vulkanOverlay.setInputBarBounds(
+            inputBar.left,
+            inputBar.top,
+            inputBar.right,
+            inputBar.bottom
+        )
         val contentBottom = layoutComposerError(inputTop, width)
 
         val emptyWidth = emptyView.measuredWidth
@@ -349,20 +366,41 @@ class GlassChatLayout @JvmOverloads constructor(
     private fun handleMessageContextAction(
         message: MessageRenderModel,
         action: MessageContextMenuAction
-    ) {
-        when (action) {
-            MessageContextMenuAction.COPY -> copyMessageText(message)
+    ): Boolean {
+        return when (action) {
+            MessageContextMenuAction.COPY -> {
+                copyMessageText(message)
+                true
+            }
             MessageContextMenuAction.DELETE -> {
-                message.redactionTargetMessageId?.let(onRedactMessage)
+                val messageId = message.redactionTargetMessageId ?: return true
+                val target = contextMenuLayer.captureSelectedPaintSplashTarget(this)
+                if (target == null) {
+                    onRedactMessage(messageId)
+                    return true
+                }
+                val startBurst = {
+                    dismissMessageContextMenu(animated = false)
+                    target.hideSource()
+                    vulkanOverlay.addPaintSplash(target)
+                    onRedactMessage(messageId)
+                }
+                if (!contextMenuLayer.playSelectedCellDeleteAnticipation(startBurst)) {
+                    startBurst()
+                }
+                false
             }
             MessageContextMenuAction.RETRY_SEND -> {
                 message.outgoingEnvelopeId?.let(onRetryOutgoingEnvelope)
+                true
             }
             MessageContextMenuAction.REMOVE_FAILED_SEND -> {
                 message.outgoingEnvelopeId?.let(onDiscardOutgoingEnvelope)
+                true
             }
             MessageContextMenuAction.DEBUG_MARK_FAILED -> {
                 message.outgoingEnvelopeId?.let(onDebugMarkOutgoingEnvelopeFailed)
+                true
             }
         }
     }
@@ -430,6 +468,7 @@ private class LockableLinearLayoutManager(context: Context) : LinearLayoutManage
     }
 }
 
+private const val ENABLE_VULKAN_CHAT_DEBUG_OVERLAY = true
 private const val LOAD_OLDER_THRESHOLD = 240
 private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L

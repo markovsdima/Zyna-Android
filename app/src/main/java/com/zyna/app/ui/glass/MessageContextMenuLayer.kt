@@ -20,6 +20,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -28,6 +29,7 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
+import com.zyna.app.ui.chat.render.PaintSplashTarget
 import com.zyna.app.ui.chat.render.RenderDeliveryState
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -69,6 +71,11 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private var isMenuOpenRequested = false
     private var hoveredActionView: TextView? = null
     private var selectedCellTargetOffsetY = 0f
+    private var selectedCellAnticipationScale = 1f
+        set(value) {
+            field = value
+            invalidate()
+        }
     private var activationRawX = 0f
     private var activationRawY = 0f
     private var pressProgress = 0f
@@ -208,6 +215,53 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
                 onDismissRequested()
             }
         }
+    }
+
+    fun captureSelectedPaintSplashTarget(root: View): PaintSplashTarget? {
+        val request = selectedRequest ?: return null
+        return request.cell.capturePaintSplashTarget(root)
+    }
+
+    fun playSelectedCellDeleteAnticipation(onEnd: () -> Unit): Boolean {
+        if (visibility != VISIBLE || selectedRequest == null) {
+            return false
+        }
+        animator?.cancel()
+        animator = null
+        val startScale = selectedCellAnticipationScale
+        var didFinish = false
+
+        fun finishOnce() {
+            if (didFinish) {
+                return
+            }
+            didFinish = true
+            onEnd()
+        }
+
+        animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = DELETE_ANTICIPATION_DURATION_MS
+            interpolator = AccelerateInterpolator()
+            addUpdateListener {
+                val animatedProgress = it.animatedValue as Float
+                selectedCellAnticipationScale = lerp(
+                    startScale,
+                    DELETE_ANTICIPATION_SCALE,
+                    animatedProgress
+                )
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: Animator) {
+                    finishOnce()
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    finishOnce()
+                }
+            })
+            start()
+        }
+        return true
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
@@ -384,7 +438,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         val layerCellX = (cellLocation[0] - layerLocation[0]).toFloat()
         val layerCellY = (cellLocation[1] - layerLocation[1]).toFloat()
         val currentOffsetY = selectedCellTargetOffsetY * menuProgress
-        val scale = currentSelectedCellScale()
+        val scale = currentSelectedCellScale() * selectedCellAnticipationScale
         val save = canvas.save()
         canvas.translate(layerCellX, layerCellY + currentOffsetY)
         canvas.scale(
@@ -604,6 +658,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         selectedRequest = null
         selectedMessage = null
         selectedCellTargetOffsetY = 0f
+        selectedCellAnticipationScale = 1f
         visibility = GONE
         pressProgress = 0f
         menuProgress = 0f
@@ -672,6 +727,8 @@ private fun lerp(from: Float, to: Float, progress: Float): Float {
 }
 
 private const val CELL_PRESSED_SCALE = 0.96f
+private const val DELETE_ANTICIPATION_SCALE = 0.95f
+private const val DELETE_ANTICIPATION_DURATION_MS = 80L
 private const val PREVIEW_SHRINK_DURATION_MS = 170L
 private const val OPEN_ANIMATION_DURATION_MS = 260L
 private const val DISMISS_ANIMATION_DURATION_MS = 170L

@@ -21,6 +21,11 @@ fun ZynaApp(
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
+    onVisibleReadReceiptCandidate: (
+        roomId: String,
+        eventId: String?,
+        canEstablishBaseline: Boolean
+    ) -> Unit,
     onLogout: () -> Unit
 ) {
     when (val route = state.route) {
@@ -58,7 +63,8 @@ fun ZynaApp(
             onSendMessage = onSendChatMessage,
             onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
-            onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
+            onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
+            onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate
         )
     }
 }

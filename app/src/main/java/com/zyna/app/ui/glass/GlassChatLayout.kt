@@ -32,6 +32,7 @@ class GlassChatLayout @JvmOverloads constructor(
     var onRetryOutgoingEnvelope: (String) -> Unit = {}
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
     var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
+    var onEvaluateVisibleReadReceiptCandidate: () -> Unit = {}
 
     private val emptyView = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -56,6 +57,9 @@ class GlassChatLayout @JvmOverloads constructor(
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
     private var recyclerAccessibilityBeforeMenu = IMPORTANT_FOR_ACCESSIBILITY_AUTO
+    private val readReceiptCandidateEvaluationRunnable = Runnable {
+        onEvaluateVisibleReadReceiptCandidate()
+    }
     private val chatLayoutManager = LockableLinearLayoutManager(context).apply {
         reverseLayout = true
     }
@@ -84,6 +88,7 @@ class GlassChatLayout @JvmOverloads constructor(
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                     glassController.invalidateBackdrop()
                     maybeLoadOlderMessages()
+                    scheduleVisibleReadReceiptCandidateEvaluation()
                 }
 
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
@@ -91,6 +96,7 @@ class GlassChatLayout @JvmOverloads constructor(
                     if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                         maybeLoadOlderMessages()
                     }
+                    scheduleVisibleReadReceiptCandidateEvaluation()
                 }
             })
         }
@@ -120,6 +126,11 @@ class GlassChatLayout @JvmOverloads constructor(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         ViewCompat.requestApplyInsets(this)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(readReceiptCandidateEvaluationRunnable)
+        super.onDetachedFromWindow()
     }
 
     fun setPalette(newPalette: GlassPalette) {
@@ -239,6 +250,13 @@ class GlassChatLayout @JvmOverloads constructor(
         }
     }
 
+    fun scheduleVisibleReadReceiptCandidateEvaluation(
+        delayMillis: Long = READ_RECEIPT_SCROLL_DEBOUNCE_MS
+    ) {
+        removeCallbacks(readReceiptCandidateEvaluationRunnable)
+        postDelayed(readReceiptCandidateEvaluationRunnable, delayMillis)
+    }
+
     private fun maybeLoadOlderMessages() {
         if (isLoadingOlderMessages || !canLoadOlderMessages) {
             return
@@ -324,6 +342,7 @@ class GlassChatLayout @JvmOverloads constructor(
         updateRecyclerPadding(contentBottom)
         contextMenuLayer.layout(0, 0, width, height)
         glassController.invalidateRegions()
+        scheduleVisibleReadReceiptCandidateEvaluation(READ_RECEIPT_CONTENT_UPDATE_DELAY_MS)
     }
 
     private fun handleMessageContextAction(
@@ -408,6 +427,8 @@ private class LockableLinearLayoutManager(context: Context) : LinearLayoutManage
 
 private const val LOAD_OLDER_THRESHOLD = 240
 private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
+private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L
+private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
 
 private fun defaultPalette(): GlassPalette {
     return GlassPalette(

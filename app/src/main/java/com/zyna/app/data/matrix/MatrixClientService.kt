@@ -1,10 +1,12 @@
 package com.zyna.app.data.matrix
 
 import android.content.Context
+import android.util.Log
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
@@ -34,6 +36,7 @@ import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ProfileDetails
+import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
 import org.matrix.rustcomponents.sdk.RoomListEntriesListener
@@ -422,6 +425,43 @@ class MatrixClientService(
         )
     }
 
+    suspend fun sendReadReceipt(
+        roomId: String,
+        eventId: String
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (eventId.isBlank()) {
+            return@withContext false
+        }
+
+        val activeTimeline = synchronized(activeTimelineLock) {
+            activeRoomTimelines[roomId]
+        } ?: return@withContext false
+
+        try {
+            activeTimeline.sendReadReceipt(
+                receiptType = ReceiptType.READ,
+                eventId = eventId
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "sendReadReceipt(.read) failed event=$eventId", error)
+        }
+
+        try {
+            activeTimeline.sendReadReceipt(
+                receiptType = ReceiptType.FULLY_READ,
+                eventId = eventId
+            )
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "sendReadReceipt(.fullyRead) failed event=$eventId", error)
+            false
+        }
+    }
+
     private fun MutableList<MatrixChatMessage?>.applyTimelineDiff(diff: TimelineDiff) {
         when (diff) {
             is TimelineDiff.Append -> {
@@ -748,6 +788,7 @@ class MatrixClientService(
     )
 
     private companion object {
+        const val TAG = "MatrixClientService"
         const val TIMELINE_PAGE_SIZE = 100
         const val TIMELINE_INITIAL_BACKFILL_PAGES = 5
         const val TIMELINE_INTERACTIVE_BACKFILL_PAGES = 3

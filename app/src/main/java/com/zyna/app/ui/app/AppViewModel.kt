@@ -15,6 +15,7 @@ import com.zyna.app.data.outgoing.OutgoingTextOutboxService
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,6 +56,23 @@ data class AppUiState(
         get() = (matrixState as? MatrixClientState.Error)?.message
 }
 
+private data class VisibleReadReceiptTarget(
+    val roomId: String,
+    val eventId: String
+)
+
+private sealed interface PendingReadReceiptSend {
+    val target: VisibleReadReceiptTarget
+
+    data class Bootstrap(
+        override val target: VisibleReadReceiptTarget
+    ) : PendingReadReceiptSend
+
+    data class Advance(
+        override val target: VisibleReadReceiptTarget
+    ) : PendingReadReceiptSend
+}
+
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
@@ -69,6 +87,9 @@ class AppViewModel(
     private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
     private var roomListLiveUserId: String? = null
+    private var readReceiptJob: Job? = null
+    private var readReceiptBaselineTarget: VisibleReadReceiptTarget? = null
+    private var pendingReadReceiptSend: PendingReadReceiptSend? = null
 
     init {
         outgoingTextOutboxService.start(viewModelScope)
@@ -223,6 +244,7 @@ class AppViewModel(
 
     fun openRoom(room: MatrixRoomSummary) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        resetReadReceiptTracking()
         _uiState.update {
             it.copy(
                 route = AppRoute.Chat(
@@ -453,6 +475,58 @@ class AppViewModel(
         }
     }
 
+    fun updateVisibleReadReceiptCandidate(
+        roomId: String,
+        eventId: String?,
+        canEstablishBaseline: Boolean
+    ) {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        if (route.roomId != roomId) {
+            return
+        }
+        if (eventId.isNullOrBlank() || !eventId.startsWith(EVENT_ID_PREFIX)) {
+            readReceiptJob?.cancel()
+            readReceiptJob = null
+            pendingReadReceiptSend = null
+            return
+        }
+
+        val target = VisibleReadReceiptTarget(
+            roomId = roomId,
+            eventId = eventId
+        )
+
+        if (readReceiptBaselineTarget == null) {
+            if (!canEstablishBaseline) {
+                return
+            }
+            val pendingBootstrap = PendingReadReceiptSend.Bootstrap(target)
+            if (pendingReadReceiptSend == pendingBootstrap) {
+                return
+            }
+
+            scheduleReadReceiptSend(
+                target = target,
+                pending = pendingBootstrap
+            )
+            return
+        }
+
+        if (!shouldAdvanceReadReceipt(target = target)) {
+            return
+        }
+
+        val pendingAdvance = PendingReadReceiptSend.Advance(target)
+        if (pendingReadReceiptSend == pendingAdvance) {
+            return
+        }
+
+        scheduleReadReceiptSend(
+            target = target,
+            pending = pendingAdvance
+        )
+    }
+
     fun logout() {
         stopChatTimeline()
         stopRoomCache()
@@ -560,6 +634,114 @@ class AppViewModel(
         chatCacheJob = null
         chatPaginationJob?.cancel()
         chatPaginationJob = null
+        resetReadReceiptTracking()
+    }
+
+    private fun scheduleReadReceiptSend(
+        target: VisibleReadReceiptTarget,
+        pending: PendingReadReceiptSend
+    ) {
+        readReceiptJob?.cancel()
+        pendingReadReceiptSend = pending
+        readReceiptJob = viewModelScope.launch {
+            delay(READ_RECEIPT_SEND_DELAY_MS)
+
+            val didSend = try {
+                matrixClientService.sendReadReceipt(
+                    roomId = target.roomId,
+                    eventId = target.eventId
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to send read receipt", error)
+                false
+            }
+
+            finishReadReceiptSend(pending, didSend = didSend)
+        }
+    }
+
+    private fun finishReadReceiptSend(
+        pending: PendingReadReceiptSend,
+        didSend: Boolean
+    ) {
+        if (pendingReadReceiptSend == pending) {
+            pendingReadReceiptSend = null
+        }
+
+        if (!didSend) {
+            return
+        }
+
+        when (pending) {
+            is PendingReadReceiptSend.Bootstrap -> {
+                establishReadReceiptBaseline(target = pending.target)
+            }
+            is PendingReadReceiptSend.Advance -> {
+                establishReadReceiptBaseline(target = pending.target)
+            }
+        }
+    }
+
+    private fun shouldAdvanceReadReceipt(target: VisibleReadReceiptTarget): Boolean {
+        val baselineTarget = readReceiptBaselineTarget
+        if (baselineTarget != null && !isReadReceiptTargetNewer(target, reference = baselineTarget)) {
+            return false
+        }
+
+        val pendingTarget = pendingReadReceiptSend?.target
+        if (pendingTarget != null && !isReadReceiptTargetNewer(target, reference = pendingTarget)) {
+            return false
+        }
+
+        return true
+    }
+
+    private fun isReadReceiptTargetNewer(
+        target: VisibleReadReceiptTarget,
+        reference: VisibleReadReceiptTarget
+    ): Boolean {
+        if (target.roomId != reference.roomId || target.eventId == reference.eventId) {
+            return false
+        }
+
+        val targetIndex = messageIndex(eventId = target.eventId)
+        val referenceIndex = messageIndex(eventId = reference.eventId)
+
+        return when {
+            targetIndex != null && referenceIndex != null -> targetIndex > referenceIndex
+            targetIndex != null && referenceIndex == null -> true
+            else -> false
+        }
+    }
+
+    private fun messageIndex(eventId: String): Int? {
+        return _uiState.value.chatMessages.indexOfFirst { it.id == eventId }
+            .takeIf { it >= 0 }
+    }
+
+    private fun establishReadReceiptBaseline(target: VisibleReadReceiptTarget) {
+        val currentBaseline = readReceiptBaselineTarget
+        if (currentBaseline != null && !isReadReceiptTargetNewer(target, reference = currentBaseline)) {
+            return
+        }
+
+        readReceiptBaselineTarget = target
+
+        val pendingTarget = pendingReadReceiptSend?.target
+        if (pendingTarget != null && !isReadReceiptTargetNewer(pendingTarget, reference = target)) {
+            readReceiptJob?.cancel()
+            readReceiptJob = null
+            pendingReadReceiptSend = null
+        }
+    }
+
+    private fun resetReadReceiptTracking() {
+        readReceiptJob?.cancel()
+        readReceiptJob = null
+        readReceiptBaselineTarget = null
+        pendingReadReceiptSend = null
     }
 
     private fun startRoomCache(userId: String) {
@@ -637,6 +819,8 @@ class AppViewModel(
 
     private companion object {
         const val TAG = "AppViewModel"
+        const val READ_RECEIPT_SEND_DELAY_MS = 250L
+        const val EVENT_ID_PREFIX = "$"
     }
 }
 

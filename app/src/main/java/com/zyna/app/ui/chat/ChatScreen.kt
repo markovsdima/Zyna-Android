@@ -35,6 +35,8 @@ import com.zyna.app.ui.glass.GlassPalette
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.max
+import kotlin.math.min
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,7 +56,12 @@ fun ChatScreen(
     onSendMessage: (String) -> Boolean = { false },
     onRetryOutgoingEnvelope: (String) -> Unit = {},
     onDiscardOutgoingEnvelope: (String) -> Unit = {},
-    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
+    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {},
+    onVisibleReadReceiptCandidate: (
+        roomId: String,
+        eventId: String?,
+        canEstablishBaseline: Boolean
+    ) -> Unit = { _, _, _ -> }
 ) {
     val glassPalette = chatGlassPalette()
     val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
@@ -108,6 +115,7 @@ fun ChatScreen(
             }
             else -> ChatMessageList(
                 messages = messages,
+                roomId = roomId,
                 isLoading = isLoading,
                 isLoadingOlder = isLoadingOlder,
                 canLoadOlder = canLoadOlder,
@@ -120,6 +128,7 @@ fun ChatScreen(
                 onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
                 onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
                 onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
+                onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
@@ -131,6 +140,7 @@ fun ChatScreen(
 @Composable
 private fun ChatMessageList(
     messages: List<MatrixChatMessage>,
+    roomId: String,
     isLoading: Boolean,
     isLoadingOlder: Boolean,
     canLoadOlder: Boolean,
@@ -143,6 +153,11 @@ private fun ChatMessageList(
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
+    onVisibleReadReceiptCandidate: (
+        roomId: String,
+        eventId: String?,
+        canEstablishBaseline: Boolean
+    ) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val messageTheme = MessageRenderTheme(
@@ -168,6 +183,11 @@ private fun ChatMessageList(
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
+            chatLayout.onEvaluateVisibleReadReceiptCandidate = {
+                chatLayout.evaluateVisibleReadReceiptCandidate { eventId, canEstablishBaseline ->
+                    onVisibleReadReceiptCandidate(roomId, eventId, canEstablishBaseline)
+                }
+            }
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.setPalette(palette)
             chatLayout.setPaginationState(
@@ -188,6 +208,11 @@ private fun ChatMessageList(
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
+            chatLayout.onEvaluateVisibleReadReceiptCandidate = {
+                chatLayout.evaluateVisibleReadReceiptCandidate { eventId, canEstablishBaseline ->
+                    onVisibleReadReceiptCandidate(roomId, eventId, canEstablishBaseline)
+                }
+            }
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
@@ -227,11 +252,73 @@ private fun ChatMessageList(
                 }
                 chatLayout.invalidateGlassContent()
                 chatLayout.prefetchOlderMessagesIfNeeded()
+                chatLayout.scheduleVisibleReadReceiptCandidateEvaluation(
+                    delayMillis = READ_RECEIPT_CONTENT_UPDATE_DELAY_MS
+                )
             }
             if (themeChanged) {
                 adapter.notifyDataSetChanged()
             }
         }
+    )
+}
+
+private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
+    onCandidate: (eventId: String?, canEstablishBaseline: Boolean) -> Unit
+) {
+    val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
+    val adapter = recyclerView.adapter as? ChatMessageAdapter
+    if (layoutManager == null || adapter == null || adapter.itemCount == 0) {
+        onCandidate(null, false)
+        return
+    }
+
+    val firstVisiblePosition = layoutManager.findFirstVisibleItemPosition()
+    val lastVisiblePosition = layoutManager.findLastVisibleItemPosition()
+    if (
+        firstVisiblePosition == RecyclerView.NO_POSITION ||
+        lastVisiblePosition == RecyclerView.NO_POSITION
+    ) {
+        onCandidate(null, false)
+        return
+    }
+
+    val viewportTop = recyclerView.paddingTop
+    val viewportBottom = (recyclerView.height - recyclerView.paddingBottom)
+        .coerceAtLeast(viewportTop)
+    val viewportHeight = viewportBottom - viewportTop
+    if (viewportHeight <= 0) {
+        onCandidate(null, false)
+        return
+    }
+
+    val candidate = (firstVisiblePosition..lastVisiblePosition).firstNotNullOfOrNull { position ->
+        val message = adapter.currentList.getOrNull(position)
+            ?.takeIf { it.isReadReceiptCandidate() }
+            ?: return@firstNotNullOfOrNull null
+        val child = layoutManager.findViewByPosition(position)
+            ?: return@firstNotNullOfOrNull null
+        val visibleTop = max(child.top, viewportTop)
+        val visibleBottom = min(child.bottom, viewportBottom)
+        val visibleHeight = visibleBottom - visibleTop
+        if (visibleHeight <= 0) {
+            return@firstNotNullOfOrNull null
+        }
+
+        val maxRelevantVisibleHeight = min(child.height, viewportHeight)
+        if (
+            maxRelevantVisibleHeight > 0 &&
+            visibleHeight.toFloat() / maxRelevantVisibleHeight >= READ_RECEIPT_VISIBILITY_THRESHOLD
+        ) {
+            message.id
+        } else {
+            null
+        }
+    }
+
+    onCandidate(
+        candidate,
+        firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
     )
 }
 
@@ -324,6 +411,13 @@ private fun Long.formatMessageTime(): String {
 private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
 private const val NEWEST_EDGE_THRESHOLD = 1
+private const val READ_RECEIPT_VISIBILITY_THRESHOLD = 0.6f
+private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
+private const val EVENT_ID_PREFIX = "$"
+
+private fun MatrixChatMessage.isReadReceiptCandidate(): Boolean {
+    return !isOwn && id.startsWith(EVENT_ID_PREFIX)
+}
 
 private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {
     override fun areItemsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {

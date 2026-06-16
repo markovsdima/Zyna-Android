@@ -52,6 +52,7 @@ class MainActivity : ComponentActivity() {
                     onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
                     onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
                     onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
+                    onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
                     onLogout = appViewModel::logout
                 )
             }
@@ -141,6 +142,7 @@ fun AppPreview() {
             onRetryOutgoingEnvelope = {},
             onDiscardOutgoingEnvelope = {},
             onDebugMarkOutgoingEnvelopeFailed = {},
+            onVisibleReadReceiptCandidate = { _, _, _ -> },
             onLogout = {}
         )
     }

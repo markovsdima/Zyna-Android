@@ -1,6 +1,7 @@
 package com.zyna.app.ui.glass
 
 import android.graphics.Bitmap
+import android.hardware.HardwareBuffer
 import android.util.Log
 import android.view.Surface
 
@@ -48,6 +49,8 @@ internal object NativeVulkanChat {
         right: Float,
         bottom: Float
     )
+
+    external fun nativeProbeHardwareBuffer(hardwareBuffer: HardwareBuffer): Boolean
 
     external fun nativeRenderFrame(handle: Long): Boolean
 

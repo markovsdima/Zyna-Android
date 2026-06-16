@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.util.AttributeSet
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.widget.FrameLayout
@@ -59,6 +60,8 @@ class GlassChatLayout @JvmOverloads constructor(
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
     private var recyclerAccessibilityBeforeMenu = IMPORTANT_FOR_ACCESSIBILITY_AUTO
+    private var hardwareCaptureProbe: HardwareBufferChatCapture? = null
+    private var didRunHardwareCaptureProbe = false
     private val readReceiptCandidateEvaluationRunnable = Runnable {
         onEvaluateVisibleReadReceiptCandidate()
     }
@@ -137,6 +140,10 @@ class GlassChatLayout @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         removeCallbacks(readReceiptCandidateEvaluationRunnable)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            hardwareCaptureProbe?.close()
+        }
+        hardwareCaptureProbe = null
         super.onDetachedFromWindow()
     }
 
@@ -360,7 +367,67 @@ class GlassChatLayout @JvmOverloads constructor(
         updateRecyclerPadding(contentBottom)
         contextMenuLayer.layout(0, 0, width, height)
         glassController.invalidateRegions()
+        maybeRunHardwareBufferCaptureProbe(width, height)
         scheduleVisibleReadReceiptCandidateEvaluation(READ_RECEIPT_CONTENT_UPDATE_DELAY_MS)
+    }
+
+    private fun maybeRunHardwareBufferCaptureProbe(width: Int, height: Int) {
+        if (
+            !BuildConfig.DEBUG ||
+            !ENABLE_HARDWARE_BUFFER_CHAT_CAPTURE_PROBE ||
+            didRunHardwareCaptureProbe ||
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+            width <= 0 ||
+            height <= 0
+        ) {
+            return
+        }
+
+        didRunHardwareCaptureProbe = true
+        post {
+            if (!isAttachedToWindow || recyclerView.width <= 0 || recyclerView.height <= 0) {
+                return@post
+            }
+            val capture = hardwareCaptureProbe ?: HardwareBufferChatCapture().also {
+                hardwareCaptureProbe = it
+            }
+            val frame = capture.capture(
+                source = recyclerView,
+                width = recyclerView.width,
+                height = recyclerView.height,
+                backgroundColor = palette.background
+            )
+            if (frame == null) {
+                Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "AHB capture probe produced no frame")
+                return@post
+            }
+
+            try {
+                val nativeOk = if (NativeVulkanChat.isAvailable) {
+                    runCatching {
+                        NativeVulkanChat.nativeProbeHardwareBuffer(frame.hardwareBuffer)
+                    }.getOrElse { error ->
+                        Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "Native AHB probe failed", error)
+                        false
+                    }
+                } else {
+                    false
+                }
+                val renderMs = frame.renderNanos / 1_000_000.0
+                Log.d(
+                    HARDWARE_BUFFER_CAPTURE_TAG,
+                    "AHB capture probe ok " +
+                        "size=${frame.width}x${frame.height} " +
+                        "format=${frame.format} " +
+                        "usage=0x${frame.usage.toString(16)} " +
+                        "renderMs=$renderMs " +
+                        "renderResult=${frame.renderResult} " +
+                        "native=$nativeOk"
+                )
+            } finally {
+                frame.close()
+            }
+        }
     }
 
     private fun handleMessageContextAction(
@@ -469,6 +536,8 @@ private class LockableLinearLayoutManager(context: Context) : LinearLayoutManage
 }
 
 private const val ENABLE_VULKAN_CHAT_DEBUG_OVERLAY = true
+private const val ENABLE_HARDWARE_BUFFER_CHAT_CAPTURE_PROBE = true
+private const val HARDWARE_BUFFER_CAPTURE_TAG = "ZynaHwBufferCapture"
 private const val LOAD_OLDER_THRESHOLD = 240
 private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L

@@ -1,6 +1,8 @@
 #define VK_USE_PLATFORM_ANDROID_KHR 1
 
 #include <android/bitmap.h>
+#include <android/hardware_buffer.h>
+#include <android/hardware_buffer_jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include <jni.h>
@@ -383,13 +385,34 @@ private:
         queueInfo.queueCount = 1;
         queueInfo.pQueuePriorities = &queuePriority;
 
-        const char* swapchainExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        const std::array<const char*, 7> hardwareBufferImportExtensions = {
+            VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,
+            VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
+            VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
+            VK_KHR_DEDICATED_ALLOCATION_EXTENSION_NAME,
+            VK_KHR_GET_MEMORY_REQUIREMENTS_2_EXTENSION_NAME,
+            VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
+            VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME
+        };
+        const bool canImportHardwareBuffers =
+            supportsDeviceExtensions(physicalDevice_, hardwareBufferImportExtensions);
+        std::vector<const char*> deviceExtensions = {
+            VK_KHR_SWAPCHAIN_EXTENSION_NAME
+        };
+        if (canImportHardwareBuffers) {
+            deviceExtensions.insert(
+                deviceExtensions.end(),
+                hardwareBufferImportExtensions.begin(),
+                hardwareBufferImportExtensions.end()
+            );
+        }
+
         VkDeviceCreateInfo deviceInfo{};
         deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         deviceInfo.queueCreateInfoCount = 1;
         deviceInfo.pQueueCreateInfos = &queueInfo;
-        deviceInfo.enabledExtensionCount = 1;
-        deviceInfo.ppEnabledExtensionNames = &swapchainExtension;
+        deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+        deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
         if (!isOk(vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, &device_),
                   "vkCreateDevice failed")) {
@@ -397,6 +420,13 @@ private:
             queueFamilyIndex_ = 0;
             return false;
         }
+
+        hardwareBufferImportSupported_ = canImportHardwareBuffers;
+        logDebug(
+            hardwareBufferImportSupported_
+                ? "Vulkan AHardwareBuffer import extensions enabled"
+                : "Vulkan AHardwareBuffer import extensions unavailable"
+        );
 
         vkGetDeviceQueue(device_, queueFamilyIndex_, 0, &graphicsQueue_);
 
@@ -434,6 +464,48 @@ private:
             return false;
         }
 
+        return true;
+    }
+
+    template <size_t Count>
+    bool supportsDeviceExtensions(
+        VkPhysicalDevice candidate,
+        const std::array<const char*, Count>& requiredExtensions
+    ) const {
+        uint32_t extensionCount = 0;
+        VkResult countResult = vkEnumerateDeviceExtensionProperties(
+            candidate,
+            nullptr,
+            &extensionCount,
+            nullptr
+        );
+        if (countResult != VK_SUCCESS || extensionCount == 0) {
+            return false;
+        }
+
+        std::vector<VkExtensionProperties> supportedExtensions(extensionCount);
+        VkResult propertiesResult = vkEnumerateDeviceExtensionProperties(
+            candidate,
+            nullptr,
+            &extensionCount,
+            supportedExtensions.data()
+        );
+        if (propertiesResult != VK_SUCCESS) {
+            return false;
+        }
+
+        for (const char* requiredName : requiredExtensions) {
+            bool didFind = false;
+            for (const VkExtensionProperties& supported : supportedExtensions) {
+                if (std::strcmp(supported.extensionName, requiredName) == 0) {
+                    didFind = true;
+                    break;
+                }
+            }
+            if (!didFind) {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1923,6 +1995,7 @@ private:
         physicalDevice_ = VK_NULL_HANDLE;
         queueFamilyIndex_ = 0;
         graphicsQueue_ = VK_NULL_HANDLE;
+        hardwareBufferImportSupported_ = false;
     }
 
     mutable std::mutex mutex_;
@@ -1968,6 +2041,7 @@ private:
     std::array<float, 4> clearColor_{0.05f, 0.72f, 0.86f, 1.0f};
     std::array<float, 4> inputBarBounds_{};
     bool hasInputBarBounds_ = false;
+    bool hardwareBufferImportSupported_ = false;
 
     std::vector<PaintSplashItem> splashItems_;
     std::vector<ParticleVertex> particleVertices_;
@@ -2078,6 +2152,38 @@ Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeAddPaintSplashBitmap(
     }
     renderer->addPaintSplashBitmap(left, top, right, bottom, bitmapInfo, pixels);
     AndroidBitmap_unlockPixels(env, bitmap);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeProbeHardwareBuffer(
+    JNIEnv* env,
+    jobject,
+    jobject hardwareBuffer
+) {
+    if (hardwareBuffer == nullptr) {
+        return JNI_FALSE;
+    }
+
+    AHardwareBuffer* nativeBuffer = AHardwareBuffer_fromHardwareBuffer(env, hardwareBuffer);
+    if (nativeBuffer == nullptr) {
+        logWarn("AHardwareBuffer_fromHardwareBuffer failed");
+        return JNI_FALSE;
+    }
+
+    AHardwareBuffer_Desc desc{};
+    AHardwareBuffer_describe(nativeBuffer, &desc);
+    __android_log_print(
+        ANDROID_LOG_DEBUG,
+        kTag,
+        "AHB native probe width=%u height=%u layers=%u format=%u usage=0x%llx stride=%u",
+        desc.width,
+        desc.height,
+        desc.layers,
+        desc.format,
+        static_cast<unsigned long long>(desc.usage),
+        desc.stride
+    );
+    return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

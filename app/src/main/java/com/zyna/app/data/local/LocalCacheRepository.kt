@@ -103,6 +103,21 @@ class LocalCacheRepository(
         )
     }
 
+    suspend fun markOutgoingDispatchRetrying(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        failureMessage: String?
+    ) {
+        outgoingDao.markDispatchRetrying(
+            userId = userId,
+            roomId = roomId,
+            id = envelopeId,
+            failureMessage = failureMessage,
+            updatedAtMillis = System.currentTimeMillis()
+        )
+    }
+
     suspend fun markOutgoingDispatchAccepted(
         userId: String,
         roomId: String,
@@ -139,9 +154,16 @@ class LocalCacheRepository(
         )
     }
 
-    suspend fun outgoingTextDispatchCandidates(userId: String): List<OutgoingTextEnvelope> {
-        return outgoingDao.textDispatchCandidates(userId)
-            .mapNotNull { it.toOutgoingTextEnvelopeOrNull() }
+    suspend fun outgoingTextDispatchCandidates(
+        userId: String,
+        envelopeIds: Set<String>? = null
+    ): List<OutgoingTextEnvelope> {
+        val entities = if (envelopeIds == null) {
+            outgoingDao.textDispatchCandidates(userId)
+        } else {
+            envelopeIds.mapNotNull { id -> outgoingDao.textDispatchCandidate(userId, id) }
+        }
+        return entities.mapNotNull { it.toOutgoingTextEnvelopeOrNull() }
     }
 
     suspend fun clearAll() {

@@ -5,6 +5,7 @@ import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.LocalDatabasePassphraseStore
 import com.zyna.app.data.local.ZynaDatabase
 import com.zyna.app.data.matrix.MatrixClientService
+import com.zyna.app.data.outgoing.OutgoingTextOutboxService
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 
@@ -25,5 +26,9 @@ class AppContainer(context: Context) {
         context = appContext,
         sessionStore = sessionStore,
         storePassphraseStore = matrixStorePassphraseStore
+    )
+    val outgoingTextOutboxService = OutgoingTextOutboxService(
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository
     )
 }

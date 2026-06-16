@@ -10,8 +10,7 @@ import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixRoomSummary
-import com.zyna.app.data.outgoing.OutgoingTextEnvelope
-import com.zyna.app.data.outgoing.OutgoingTransportState
+import com.zyna.app.data.outgoing.OutgoingTextOutboxService
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -56,7 +55,8 @@ data class AppUiState(
 
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
-    private val localCacheRepository: LocalCacheRepository
+    private val localCacheRepository: LocalCacheRepository,
+    private val outgoingTextOutboxService: OutgoingTextOutboxService
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -65,10 +65,10 @@ class AppViewModel(
     private var chatCacheJob: Job? = null
     private var roomCacheJob: Job? = null
     private var roomCacheUserId: String? = null
-    private var outgoingDispatchJob: Job? = null
-    private val outgoingDispatchInFlight = mutableSetOf<String>()
 
     init {
+        outgoingTextOutboxService.start(viewModelScope)
+
         viewModelScope.launch {
             matrixClientService.state.collect { matrixState ->
                 val previousUserId = _uiState.value.matrixState.userIdOrNull()
@@ -85,7 +85,6 @@ class AppViewModel(
                 }
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     stopRoomCache()
-                    stopOutgoingDispatch()
                 }
 
                 _uiState.update { current ->
@@ -130,8 +129,17 @@ class AppViewModel(
                     val userId = matrixState.userId
                     if (matrixClientService.isRecoveryComplete(userId)) {
                         refreshRooms()
-                        dispatchPendingOutgoingText(userId)
                     }
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            outgoingTextOutboxService.sendFailures.collect { failure ->
+                _uiState.update {
+                    if (!it.isRouteForRoom(failure.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = failure.message)
                 }
             }
         }
@@ -189,6 +197,7 @@ class AppViewModel(
                     )
                 }
                 refreshRooms()
+                outgoingTextOutboxService.kick(reason = "recovery-complete")
             } catch (error: Throwable) {
                 _uiState.update {
                     it.copy(
@@ -270,18 +279,9 @@ class AppViewModel(
                     transactionId = transactionId,
                     body = text
                 )
-                dispatchOutgoingText(
-                    OutgoingTextEnvelope(
-                        userId = userId,
-                        roomId = route.roomId,
-                        id = envelopeId,
-                        transportState = OutgoingTransportState.QUEUED,
-                        transactionId = transactionId,
-                        eventId = null,
-                        body = text,
-                        createdAtMillis = System.currentTimeMillis(),
-                        failureMessage = null
-                    )
+                outgoingTextOutboxService.kick(
+                    reason = "new-envelope",
+                    envelopeId = envelopeId
                 )
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
@@ -294,12 +294,6 @@ class AppViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                localCacheRepository.markOutgoingDispatchFailed(
-                    userId = userId,
-                    roomId = route.roomId,
-                    envelopeId = envelopeId,
-                    failureMessage = error.message ?: error.javaClass.simpleName
-                )
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it
@@ -463,77 +457,6 @@ class AppViewModel(
         chatPaginationJob = null
     }
 
-    private fun dispatchPendingOutgoingText(userId: String) {
-        if (outgoingDispatchJob?.isActive == true) {
-            return
-        }
-
-        outgoingDispatchJob = viewModelScope.launch {
-            try {
-                val candidates = localCacheRepository.outgoingTextDispatchCandidates(userId)
-                for (candidate in candidates) {
-                    if (_uiState.value.matrixState.userIdOrNull() != userId) {
-                        return@launch
-                    }
-                    try {
-                        dispatchOutgoingText(candidate)
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Throwable) {
-                        Log.w(TAG, "Failed to dispatch outgoing text", error)
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to scan outgoing text outbox", error)
-            }
-        }
-    }
-
-    private suspend fun dispatchOutgoingText(envelope: OutgoingTextEnvelope) {
-        if (!outgoingDispatchInFlight.add(envelope.id)) {
-            return
-        }
-
-        try {
-            localCacheRepository.markOutgoingDispatchStarted(
-                userId = envelope.userId,
-                roomId = envelope.roomId,
-                envelopeId = envelope.id
-            )
-            val eventId = matrixClientService.sendTextMessage(
-                roomId = envelope.roomId,
-                body = envelope.body,
-                transactionId = envelope.transactionId
-            )
-            localCacheRepository.markOutgoingDispatchAccepted(
-                userId = envelope.userId,
-                roomId = envelope.roomId,
-                envelopeId = envelope.id,
-                eventId = eventId
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            localCacheRepository.markOutgoingDispatchFailed(
-                userId = envelope.userId,
-                roomId = envelope.roomId,
-                envelopeId = envelope.id,
-                failureMessage = error.message ?: error.javaClass.simpleName
-            )
-            throw error
-        } finally {
-            outgoingDispatchInFlight.remove(envelope.id)
-        }
-    }
-
-    private fun stopOutgoingDispatch() {
-        outgoingDispatchJob?.cancel()
-        outgoingDispatchJob = null
-        outgoingDispatchInFlight.clear()
-    }
-
     private fun startRoomCache(userId: String) {
         if (roomCacheUserId == userId && roomCacheJob?.isActive == true) {
             return
@@ -586,14 +509,16 @@ class AppViewModel(
 
 class AppViewModelFactory(
     private val matrixClientService: MatrixClientService,
-    private val localCacheRepository: LocalCacheRepository
+    private val localCacheRepository: LocalCacheRepository,
+    private val outgoingTextOutboxService: OutgoingTextOutboxService
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
         if (modelClass.isAssignableFrom(AppViewModel::class.java)) {
             return AppViewModel(
                 matrixClientService = matrixClientService,
-                localCacheRepository = localCacheRepository
+                localCacheRepository = localCacheRepository,
+                outgoingTextOutboxService = outgoingTextOutboxService
             ) as T
         }
         error("Unknown ViewModel class: ${modelClass.name}")

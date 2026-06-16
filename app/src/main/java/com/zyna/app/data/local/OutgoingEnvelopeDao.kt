@@ -31,6 +31,18 @@ interface OutgoingEnvelopeDao {
 
     @Query(
         """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND id = :id
+            AND kind = 'TEXT'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+        LIMIT 1
+        """
+    )
+    suspend fun textDispatchCandidate(userId: String, id: String): OutgoingEnvelopeEntity?
+
+    @Query(
+        """
         SELECT transactionId FROM outgoing_envelopes
         WHERE userId = :userId
             AND roomId = :roomId
@@ -62,6 +74,26 @@ interface OutgoingEnvelopeDao {
         userId: String,
         roomId: String,
         id: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE outgoing_envelopes
+        SET transportState = 'RETRYING',
+            failureMessage = :failureMessage,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+        """
+    )
+    suspend fun markDispatchRetrying(
+        userId: String,
+        roomId: String,
+        id: String,
+        failureMessage: String?,
         updatedAtMillis: Long
     ): Int
 

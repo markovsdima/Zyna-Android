@@ -32,7 +32,8 @@ class MainActivity : ComponentActivity() {
             val appViewModel: AppViewModel = viewModel(
                 factory = AppViewModelFactory(
                     matrixClientService = appContainer.matrixClientService,
-                    localCacheRepository = appContainer.localCacheRepository
+                    localCacheRepository = appContainer.localCacheRepository,
+                    outgoingTextOutboxService = appContainer.outgoingTextOutboxService
                 )
             )
             val state by appViewModel.uiState.collectAsState()

@@ -22,6 +22,7 @@ interface CachedRoomDao {
         SET lastMessageText = :lastMessageText,
             lastMessageSenderName = :lastMessageSenderName,
             lastMessageAtMillis = :lastMessageAtMillis,
+            lastOwnMessageStatus = :lastOwnMessageStatus,
             updatedAtMillis = :updatedAtMillis
         WHERE userId = :userId AND id = :roomId
         """
@@ -32,6 +33,7 @@ interface CachedRoomDao {
         lastMessageText: String?,
         lastMessageSenderName: String?,
         lastMessageAtMillis: Long?,
+        lastOwnMessageStatus: String?,
         updatedAtMillis: Long
     ): Int
 

@@ -18,6 +18,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -65,9 +66,9 @@ class AppViewModel(
     private var chatPaginationJob: Job? = null
     private var chatCacheJob: Job? = null
     private var roomCacheJob: Job? = null
-    private var roomListStateJob: Job? = null
+    private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
-    private var roomListStateUserId: String? = null
+    private var roomListLiveUserId: String? = null
 
     init {
         outgoingTextOutboxService.start(viewModelScope)
@@ -88,7 +89,7 @@ class AppViewModel(
                 }
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     stopRoomCache()
-                    stopRoomListStateRefresh()
+                    stopRoomListLiveRefresh()
                 }
 
                 _uiState.update { current ->
@@ -132,7 +133,7 @@ class AppViewModel(
                 if (matrixState is MatrixClientState.Syncing) {
                     val userId = matrixState.userId
                     if (matrixClientService.isRecoveryComplete(userId)) {
-                        startRoomListStateRefresh(userId)
+                        startRoomListLiveRefresh(userId)
                         refreshRooms()
                     }
                 }
@@ -166,19 +167,23 @@ class AppViewModel(
 
     fun refreshRooms() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isRefreshingRooms = true) }
-            try {
-                val userId = _uiState.value.matrixState.userIdOrNull() ?: return@launch
-                val rooms = matrixClientService.roomsSnapshot()
-                localCacheRepository.cacheRoomsSnapshot(userId, rooms)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to refresh rooms", error)
-            } finally {
-                _uiState.update {
-                    it.copy(isRefreshingRooms = false)
-                }
+            refreshRoomsNow()
+        }
+    }
+
+    private suspend fun refreshRoomsNow() {
+        _uiState.update { it.copy(isRefreshingRooms = true) }
+        try {
+            val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+            val rooms = matrixClientService.roomsSnapshot()
+            localCacheRepository.cacheRoomsSnapshot(userId, rooms)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to refresh rooms", error)
+        } finally {
+            _uiState.update {
+                it.copy(isRefreshingRooms = false)
             }
         }
     }
@@ -202,8 +207,8 @@ class AppViewModel(
                     )
                 }
                 val userId = matrixClientService.state.value.userIdOrNull() ?: return@launch
-                startRoomListStateRefresh(userId)
-                refreshRooms()
+                startRoomListLiveRefresh(userId)
+                refreshRoomsNow()
                 outgoingTextOutboxService.kick(reason = "recovery-complete")
             } catch (error: Throwable) {
                 _uiState.update {
@@ -451,7 +456,7 @@ class AppViewModel(
     fun logout() {
         stopChatTimeline()
         stopRoomCache()
-        stopRoomListStateRefresh()
+        stopRoomListLiveRefresh()
         viewModelScope.launch {
             localCacheRepository.clearAll()
             matrixClientService.logout()
@@ -583,18 +588,18 @@ class AppViewModel(
         roomCacheUserId = null
     }
 
-    private fun startRoomListStateRefresh(userId: String) {
-        if (roomListStateUserId == userId && roomListStateJob?.isActive == true) {
+    private fun startRoomListLiveRefresh(userId: String) {
+        if (roomListLiveUserId == userId && roomListLiveJob?.isActive == true) {
             return
         }
 
-        roomListStateJob?.cancel()
-        roomListStateUserId = userId
-        roomListStateJob = viewModelScope.launch {
+        roomListLiveJob?.cancel()
+        roomListLiveUserId = userId
+        roomListLiveJob = viewModelScope.launch {
             try {
-                matrixClientService.roomListRunningSignals().collect {
+                matrixClientService.roomListChangeSignals().collectLatest {
                     if (matrixClientService.isRecoveryComplete(userId)) {
-                        refreshRooms()
+                        refreshRoomsNow()
                     }
                 }
             } catch (error: CancellationException) {
@@ -605,10 +610,10 @@ class AppViewModel(
         }
     }
 
-    private fun stopRoomListStateRefresh() {
-        roomListStateJob?.cancel()
-        roomListStateJob = null
-        roomListStateUserId = null
+    private fun stopRoomListLiveRefresh() {
+        roomListLiveJob?.cancel()
+        roomListLiveJob = null
+        roomListLiveUserId = null
     }
 
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {

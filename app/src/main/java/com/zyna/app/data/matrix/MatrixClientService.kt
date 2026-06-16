@@ -34,6 +34,10 @@ import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ProfileDetails
+import org.matrix.rustcomponents.sdk.Room
+import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
+import org.matrix.rustcomponents.sdk.RoomListEntriesListener
+import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
 import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomListServiceState
 import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
@@ -54,6 +58,7 @@ import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
 import org.json.JSONObject
 import uniffi.matrix_sdk.BackupDownloadStrategy
+import uniffi.matrix_sdk_ui.LatestEventValueLocalState
 import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
 
 sealed interface MatrixClientState {
@@ -71,8 +76,19 @@ data class MatrixRoomSummary(
     val avatarUrl: String?,
     val lastMessageText: String? = null,
     val lastMessageSenderName: String? = null,
-    val lastMessageAtMillis: Long? = null
+    val lastMessageAtMillis: Long? = null,
+    val lastOwnMessageStatus: MatrixLastOwnMessageStatus? = null,
+    val unreadCount: Long = 0,
+    val unreadMentionCount: Long = 0,
+    val isMarkedUnread: Boolean = false
 )
+
+enum class MatrixLastOwnMessageStatus {
+    PENDING,
+    SENT,
+    READ,
+    FAILED
+}
 
 enum class MatrixMessageDeliveryState {
     SENT,
@@ -216,31 +232,21 @@ class MatrixClientService(
         client?.rooms()
             ?.map { room ->
                 room.use { activeRoom ->
-                    val latestPreview = activeRoom.latestEvent().toRoomPreview()
-                    MatrixRoomSummary(
-                        id = activeRoom.id(),
-                        displayName = activeRoom.displayName()
-                            ?.takeIf { it.isNotBlank() }
-                            ?: activeRoom.id(),
-                        avatarUrl = activeRoom.avatarUrl(),
-                        lastMessageText = latestPreview.body,
-                        lastMessageSenderName = latestPreview.senderName,
-                        lastMessageAtMillis = latestPreview.timestampMillis
-                    )
+                    activeRoom.toRoomSummary()
                 }
             }
             ?.sortedBy { it.displayName.lowercase() }
             ?: emptyList()
     }
 
-    fun roomListRunningSignals(): Flow<Unit> = callbackFlow {
+    fun roomListChangeSignals(): Flow<Unit> = callbackFlow {
         val service = roomListService
         if (service == null) {
             close(IllegalStateException("Matrix room list service is not ready"))
             return@callbackFlow
         }
 
-        val listenerHandle = service.state(
+        val stateListenerHandle = service.state(
             object : RoomListServiceStateListener {
                 override fun onUpdate(state: RoomListServiceState) {
                     if (state == RoomListServiceState.RUNNING) {
@@ -249,11 +255,29 @@ class MatrixClientService(
                 }
             }
         )
+        val roomList = service.allRooms()
+        val entriesListener = object : RoomListEntriesListener {
+            override fun onUpdate(roomEntriesUpdate: List<RoomListEntriesUpdate>) {
+                trySendBlocking(Unit)
+                roomEntriesUpdate.forEach { it.destroy() }
+            }
+        }
+        val entriesResult = roomList.entriesWithDynamicAdapters(
+            pageSize = ROOM_LIST_LIVE_PAGE_SIZE.toUInt(),
+            listener = entriesListener
+        )
+        val entriesController = entriesResult.controller()
+        entriesController.setFilter(RoomListEntriesDynamicFilterKind.NonLeft)
+        trySend(Unit)
 
         awaitClose {
-            listenerHandle.cancelAndDestroy()
+            entriesResult.entriesStream().cancelAndDestroy()
+            entriesController.destroy()
+            entriesResult.destroy()
+            roomList.destroy()
+            stateListenerHandle.cancelAndDestroy()
         }
-    }.buffer(Channel.UNLIMITED)
+    }.buffer(Channel.CONFLATED)
         .flowOn(Dispatchers.IO)
 
     fun roomTimelineMessages(roomId: String): Flow<List<MatrixChatMessage>> = callbackFlow {
@@ -488,6 +512,47 @@ class MatrixClientService(
         }
     }
 
+    private suspend fun Room.toRoomSummary(): MatrixRoomSummary {
+        val roomInfo = runCatching { roomInfo() }.getOrNull()
+        try {
+            val latestPreview = latestEvent().toRoomPreview()
+            return MatrixRoomSummary(
+                id = id(),
+                displayName = displayName()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: roomInfo?.displayName?.takeIf { it.isNotBlank() }
+                    ?: id(),
+                avatarUrl = avatarUrl() ?: roomInfo?.avatarUrl,
+                lastMessageText = latestPreview.body,
+                lastMessageSenderName = latestPreview.senderName,
+                lastMessageAtMillis = latestPreview.timestampMillis,
+                lastOwnMessageStatus = resolveLastOwnMessageStatus(latestPreview),
+                unreadCount = roomInfo?.numUnreadMessages?.toLong() ?: 0,
+                unreadMentionCount = roomInfo?.numUnreadMentions?.toLong() ?: 0,
+                isMarkedUnread = roomInfo?.isMarkedUnread ?: false
+            )
+        } finally {
+            roomInfo?.destroy()
+        }
+    }
+
+    private suspend fun Room.resolveLastOwnMessageStatus(
+        preview: MatrixRoomPreview
+    ): MatrixLastOwnMessageStatus? {
+        if (!preview.needsReadReceiptSummary) {
+            return preview.localOwnMessageStatus
+        }
+
+        val readReceiptSummary = runCatching {
+            latestOwnMainTimelineReadReceiptSummary()
+        }.getOrNull()
+        return if (readReceiptSummary?.hasReadReceiptFromOtherUser == true) {
+            MatrixLastOwnMessageStatus.READ
+        } else {
+            preview.localOwnMessageStatus
+        }
+    }
+
     private fun LatestEventValue.toRoomPreview(): MatrixRoomPreview = use { latestEvent ->
         when (latestEvent) {
             LatestEventValue.None -> MatrixRoomPreview()
@@ -497,7 +562,13 @@ class MatrixClientService(
                     isOwn = latestEvent.isOwn,
                     profile = latestEvent.profile
                 ),
-                timestampMillis = latestEvent.timestamp.toLong()
+                timestampMillis = latestEvent.timestamp.toLong(),
+                localOwnMessageStatus = if (latestEvent.isOwn) {
+                    MatrixLastOwnMessageStatus.SENT
+                } else {
+                    null
+                },
+                needsReadReceiptSummary = latestEvent.isOwn
             )
             is LatestEventValue.Local -> MatrixRoomPreview(
                 body = latestEvent.content.roomPreviewBody() ?: "",
@@ -505,7 +576,8 @@ class MatrixClientService(
                     isOwn = true,
                     profile = latestEvent.profile
                 ),
-                timestampMillis = latestEvent.timestamp.toLong()
+                timestampMillis = latestEvent.timestamp.toLong(),
+                localOwnMessageStatus = latestEvent.state.toLastOwnMessageStatus()
             )
             is LatestEventValue.RemoteInvite -> MatrixRoomPreview(
                 timestampMillis = latestEvent.timestamp.toLong()
@@ -547,6 +619,14 @@ class MatrixClientService(
 
         val displayName = (profile as? ProfileDetails.Ready)?.displayName
         return displayName?.takeIf { it.isNotBlank() } ?: this
+    }
+
+    private fun LatestEventValueLocalState.toLastOwnMessageStatus(): MatrixLastOwnMessageStatus {
+        return when (this) {
+            LatestEventValueLocalState.IS_SENDING -> MatrixLastOwnMessageStatus.PENDING
+            LatestEventValueLocalState.HAS_BEEN_SENT -> MatrixLastOwnMessageStatus.SENT
+            LatestEventValueLocalState.CANNOT_BE_SENT -> MatrixLastOwnMessageStatus.FAILED
+        }
     }
 
     private fun TaskHandle.cancelAndDestroy() {
@@ -662,7 +742,9 @@ class MatrixClientService(
     private data class MatrixRoomPreview(
         val body: String? = null,
         val senderName: String? = null,
-        val timestampMillis: Long? = null
+        val timestampMillis: Long? = null,
+        val localOwnMessageStatus: MatrixLastOwnMessageStatus? = null,
+        val needsReadReceiptSummary: Boolean = false
     )
 
     private companion object {
@@ -671,6 +753,7 @@ class MatrixClientService(
         const val TIMELINE_INTERACTIVE_BACKFILL_PAGES = 3
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
+        const val ROOM_LIST_LIVE_PAGE_SIZE = 512
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
     }

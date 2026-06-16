@@ -2,6 +2,7 @@ package com.zyna.app.data.local
 
 import androidx.room.withTransaction
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
@@ -44,6 +45,14 @@ class LocalCacheRepository(
                             ?: existingRoom?.lastMessageSenderName,
                         lastMessageAtMillis = room.lastMessageAtMillis
                             ?: existingRoom?.lastMessageAtMillis,
+                        lastOwnMessageStatus = if (room.lastMessageAtMillis == null) {
+                            existingRoom?.lastOwnMessageStatus
+                        } else {
+                            room.lastOwnMessageStatus?.name
+                        },
+                        unreadCount = room.unreadCount,
+                        unreadMentionCount = room.unreadMentionCount,
+                        isMarkedUnread = room.isMarkedUnread,
                         updatedAtMillis = now
                     )
                 }
@@ -106,12 +115,16 @@ class LocalCacheRepository(
     }
 
     suspend fun markOutgoingDispatchStarted(userId: String, roomId: String, envelopeId: String) {
-        outgoingDao.markDispatchStarted(
-            userId = userId,
-            roomId = roomId,
-            id = envelopeId,
-            updatedAtMillis = System.currentTimeMillis()
-        )
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.markDispatchStarted(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                updatedAtMillis = now
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
     }
 
     suspend fun markOutgoingDispatchRetrying(
@@ -120,13 +133,17 @@ class LocalCacheRepository(
         envelopeId: String,
         failureMessage: String?
     ) {
-        outgoingDao.markDispatchRetrying(
-            userId = userId,
-            roomId = roomId,
-            id = envelopeId,
-            failureMessage = failureMessage,
-            updatedAtMillis = System.currentTimeMillis()
-        )
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.markDispatchRetrying(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                failureMessage = failureMessage,
+                updatedAtMillis = now
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
     }
 
     suspend fun markOutgoingDispatchAccepted(
@@ -157,13 +174,17 @@ class LocalCacheRepository(
         envelopeId: String,
         failureMessage: String?
     ) {
-        outgoingDao.markDispatchFailed(
-            userId = userId,
-            roomId = roomId,
-            id = envelopeId,
-            failureMessage = failureMessage,
-            updatedAtMillis = System.currentTimeMillis()
-        )
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.markDispatchFailed(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                failureMessage = failureMessage,
+                updatedAtMillis = now
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
     }
 
     suspend fun retryFailedOutgoingTextEnvelope(
@@ -171,12 +192,19 @@ class LocalCacheRepository(
         roomId: String,
         envelopeId: String
     ): Boolean {
-        return outgoingDao.markFailedTextEnvelopeQueued(
-            userId = userId,
-            roomId = roomId,
-            id = envelopeId,
-            updatedAtMillis = System.currentTimeMillis()
-        ) > 0
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val didRetry = outgoingDao.markFailedTextEnvelopeQueued(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                updatedAtMillis = now
+            ) > 0
+            if (didRetry) {
+                updateRoomPreview(userId, roomId, now)
+            }
+            didRetry
+        }
     }
 
     suspend fun debugMarkOutgoingTextEnvelopeFailed(
@@ -184,13 +212,20 @@ class LocalCacheRepository(
         roomId: String,
         envelopeId: String
     ): Boolean {
-        return outgoingDao.debugMarkActiveTextEnvelopeFailed(
-            userId = userId,
-            roomId = roomId,
-            id = envelopeId,
-            failureMessage = "Debug forced send failure",
-            updatedAtMillis = System.currentTimeMillis()
-        ) > 0
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val didMark = outgoingDao.debugMarkActiveTextEnvelopeFailed(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                failureMessage = "Debug forced send failure",
+                updatedAtMillis = now
+            ) > 0
+            if (didMark) {
+                updateRoomPreview(userId, roomId, now)
+            }
+            didMark
+        }
     }
 
     suspend fun discardFailedOutgoingTextEnvelope(
@@ -247,7 +282,11 @@ class LocalCacheRepository(
             avatarUrl = avatarUrl,
             lastMessageText = lastMessageText,
             lastMessageSenderName = lastMessageSenderName,
-            lastMessageAtMillis = lastMessageAtMillis
+            lastMessageAtMillis = lastMessageAtMillis,
+            lastOwnMessageStatus = lastOwnMessageStatus.toLastOwnMessageStatusOrNull(),
+            unreadCount = unreadCount,
+            unreadMentionCount = unreadMentionCount,
+            isMarkedUnread = isMarkedUnread
         )
     }
 
@@ -345,6 +384,7 @@ class LocalCacheRepository(
             lastMessageText = latestMessage?.body,
             lastMessageSenderName = latestMessage?.previewSenderName(),
             lastMessageAtMillis = latestMessage?.timestampMillis,
+            lastOwnMessageStatus = latestMessage?.lastOwnMessageStatus()?.name,
             updatedAtMillis = updatedAtMillis
         )
     }
@@ -394,6 +434,16 @@ class LocalCacheRepository(
         }
     }
 
+    private fun MatrixChatMessage.lastOwnMessageStatus(): MatrixLastOwnMessageStatus? {
+        if (!isOwn) return null
+
+        return when (deliveryState) {
+            MatrixMessageDeliveryState.SENDING -> MatrixLastOwnMessageStatus.PENDING
+            MatrixMessageDeliveryState.SENT -> MatrixLastOwnMessageStatus.SENT
+            MatrixMessageDeliveryState.FAILED -> MatrixLastOwnMessageStatus.FAILED
+        }
+    }
+
     private fun OutgoingEnvelopeEntity.toOutgoingTextEnvelopeOrNull(): OutgoingTextEnvelope? {
         if (kind != OutgoingEnvelopeKind.TEXT.name) return null
 
@@ -413,6 +463,12 @@ class LocalCacheRepository(
     private fun String.toMatrixDeliveryState(): MatrixMessageDeliveryState {
         return runCatching { MatrixMessageDeliveryState.valueOf(this) }
             .getOrDefault(MatrixMessageDeliveryState.SENT)
+    }
+
+    private fun String?.toLastOwnMessageStatusOrNull(): MatrixLastOwnMessageStatus? {
+        return this?.let {
+            runCatching { MatrixLastOwnMessageStatus.valueOf(it) }.getOrNull()
+        }
     }
 
     private fun String.toOutgoingTransportState(): OutgoingTransportState {

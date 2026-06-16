@@ -658,8 +658,9 @@ private class MenuDivider(
 private fun MessageRenderModel.copyableText(): String? {
     val text = when (val messageContent = content) {
         is MessageContent.Text -> messageContent.body
+        MessageContent.Redacted -> null
     }
-    return text.takeIf { it.isNotBlank() }
+    return text?.takeIf { it.isNotBlank() }
 }
 
 private fun lerp(from: Float, to: Float, progress: Float): Float {

@@ -23,6 +23,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
@@ -384,7 +385,10 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
     return MessageRenderModel(
         id = id,
         senderText = if (isOwn) "You" else sender,
-        content = MessageContent.Text(body),
+        content = when (contentType) {
+            MatrixMessageContentType.REDACTED -> MessageContent.Redacted
+            else -> MessageContent.Text(body)
+        },
         timestampText = timestampMillis.formatMessageTime(),
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
@@ -415,7 +419,7 @@ private const val READ_RECEIPT_VISIBILITY_THRESHOLD = 0.6f
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
 
 private fun MatrixChatMessage.isReadReceiptCandidate(): Boolean {
-    return !isOwn && eventId != null
+    return !isOwn && eventId != null && contentType != MatrixMessageContentType.REDACTED
 }
 
 private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {

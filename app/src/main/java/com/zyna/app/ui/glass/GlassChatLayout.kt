@@ -366,7 +366,8 @@ class GlassChatLayout @JvmOverloads constructor(
     private fun copyMessageText(message: MessageRenderModel) {
         val text = when (val content = message.content) {
             is MessageContent.Text -> content.body
-        }.takeIf { it.isNotBlank() } ?: return
+            MessageContent.Redacted -> null
+        }?.takeIf { it.isNotBlank() } ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Message", text))
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {

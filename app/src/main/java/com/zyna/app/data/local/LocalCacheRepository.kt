@@ -81,7 +81,15 @@ class LocalCacheRepository(
         }
 
         database.withTransaction {
-            messageDao.upsertMessages(messages.toEntities(userId, roomId, now))
+            val incomingEntities = messages.toEntities(userId, roomId, now)
+            val existingRedactionsByIdentity = existingRedactionsMatching(
+                userId = userId,
+                roomId = roomId,
+                incomingMessages = incomingEntities
+            )
+                .redactionsByIdentity()
+            val entities = incomingEntities.preserveExistingRedactions(existingRedactionsByIdentity)
+            messageDao.upsertMessages(entities)
             retireOutgoingEnvelopesDeliveredBy(messages, userId, roomId, now)
             updateRoomPreview(userId, roomId, now)
         }
@@ -381,9 +389,22 @@ class LocalCacheRepository(
         roomId: String,
         updatedAtMillis: Long
     ) {
-        val messages = messageDao.roomMessagesSnapshot(userId, roomId)
         val outgoingEnvelopes = outgoingDao.activeRoomEnvelopesSnapshot(userId, roomId)
-        val latestMessage = mergeTimelineWithOutgoing(messages, outgoingEnvelopes).lastOrNull()
+        val hiddenTimelineIds = outgoingEnvelopes
+            .flatMap { envelope -> listOfNotNull(envelope.transactionId, envelope.eventId) }
+            .toSet()
+        val latestTimelineMessages = messageDao.latestRoomMessages(
+            userId = userId,
+            roomId = roomId,
+            localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+            limit = ROOM_PREVIEW_CANDIDATE_LIMIT
+        )
+            .filter { message -> message.identityIds().none { it in hiddenTimelineIds } }
+            .map { it.toChatMessage() }
+        val latestOutgoingMessages = outgoingEnvelopes
+            .mapNotNull { it.toChatMessageOrNull() }
+        val latestMessage = (latestTimelineMessages + latestOutgoingMessages)
+            .maxWithOrNull(compareBy<MatrixChatMessage> { it.timestampMillis }.thenBy { it.id })
         roomDao.updateRoomPreview(
             userId = userId,
             roomId = roomId,
@@ -483,6 +504,74 @@ class LocalCacheRepository(
         return listOfNotNull(id, eventId, transactionId)
     }
 
+    private suspend fun existingRedactionsMatching(
+        userId: String,
+        roomId: String,
+        incomingMessages: List<CachedTimelineMessageEntity>
+    ): List<CachedTimelineMessageEntity> {
+        val identityIds = incomingMessages
+            .flatMap { it.identityIds() }
+            .distinct()
+        if (identityIds.isEmpty()) {
+            return emptyList()
+        }
+
+        return identityIds
+            .chunked(REDACTION_ID_QUERY_CHUNK_SIZE)
+            .flatMap { ids ->
+                messageDao.messagesMatchingIdsWithContentType(
+                    userId = userId,
+                    roomId = roomId,
+                    ids = ids,
+                    contentType = MatrixMessageContentType.REDACTED.name
+                )
+            }
+            .distinctBy { it.id }
+    }
+
+    private fun List<CachedTimelineMessageEntity>.redactionsByIdentity(): Map<String, CachedTimelineMessageEntity> {
+        return filter { it.isRedacted() }
+            .flatMap { redacted -> redacted.identityIds().map { identity -> identity to redacted } }
+            .toMap()
+    }
+
+    private fun List<CachedTimelineMessageEntity>.preserveExistingRedactions(
+        existingRedactionsByIdentity: Map<String, CachedTimelineMessageEntity>
+    ): List<CachedTimelineMessageEntity> {
+        if (existingRedactionsByIdentity.isEmpty()) {
+            return this
+        }
+
+        return map { incoming ->
+            if (incoming.isRedacted()) {
+                incoming
+            } else {
+                val existingRedaction = incoming.identityIds()
+                    .firstNotNullOfOrNull { identity -> existingRedactionsByIdentity[identity] }
+                incoming.withPreservedRedaction(existingRedaction)
+            }
+        }
+    }
+
+    private fun CachedTimelineMessageEntity.withPreservedRedaction(
+        existingRedaction: CachedTimelineMessageEntity?
+    ): CachedTimelineMessageEntity {
+        if (existingRedaction == null) {
+            return this
+        }
+
+        return copy(
+            eventId = eventId ?: existingRedaction.eventId,
+            transactionId = transactionId ?: existingRedaction.transactionId,
+            body = existingRedaction.body.takeIf { it.isNotBlank() } ?: REDACTED_MESSAGE_BODY,
+            contentType = MatrixMessageContentType.REDACTED.name
+        )
+    }
+
+    private fun CachedTimelineMessageEntity.isRedacted(): Boolean {
+        return contentType == MatrixMessageContentType.REDACTED.name
+    }
+
     private fun String?.toLastOwnMessageStatusOrNull(): MatrixLastOwnMessageStatus? {
         return this?.let {
             runCatching { MatrixLastOwnMessageStatus.valueOf(it) }.getOrNull()
@@ -511,6 +600,10 @@ class LocalCacheRepository(
             .thenBy { it.id }
 
         const val LOCAL_MESSAGE_ID_PREFIX = "local:"
+        const val LOCAL_MESSAGE_ID_PATTERN = "$LOCAL_MESSAGE_ID_PREFIX%"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
+        const val ROOM_PREVIEW_CANDIDATE_LIMIT = 64
+        const val REDACTION_ID_QUERY_CHUNK_SIZE = 250
+        const val REDACTED_MESSAGE_BODY = "Deleted message"
     }
 }

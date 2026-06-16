@@ -16,6 +16,7 @@ internal data class MessageRenderModel(
 
 internal sealed interface MessageContent {
     data class Text(val body: String) : MessageContent
+    data object Redacted : MessageContent
 }
 
 internal enum class RenderDeliveryState {
@@ -71,6 +72,7 @@ internal enum class MessageHitTarget {
 internal fun MessageRenderModel.accessibilityText(): String {
     val body = when (content) {
         is MessageContent.Text -> content.body
+        MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
     val state = when (deliveryState) {
         RenderDeliveryState.SENT -> ""
@@ -80,3 +82,8 @@ internal fun MessageRenderModel.accessibilityText(): String {
     val sender = senderText.takeIf { it.isNotBlank() } ?: if (isOutgoing) "You" else "Unknown sender"
     return "$sender, $body, $timestampText$state"
 }
+
+internal val MessageRenderModel.isRedacted: Boolean
+    get() = content is MessageContent.Redacted
+
+internal const val REDACTED_MESSAGE_TEXT = "Deleted message"

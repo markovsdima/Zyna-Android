@@ -28,7 +28,7 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
     }
 
     override fun supports(content: MessageContent): Boolean {
-        return content is MessageContent.Text
+        return content is MessageContent.Text || content is MessageContent.Redacted
     }
 
     override fun measure(
@@ -37,17 +37,17 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
         maxWidthPx: Int
     ): TextMessageLayout {
         val widthLimit = max(1, maxWidthPx)
+        val isRedacted = message.isRedacted
         senderPaint.color = theme.metadataColor(message)
-        bodyPaint.color = theme.textColor(message)
+        bodyPaint.color = if (isRedacted) theme.metadataColor(message) else theme.textColor(message)
+        bodyPaint.textSkewX = if (isRedacted) REDACTED_TEXT_SKEW_X else 0f
         timePaint.color = theme.metadataColor(message)
 
         val senderLayout = makeSenderLayout(message, widthLimit)
         val senderHeight = if (senderLayout == null) 0 else senderLayout.height + senderBottomSpacing
         val senderWidth = senderLayout?.measuredLineWidth() ?: 0
 
-        val bodyText = when (val content = message.content) {
-            is MessageContent.Text -> content.body.ifEmpty { " " }
-        }
+        val bodyText = message.content.renderText().ifEmpty { " " }
         val bodyLayout = makeLayout(
             text = bodyText,
             paint = bodyPaint,
@@ -176,6 +176,13 @@ private fun MessageRenderModel.metadataText(): String {
     }
 }
 
+private fun MessageContent.renderText(): String {
+    return when (this) {
+        is MessageContent.Text -> body
+        MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
+    }
+}
+
 private fun StaticLayout.maxLineWidth(): Int {
     var width = 0f
     for (index in 0 until lineCount) {
@@ -205,3 +212,5 @@ private fun Int.spToPx(context: Context): Float {
         context.resources.displayMetrics
     )
 }
+
+private const val REDACTED_TEXT_SKEW_X = -0.12f

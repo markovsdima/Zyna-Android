@@ -16,15 +16,6 @@ interface CachedTimelineMessageDao {
     )
     fun observeRoomMessages(userId: String, roomId: String): Flow<List<CachedTimelineMessageEntity>>
 
-    @Query(
-        """
-        SELECT * FROM timeline_messages
-        WHERE userId = :userId AND roomId = :roomId
-        ORDER BY timestampMillis ASC, id ASC
-        """
-    )
-    suspend fun roomMessagesSnapshot(userId: String, roomId: String): List<CachedTimelineMessageEntity>
-
     @Query("DELETE FROM timeline_messages WHERE userId = :userId AND roomId = :roomId")
     suspend fun clearRoomMessages(userId: String, roomId: String)
 
@@ -57,6 +48,43 @@ interface CachedTimelineMessageDao {
         """
     )
     suspend fun hasMessage(userId: String, roomId: String, id: String): Boolean
+
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND contentType = :contentType
+            AND (
+                id IN (:ids)
+                OR eventId IN (:ids)
+                OR transactionId IN (:ids)
+            )
+        """
+    )
+    suspend fun messagesMatchingIdsWithContentType(
+        userId: String,
+        roomId: String,
+        ids: List<String>,
+        contentType: String
+    ): List<CachedTimelineMessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id NOT LIKE :localIdPattern
+        ORDER BY timestampMillis DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun latestRoomMessages(
+        userId: String,
+        roomId: String,
+        localIdPattern: String,
+        limit: Int
+    ): List<CachedTimelineMessageEntity>
 
     @Query("DELETE FROM timeline_messages WHERE userId = :userId")
     suspend fun clearMessages(userId: String)

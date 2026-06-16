@@ -41,6 +41,7 @@ class GlassChatLayout @JvmOverloads constructor(
     private var composerErrorMessage: String? = null
     private var isLoadingOlderMessages = false
     private var canLoadOlderMessages = false
+    private var prefetchCheckPosted = false
     private val source = RecyclerViewGlassBackdropSource(recyclerView, palette.background)
 
     init {
@@ -50,17 +51,15 @@ class GlassChatLayout @JvmOverloads constructor(
 
         recyclerView.apply {
             clipToPadding = false
-            overScrollMode = OVER_SCROLL_NEVER
+            overScrollMode = OVER_SCROLL_IF_CONTENT_SCROLLS
             itemAnimator = null
             layoutManager = LinearLayoutManager(context).apply {
-                stackFromEnd = true
+                reverseLayout = true
             }
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                     glassController.invalidateBackdrop()
-                    if (dy < 0) {
-                        maybeLoadOlderMessages()
-                    }
+                    maybeLoadOlderMessages()
                 }
 
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
@@ -119,6 +118,7 @@ class GlassChatLayout @JvmOverloads constructor(
     fun setPaginationState(isLoadingOlder: Boolean, canLoadOlder: Boolean) {
         isLoadingOlderMessages = isLoadingOlder
         canLoadOlderMessages = canLoadOlder
+        prefetchOlderMessagesIfNeeded()
     }
 
     fun setComposerState(isSending: Boolean, errorMessage: String?, errorColor: Int) {
@@ -144,27 +144,49 @@ class GlassChatLayout @JvmOverloads constructor(
         glassController.invalidateBackdrop()
     }
 
+    fun prefetchOlderMessagesIfNeeded() {
+        if (prefetchCheckPosted) {
+            return
+        }
+
+        prefetchCheckPosted = true
+        post {
+            prefetchCheckPosted = false
+            maybeLoadOlderMessages()
+        }
+    }
+
     private fun maybeLoadOlderMessages() {
         if (isLoadingOlderMessages || !canLoadOlderMessages) {
             return
         }
 
         val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return
-        val firstVisibleItem = layoutManager.findFirstVisibleItemPosition()
-        if (firstVisibleItem != RecyclerView.NO_POSITION && firstVisibleItem <= LOAD_OLDER_THRESHOLD) {
+        val itemCount = recyclerView.adapter?.itemCount ?: return
+        if (itemCount == 0) {
+            return
+        }
+        val lastVisibleItem = layoutManager.findLastVisibleItemPosition()
+        val shouldLoadMore =
+            itemCount < OLDER_PREFETCH_TARGET_ITEMS || (
+                lastVisibleItem != RecyclerView.NO_POSITION &&
+                    lastVisibleItem >= itemCount - LOAD_OLDER_THRESHOLD
+            )
+
+        if (shouldLoadMore) {
             onLoadOlderMessages()
         }
     }
 
     fun scrollToBottom(animated: Boolean) {
-        val last = (recyclerView.adapter?.itemCount ?: 0) - 1
-        if (last < 0) {
+        val itemCount = recyclerView.adapter?.itemCount ?: 0
+        if (itemCount == 0) {
             return
         }
         if (animated) {
-            recyclerView.smoothScrollToPosition(last)
+            recyclerView.smoothScrollToPosition(0)
         } else {
-            recyclerView.scrollToPosition(last)
+            recyclerView.scrollToPosition(0)
         }
         glassController.invalidateBackdrop()
     }
@@ -249,7 +271,8 @@ class GlassChatLayout @JvmOverloads constructor(
     }
 }
 
-private const val LOAD_OLDER_THRESHOLD = 4
+private const val LOAD_OLDER_THRESHOLD = 240
+private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
 
 private fun defaultPalette(): GlassPalette {
     return GlassPalette(

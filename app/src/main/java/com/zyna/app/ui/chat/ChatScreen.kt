@@ -24,6 +24,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.recyclerview.widget.DiffUtil
+import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.data.matrix.MatrixChatMessage
@@ -179,17 +180,28 @@ private fun ChatMessageList(
 
             val recyclerView = chatLayout.recyclerView
             val adapter = recyclerView.adapter as ChatMessageAdapter
-            val wasAtBottom = !recyclerView.canScrollVertically(1)
+            val displayedMessages = messages.asReversed()
+            val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
+            val nextNewestMessageId = displayedMessages.firstOrNull()?.id
+            val hasNewerMessage = previousNewestMessageId != null &&
+                nextNewestMessageId != null &&
+                previousNewestMessageId != nextNewestMessageId
+            val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
+            val firstVisiblePosition = layoutManager?.findFirstVisibleItemPosition()
+                ?: RecyclerView.NO_POSITION
+            val wasAtBottom = firstVisiblePosition != RecyclerView.NO_POSITION &&
+                firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
             val wasEmpty = adapter.itemCount == 0
             val colorsChanged = adapter.colors != colors
             adapter.colors = colors
-            adapter.submitList(messages) {
-                if (messages.isNotEmpty()) {
-                    if (wasAtBottom || wasEmpty) {
+            adapter.submitList(displayedMessages) {
+                if (displayedMessages.isNotEmpty()) {
+                    if (wasEmpty || (wasAtBottom && hasNewerMessage)) {
                         chatLayout.scrollToBottom(animated = false)
                     }
                 }
                 chatLayout.invalidateGlassContent()
+                chatLayout.prefetchOlderMessagesIfNeeded()
             }
             if (colorsChanged) {
                 adapter.notifyDataSetChanged()
@@ -309,6 +321,8 @@ private fun Long.formatMessageTime(): String {
 }
 
 private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+private const val NEWEST_EDGE_THRESHOLD = 1
 
 private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {
     override fun areItemsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {

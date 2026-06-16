@@ -10,6 +10,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +20,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.matrix.rustcomponents.sdk.DateDividerMode
 import org.matrix.rustcomponents.sdk.Client
@@ -85,6 +88,7 @@ class MatrixClientService(
     private var syncService: SyncService? = null
     private val activeTimelineLock = Any()
     private val activeRoomTimelines = mutableMapOf<String, Timeline>()
+    private val timelinePaginationMutex = Mutex()
 
     suspend fun restoreSessionIfAvailable() {
         val session = sessionStore.loadLastSession()
@@ -199,6 +203,7 @@ class MatrixClientService(
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         var timeline: Timeline? = null
         var listenerHandle: TaskHandle? = null
+        var pendingMessagesSendJob: Job? = null
         val entries = mutableListOf<MatrixChatMessage?>()
         val hasEmittedInitialState = AtomicBoolean(false)
         val hasCleanedUp = AtomicBoolean(false)
@@ -207,13 +212,22 @@ class MatrixClientService(
             entries.visibleChatMessages()
         }
 
-        fun sendCurrentMessages() {
+        fun emitCurrentMessages() {
             hasEmittedInitialState.set(true)
             trySendBlocking(currentMessages())
         }
 
+        fun scheduleCurrentMessages() {
+            pendingMessagesSendJob?.cancel()
+            pendingMessagesSendJob = launch {
+                delay(TIMELINE_EMIT_COALESCE_MS)
+                emitCurrentMessages()
+            }
+        }
+
         fun cleanup() {
             if (hasCleanedUp.compareAndSet(false, true)) {
+                pendingMessagesSendJob?.cancel()
                 listenerHandle?.cancelAndDestroy()
                 synchronized(activeTimelineLock) {
                     if (activeRoomTimelines[roomId] === timeline) {
@@ -240,7 +254,7 @@ class MatrixClientService(
                         synchronized(entries) {
                             diff.forEach { entries.applyTimelineDiff(it) }
                         }
-                        sendCurrentMessages()
+                        scheduleCurrentMessages()
                     }
                 }
             )
@@ -254,7 +268,16 @@ class MatrixClientService(
 
             val paginationJob = launch(Dispatchers.IO) {
                 runCatching {
-                    openedTimeline.paginateBackwards(TIMELINE_PAGE_SIZE.toUShort())
+                    timelinePaginationMutex.withLock {
+                        for (page in 0 until TIMELINE_INITIAL_BACKFILL_PAGES) {
+                            val hasReachedStart = openedTimeline.paginateBackwards(
+                                TIMELINE_PAGE_SIZE.toUShort()
+                            )
+                            if (hasReachedStart) {
+                                break
+                            }
+                        }
+                    }
                 }.onFailure { error ->
                     close(error)
                 }
@@ -278,7 +301,17 @@ class MatrixClientService(
             activeRoomTimelines[roomId]
         } ?: error("Chat timeline is not ready")
 
-        activeTimeline.paginateBackwards(TIMELINE_PAGE_SIZE.toUShort())
+        timelinePaginationMutex.withLock {
+            for (page in 0 until TIMELINE_INTERACTIVE_BACKFILL_PAGES) {
+                val hasReachedStart = activeTimeline.paginateBackwards(
+                    TIMELINE_PAGE_SIZE.toUShort()
+                )
+                if (hasReachedStart) {
+                    return@withLock true
+                }
+            }
+            false
+        }
     }
 
     suspend fun sendTextMessage(roomId: String, body: String) = withContext(Dispatchers.IO) {
@@ -508,8 +541,11 @@ class MatrixClientService(
     )
 
     private companion object {
-        const val TIMELINE_PAGE_SIZE = 50
-        const val TIMELINE_MAX_VISIBLE_MESSAGES = 500
+        const val TIMELINE_PAGE_SIZE = 100
+        const val TIMELINE_INITIAL_BACKFILL_PAGES = 5
+        const val TIMELINE_INTERACTIVE_BACKFILL_PAGES = 3
+        const val TIMELINE_MAX_VISIBLE_MESSAGES = 1_500
+        const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
     }
 }

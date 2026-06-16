@@ -16,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -46,7 +46,7 @@ abstract class ZynaDatabase : RoomDatabase() {
                         false
                     )
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
         }
 
@@ -134,6 +134,44 @@ abstract class ZynaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE rooms ADD COLUMN unreadCount INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE rooms ADD COLUMN unreadMentionCount INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE rooms ADD COLUMN isMarkedUnread INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN eventId TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN transactionId TEXT")
+                db.execSQL(
+                    """
+                    ALTER TABLE timeline_messages
+                    ADD COLUMN contentType TEXT NOT NULL DEFAULT 'TEXT'
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    UPDATE timeline_messages
+                    SET eventId = CASE
+                            WHEN id LIKE '$%' THEN id
+                            ELSE NULL
+                        END,
+                        transactionId = CASE
+                            WHEN id NOT LIKE '$%' THEN id
+                            ELSE NULL
+                        END
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_timeline_messages_userId_roomId_eventId
+                    ON timeline_messages(userId, roomId, eventId)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_timeline_messages_userId_roomId_transactionId
+                    ON timeline_messages(userId, roomId, transactionId)
+                    """.trimIndent()
+                )
             }
         }
     }

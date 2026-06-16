@@ -33,7 +33,11 @@ interface CachedTimelineMessageDao {
         DELETE FROM timeline_messages
         WHERE userId = :userId
             AND roomId = :roomId
-            AND id IN (:ids)
+            AND (
+                id IN (:ids)
+                OR eventId IN (:ids)
+                OR transactionId IN (:ids)
+            )
         """
     )
     suspend fun deleteMessagesByIds(userId: String, roomId: String, ids: List<String>)
@@ -44,7 +48,11 @@ interface CachedTimelineMessageDao {
             SELECT 1 FROM timeline_messages
             WHERE userId = :userId
                 AND roomId = :roomId
-                AND id = :id
+                AND (
+                    id = :id
+                    OR eventId = :id
+                    OR transactionId = :id
+                )
         )
         """
     )

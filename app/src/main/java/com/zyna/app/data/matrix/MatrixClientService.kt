@@ -99,17 +99,39 @@ enum class MatrixMessageDeliveryState {
     FAILED
 }
 
+enum class MatrixMessageContentType {
+    TEXT,
+    NOTICE,
+    EMOTE,
+    IMAGE,
+    AUDIO,
+    VIDEO,
+    FILE,
+    GALLERY,
+    LOCATION,
+    UNABLE_TO_DECRYPT,
+    REDACTED,
+    UNSUPPORTED
+}
+
 data class MatrixChatMessage(
+    /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
+    val eventId: String? = null,
+    val transactionId: String? = null,
     val sender: String,
     val body: String,
     val timestampMillis: Long,
     val isOwn: Boolean,
+    val contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
     val outgoingEnvelopeId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false
-)
+) {
+    val isRemote: Boolean
+        get() = eventId != null
+}
 
 class MatrixClientService(
     private val context: Context,
@@ -515,18 +537,33 @@ class MatrixClientService(
     private fun EventTimelineItem.toChatMessageOrNull(): MatrixChatMessage? {
         val content = (content as? TimelineItemContent.MsgLike)?.content
             ?: return null
-        val body = when (val kind = content.kind) {
-            is MsgLikeKind.Message -> kind.content.displayBody()
-            is MsgLikeKind.UnableToDecrypt -> "Unable to decrypt message"
+        val messageBody = when (val kind = content.kind) {
+            is MsgLikeKind.Message -> MatrixMessageBody(
+                body = kind.content.displayBody(),
+                contentType = kind.content.contentType()
+            )
+            MsgLikeKind.Redacted -> MatrixMessageBody(
+                body = "Deleted message",
+                contentType = MatrixMessageContentType.REDACTED
+            )
+            is MsgLikeKind.UnableToDecrypt -> MatrixMessageBody(
+                body = "Unable to decrypt message",
+                contentType = MatrixMessageContentType.UNABLE_TO_DECRYPT
+            )
             else -> return null
         }
+        val eventId = eventOrTransactionId.eventIdOrNull()
+        val transactionId = eventOrTransactionId.transactionIdOrNull()
 
         return MatrixChatMessage(
             id = eventOrTransactionId.stableId(),
+            eventId = eventId,
+            transactionId = transactionId,
             sender = sender,
-            body = body,
+            body = messageBody.body,
             timestampMillis = timestamp.toLong(),
-            isOwn = isOwn
+            isOwn = isOwn,
+            contentType = messageBody.contentType
         )
     }
 
@@ -535,6 +572,14 @@ class MatrixClientService(
             is EventOrTransactionId.EventId -> eventId
             is EventOrTransactionId.TransactionId -> transactionId
         }
+    }
+
+    private fun EventOrTransactionId.eventIdOrNull(): String? {
+        return (this as? EventOrTransactionId.EventId)?.eventId
+    }
+
+    private fun EventOrTransactionId.transactionIdOrNull(): String? {
+        return (this as? EventOrTransactionId.TransactionId)?.transactionId
     }
 
     private fun MessageContent.displayBody(): String {
@@ -549,6 +594,21 @@ class MatrixClientService(
             is MessageType.Gallery -> type.content.body
             is MessageType.Location -> type.content.body
             is MessageType.Other -> type.body
+        }
+    }
+
+    private fun MessageContent.contentType(): MatrixMessageContentType {
+        return when (msgType) {
+            is MessageType.Text -> MatrixMessageContentType.TEXT
+            is MessageType.Notice -> MatrixMessageContentType.NOTICE
+            is MessageType.Emote -> MatrixMessageContentType.EMOTE
+            is MessageType.Image -> MatrixMessageContentType.IMAGE
+            is MessageType.Audio -> MatrixMessageContentType.AUDIO
+            is MessageType.Video -> MatrixMessageContentType.VIDEO
+            is MessageType.File -> MatrixMessageContentType.FILE
+            is MessageType.Gallery -> MatrixMessageContentType.GALLERY
+            is MessageType.Location -> MatrixMessageContentType.LOCATION
+            is MessageType.Other -> MatrixMessageContentType.UNSUPPORTED
         }
     }
 
@@ -785,6 +845,11 @@ class MatrixClientService(
         val timestampMillis: Long? = null,
         val localOwnMessageStatus: MatrixLastOwnMessageStatus? = null,
         val needsReadReceiptSummary: Boolean = false
+    )
+
+    private data class MatrixMessageBody(
+        val body: String,
+        val contentType: MatrixMessageContentType
     )
 
     private companion object {

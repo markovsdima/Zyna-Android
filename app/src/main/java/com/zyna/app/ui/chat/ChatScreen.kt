@@ -310,7 +310,7 @@ private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
             maxRelevantVisibleHeight > 0 &&
             visibleHeight.toFloat() / maxRelevantVisibleHeight >= READ_RECEIPT_VISIBILITY_THRESHOLD
         ) {
-            message.id
+            message.eventId
         } else {
             null
         }
@@ -413,10 +413,9 @@ private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPatt
 private const val NEWEST_EDGE_THRESHOLD = 1
 private const val READ_RECEIPT_VISIBILITY_THRESHOLD = 0.6f
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
-private const val EVENT_ID_PREFIX = "$"
 
 private fun MatrixChatMessage.isReadReceiptCandidate(): Boolean {
-    return !isOwn && id.startsWith(EVENT_ID_PREFIX)
+    return !isOwn && eventId != null
 }
 
 private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {

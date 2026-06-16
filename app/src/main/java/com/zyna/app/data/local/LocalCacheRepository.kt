@@ -3,6 +3,7 @@ package com.zyna.app.data.local
 import androidx.room.withTransaction
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
+import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
@@ -293,10 +294,13 @@ class LocalCacheRepository(
     private fun CachedTimelineMessageEntity.toChatMessage(): MatrixChatMessage {
         return MatrixChatMessage(
             id = id,
+            eventId = eventId,
+            transactionId = transactionId,
             sender = sender,
             body = body,
             timestampMillis = timestampMillis,
             isOwn = isOwn,
+            contentType = contentType.toMatrixContentType(),
             deliveryState = deliveryState.toMatrixDeliveryState()
         )
     }
@@ -321,11 +325,14 @@ class LocalCacheRepository(
             userId = userId,
             roomId = roomId,
             id = id,
+            eventId = eventId,
+            transactionId = transactionId,
             timelineIndex = timelineIndex,
             sender = sender,
             body = body,
             timestampMillis = timestampMillis,
             isOwn = isOwn,
+            contentType = contentType.name,
             deliveryState = deliveryState.name,
             updatedAtMillis = updatedAtMillis
         )
@@ -338,8 +345,7 @@ class LocalCacheRepository(
         updatedAtMillis: Long
     ) {
         val eventIds = messages
-            .map { it.id }
-            .filter { id -> id.startsWith(EVENT_ID_PREFIX) }
+            .mapNotNull { it.eventId }
             .distinct()
         if (eventIds.isEmpty()) return
 
@@ -399,7 +405,7 @@ class LocalCacheRepository(
         val timelineMessages = messages
             .filter { message ->
                 !message.id.startsWith(LOCAL_MESSAGE_ID_PREFIX) &&
-                    message.id !in hiddenTimelineIds
+                    message.identityIds().none { it in hiddenTimelineIds }
             }
             .map { it.toChatMessage() }
         val outgoingMessages = outgoingEnvelopes
@@ -415,10 +421,13 @@ class LocalCacheRepository(
 
         return MatrixChatMessage(
             id = "outgoing:$id",
+            eventId = eventId,
+            transactionId = transactionId,
             sender = userId,
             body = body,
             timestampMillis = createdAtMillis,
             isOwn = true,
+            contentType = MatrixMessageContentType.TEXT,
             deliveryState = state.toOutgoingDeliveryState(),
             outgoingEnvelopeId = id,
             canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
@@ -465,6 +474,15 @@ class LocalCacheRepository(
             .getOrDefault(MatrixMessageDeliveryState.SENT)
     }
 
+    private fun String.toMatrixContentType(): MatrixMessageContentType {
+        return runCatching { MatrixMessageContentType.valueOf(this) }
+            .getOrDefault(MatrixMessageContentType.TEXT)
+    }
+
+    private fun CachedTimelineMessageEntity.identityIds(): List<String> {
+        return listOfNotNull(id, eventId, transactionId)
+    }
+
     private fun String?.toLastOwnMessageStatusOrNull(): MatrixLastOwnMessageStatus? {
         return this?.let {
             runCatching { MatrixLastOwnMessageStatus.valueOf(it) }.getOrNull()
@@ -492,7 +510,6 @@ class LocalCacheRepository(
             .thenBy { it.displayName.lowercase(Locale.ROOT) }
             .thenBy { it.id }
 
-        const val EVENT_ID_PREFIX = "$"
         const val LOCAL_MESSAGE_ID_PREFIX = "local:"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
     }

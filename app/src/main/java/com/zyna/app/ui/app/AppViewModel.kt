@@ -484,7 +484,7 @@ class AppViewModel(
         if (route.roomId != roomId) {
             return
         }
-        if (eventId.isNullOrBlank() || !eventId.startsWith(EVENT_ID_PREFIX)) {
+        if (eventId.isNullOrBlank()) {
             readReceiptJob?.cancel()
             readReceiptJob = null
             pendingReadReceiptSend = null
@@ -717,7 +717,7 @@ class AppViewModel(
     }
 
     private fun messageIndex(eventId: String): Int? {
-        return _uiState.value.chatMessages.indexOfFirst { it.id == eventId }
+        return _uiState.value.chatMessages.indexOfFirst { it.eventId == eventId }
             .takeIf { it >= 0 }
     }
 
@@ -820,7 +820,6 @@ class AppViewModel(
     private companion object {
         const val TAG = "AppViewModel"
         const val READ_RECEIPT_SEND_DELAY_MS = 250L
-        const val EVENT_ID_PREFIX = "$"
     }
 }
 

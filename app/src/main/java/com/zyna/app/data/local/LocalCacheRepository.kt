@@ -44,32 +44,31 @@ class LocalCacheRepository(
         }
     }
 
-    suspend fun cacheRoomTimelineWindow(
+    suspend fun cacheRoomTimelineMessages(
         userId: String,
         roomId: String,
         messages: List<MatrixChatMessage>
     ) {
         val now = System.currentTimeMillis()
-        database.withTransaction {
-            messageDao.clearRoomMessages(userId, roomId)
-            if (messages.isNotEmpty()) {
-                messageDao.upsertMessages(
-                    messages.mapIndexed { index, message ->
-                        CachedTimelineMessageEntity(
-                            userId = userId,
-                            roomId = roomId,
-                            id = message.id,
-                            timelineIndex = index,
-                            sender = message.sender,
-                            body = message.body,
-                            timestampMillis = message.timestampMillis,
-                            isOwn = message.isOwn,
-                            updatedAtMillis = now
-                        )
-                    }
+        if (messages.isEmpty()) {
+            return
+        }
+
+        messageDao.upsertMessages(
+            messages.mapIndexed { index, message ->
+                CachedTimelineMessageEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = message.id,
+                    timelineIndex = index,
+                    sender = message.sender,
+                    body = message.body,
+                    timestampMillis = message.timestampMillis,
+                    isOwn = message.isOwn,
+                    updatedAtMillis = now
                 )
             }
-        }
+        )
     }
 
     suspend fun clearAll() {

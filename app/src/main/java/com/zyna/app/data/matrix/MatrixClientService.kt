@@ -209,7 +209,7 @@ class MatrixClientService(
         val hasCleanedUp = AtomicBoolean(false)
 
         fun currentMessages(): List<MatrixChatMessage> = synchronized(entries) {
-            entries.visibleChatMessages()
+            entries.loadedChatMessages()
         }
 
         fun emitCurrentMessages() {
@@ -383,8 +383,8 @@ class MatrixClientService(
         }
     }
 
-    private fun List<MatrixChatMessage?>.visibleChatMessages(): List<MatrixChatMessage> {
-        return filterNotNull().takeLast(TIMELINE_MAX_VISIBLE_MESSAGES)
+    private fun List<MatrixChatMessage?>.loadedChatMessages(): List<MatrixChatMessage> {
+        return filterNotNull()
     }
 
     private fun TimelineItem.toChatMessageOrNull(): MatrixChatMessage? = use { item ->
@@ -544,7 +544,6 @@ class MatrixClientService(
         const val TIMELINE_PAGE_SIZE = 100
         const val TIMELINE_INITIAL_BACKFILL_PAGES = 5
         const val TIMELINE_INTERACTIVE_BACKFILL_PAGES = 3
-        const val TIMELINE_MAX_VISIBLE_MESSAGES = 1_500
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
     }

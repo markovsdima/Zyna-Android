@@ -391,7 +391,7 @@ class AppViewModel(
             try {
                 matrixClientService.roomTimelineMessages(roomId).collect { messages ->
                     if (messages.isNotEmpty()) {
-                        localCacheRepository.cacheRoomTimelineWindow(userId, roomId, messages)
+                        localCacheRepository.cacheRoomTimelineMessages(userId, roomId, messages)
                     }
                     _uiState.update {
                         if (!it.isRouteForRoom(userId, roomId)) {

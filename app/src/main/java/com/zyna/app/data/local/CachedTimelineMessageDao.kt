@@ -11,7 +11,7 @@ interface CachedTimelineMessageDao {
         """
         SELECT * FROM timeline_messages
         WHERE userId = :userId AND roomId = :roomId
-        ORDER BY timelineIndex ASC
+        ORDER BY timestampMillis ASC, id ASC
         """
     )
     fun observeRoomMessages(userId: String, roomId: String): Flow<List<CachedTimelineMessageEntity>>

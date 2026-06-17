@@ -52,6 +52,16 @@ internal object NativeVulkanChat {
 
     external fun nativeProbeHardwareBuffer(hardwareBuffer: HardwareBuffer): Boolean
 
+    external fun nativeSetBackdropHardwareBuffer(
+        handle: Long,
+        hardwareBuffer: HardwareBuffer,
+        rectValues: FloatArray,
+        textureLeft: Float,
+        textureTop: Float
+    ): Boolean
+
+    external fun nativeClearBackdropHardwareBuffer(handle: Long)
+
     external fun nativeRenderFrame(handle: Long): Boolean
 
     private const val TAG = "ZynaVulkanChat"

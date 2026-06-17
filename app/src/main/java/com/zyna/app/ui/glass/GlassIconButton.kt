@@ -1,6 +1,7 @@
 package com.zyna.app.ui.glass
 
 import android.content.Context
+import android.graphics.drawable.GradientDrawable
 import android.util.AttributeSet
 import android.view.Gravity
 import android.widget.FrameLayout
@@ -41,5 +42,18 @@ class GlassIconButton @JvmOverloads constructor(
 
     fun setGlassStyle(style: GlassStyle) {
         glass.glassStyle = style
+    }
+
+    fun setGlassEnabled(enabled: Boolean) {
+        glass.visibility = if (enabled) VISIBLE else GONE
+    }
+
+    fun setSolidBackground(color: Int, strokeColor: Int, strokeWidthPx: Float, cornerRadiusPx: Float) {
+        setBackground(GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+            setStroke(strokeWidthPx.toInt().coerceAtLeast(1), strokeColor)
+            setCornerRadius(cornerRadiusPx)
+        })
     }
 }

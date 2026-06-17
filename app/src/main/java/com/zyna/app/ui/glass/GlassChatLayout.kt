@@ -3,11 +3,15 @@ package com.zyna.app.ui.glass
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Rect
 import android.os.Build
+import android.os.Looper
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -60,17 +64,54 @@ class GlassChatLayout @JvmOverloads constructor(
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
     private var recyclerAccessibilityBeforeMenu = IMPORTANT_FOR_ACCESSIBILITY_AUTO
-    private var hardwareCaptureProbe: HardwareBufferChatCapture? = null
-    private var didRunHardwareCaptureProbe = false
+    private var hardwareBackdropCapture: HardwareBufferChatCapture? = null
+    private var hardwareBackdropCaptureScheduled = false
+    private var hardwareBackdropCaptureRequiresFreshImage = false
+    private var recyclerDrawListenerAttached = false
+    private var lastRecyclerDrawScrollOffset = Int.MIN_VALUE
+    private var lastHardwareBackdropCaptureUptimeMs = 0L
+    private var vulkanGlassRects: List<VulkanChatGlassRect> = emptyList()
+    private var vulkanGlassCaptureBounds = Rect()
+    private var vulkanGlassPerfWindowStartNanos = 0L
+    private var vulkanGlassPerfSamples = 0
+    private var vulkanGlassPerfDrops = 0
+    private var vulkanGlassPerfTotalNanos = 0L
+    private var vulkanGlassPerfMaxNanos = 0L
+    private var vulkanGlassPerfCaptureNanos = 0L
+    private var vulkanGlassPerfCaptureMaxNanos = 0L
+    private var vulkanGlassPerfSyncNanos = 0L
+    private var vulkanGlassPerfSyncMaxNanos = 0L
+    private var vulkanGlassPerfAcquireNanos = 0L
+    private var vulkanGlassPerfAcquireMaxNanos = 0L
+    private var vulkanGlassPerfOverlayNanos = 0L
+    private var vulkanGlassPerfOverlayMaxNanos = 0L
+    private var vulkanGlassPerfImportNanos = 0L
+    private var vulkanGlassPerfImportMaxNanos = 0L
+    private var vulkanGlassPerfRenderNanos = 0L
+    private var vulkanGlassPerfRenderMaxNanos = 0L
     private val readReceiptCandidateEvaluationRunnable = Runnable {
         onEvaluateVisibleReadReceiptCandidate()
+    }
+    private val hardwareBackdropCaptureRunnable = Runnable {
+        val requiresFreshImage = hardwareBackdropCaptureRequiresFreshImage
+        hardwareBackdropCaptureScheduled = false
+        hardwareBackdropCaptureRequiresFreshImage = false
+        captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw = requiresFreshImage)
+        lastHardwareBackdropCaptureUptimeMs = SystemClock.uptimeMillis()
+    }
+    private val recyclerDrawListener = ViewTreeObserver.OnDrawListener {
+        val scrollOffset = recyclerView.computeVerticalScrollOffset()
+        if (scrollOffset != lastRecyclerDrawScrollOffset) {
+            lastRecyclerDrawScrollOffset = scrollOffset
+            scheduleVulkanGlassBackdropCapture(VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS)
+        }
     }
     private val chatLayoutManager = LockableLinearLayoutManager(context).apply {
         reverseLayout = true
     }
     private val source = RecyclerViewGlassBackdropSource(recyclerView, palette.background)
     private val vulkanOverlay = VulkanChatOverlayView(context).apply {
-        setDebugOverlayEnabled(BuildConfig.DEBUG && ENABLE_VULKAN_CHAT_DEBUG_OVERLAY)
+        setOverlayEnabled(BuildConfig.DEBUG && ENABLE_VULKAN_CHAT_OVERLAY)
     }
     private val contextMenuLayer = MessageContextMenuLayer(context, glassController).apply {
         onDismissRequested = {
@@ -96,12 +137,21 @@ class GlassChatLayout @JvmOverloads constructor(
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
                     glassController.invalidateBackdrop()
+                    scheduleVulkanGlassBackdropCapture(VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS)
                     maybeLoadOlderMessages()
                     scheduleVisibleReadReceiptCandidateEvaluation()
                 }
 
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
                     glassController.invalidateBackdrop()
+                    if (
+                        newState == RecyclerView.SCROLL_STATE_DRAGGING ||
+                        newState == RecyclerView.SCROLL_STATE_IDLE
+                    ) {
+                        forceVulkanGlassBackdropCapture()
+                    } else {
+                        scheduleVulkanGlassBackdropCapture(VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS)
+                    }
                     if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                         maybeLoadOlderMessages()
                     }
@@ -133,18 +183,59 @@ class GlassChatLayout @JvmOverloads constructor(
         setPalette(palette)
     }
 
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val handled = super.dispatchTouchEvent(event)
+        if (
+            event.actionMasked == MotionEvent.ACTION_DOWN &&
+            event.x >= recyclerView.left &&
+            event.x < recyclerView.right &&
+            event.y >= recyclerView.top &&
+            event.y < recyclerView.bottom &&
+            (inputBar.top <= 0 || event.y < inputBar.top)
+        ) {
+            forceVulkanGlassBackdropCapture()
+        }
+        return handled
+    }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        attachRecyclerDrawListener()
         ViewCompat.requestApplyInsets(this)
     }
 
     override fun onDetachedFromWindow() {
+        detachRecyclerDrawListener()
         removeCallbacks(readReceiptCandidateEvaluationRunnable)
+        removeCallbacks(hardwareBackdropCaptureRunnable)
+        hardwareBackdropCaptureScheduled = false
+        hardwareBackdropCaptureRequiresFreshImage = false
+        vulkanOverlay.clearBackdropFrame()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            hardwareCaptureProbe?.close()
+            hardwareBackdropCapture?.close()
         }
-        hardwareCaptureProbe = null
+        hardwareBackdropCapture = null
         super.onDetachedFromWindow()
+    }
+
+    private fun attachRecyclerDrawListener() {
+        if (recyclerDrawListenerAttached) {
+            return
+        }
+        recyclerView.viewTreeObserver.addOnDrawListener(recyclerDrawListener)
+        recyclerDrawListenerAttached = true
+    }
+
+    private fun detachRecyclerDrawListener() {
+        if (!recyclerDrawListenerAttached) {
+            return
+        }
+        val observer = recyclerView.viewTreeObserver
+        if (observer.isAlive) {
+            observer.removeOnDrawListener(recyclerDrawListener)
+        }
+        recyclerDrawListenerAttached = false
+        lastRecyclerDrawScrollOffset = Int.MIN_VALUE
     }
 
     fun setPalette(newPalette: GlassPalette) {
@@ -159,6 +250,7 @@ class GlassChatLayout @JvmOverloads constructor(
         inputBar.setPalette(newPalette)
         contextMenuLayer.setPalette(newPalette)
         glassController.invalidateBackdrop()
+        scheduleVulkanGlassBackdropCapture()
     }
 
     fun setEmptyState(isEmpty: Boolean, isLoading: Boolean) {
@@ -193,6 +285,7 @@ class GlassChatLayout @JvmOverloads constructor(
 
     fun invalidateGlassContent() {
         glassController.invalidateBackdrop()
+        scheduleVulkanGlassBackdropCapture()
     }
 
     internal fun beginMessageContextMenuGesture(request: MessageContextMenuRequest): Boolean {
@@ -204,6 +297,7 @@ class GlassChatLayout @JvmOverloads constructor(
             setContextScrollLocked(false)
             return false
         }
+        post { updateVulkanGlassRects() }
         return true
     }
 
@@ -222,6 +316,7 @@ class GlassChatLayout @JvmOverloads constructor(
         }
         isContextMenuShowing = true
         recyclerView.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        post { updateVulkanGlassRects() }
         return true
     }
 
@@ -242,6 +337,7 @@ class GlassChatLayout @JvmOverloads constructor(
             if (!isContextGestureActive) {
                 setContextScrollLocked(false)
             }
+            post { updateVulkanGlassRects() }
             return
         }
         isContextMenuShowing = false
@@ -250,6 +346,7 @@ class GlassChatLayout @JvmOverloads constructor(
             setContextScrollLocked(false)
         }
         contextMenuLayer.dismiss(animated)
+        post { updateVulkanGlassRects() }
     }
 
     fun prefetchOlderMessagesIfNeeded() {
@@ -304,6 +401,7 @@ class GlassChatLayout @JvmOverloads constructor(
             recyclerView.scrollToPosition(0)
         }
         glassController.invalidateBackdrop()
+        scheduleVulkanGlassBackdropCapture()
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -367,67 +465,353 @@ class GlassChatLayout @JvmOverloads constructor(
         updateRecyclerPadding(contentBottom)
         contextMenuLayer.layout(0, 0, width, height)
         glassController.invalidateRegions()
-        maybeRunHardwareBufferCaptureProbe(width, height)
+        updateVulkanGlassRects()
         scheduleVisibleReadReceiptCandidateEvaluation(READ_RECEIPT_CONTENT_UPDATE_DELAY_MS)
     }
 
-    private fun maybeRunHardwareBufferCaptureProbe(width: Int, height: Int) {
+    private fun updateVulkanGlassRects() {
+        if (!isVulkanGlassBackdropEnabled() || width <= 0 || height <= 0) {
+            vulkanGlassRects = emptyList()
+            vulkanOverlay.clearBackdropFrame()
+            return
+        }
+
+        val nextRects = ArrayList<VulkanChatGlassRect>(4)
+        if (ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT) {
+            addVulkanGlassPreviewRect(nextRects)
+        } else {
+            inputBar.collectVulkanGlassRects(nextRects)
+            contextMenuLayer.collectVulkanGlassRects(nextRects)
+        }
+        val nextCaptureBounds = buildVulkanGlassCaptureBounds(nextRects)
+        if (vulkanGlassRects == nextRects && vulkanGlassCaptureBounds == nextCaptureBounds) {
+            return
+        }
+
+        vulkanGlassRects = nextRects
+        vulkanGlassCaptureBounds = Rect(nextCaptureBounds)
+        if (ENABLE_VULKAN_CHAT_VERBOSE_TIMING) {
+            Log.d(
+                HARDWARE_BUFFER_CAPTURE_TAG,
+                "AHB glass rects changed " +
+                    "count=${nextRects.size} " +
+                    "capture=${nextCaptureBounds.width()}x${nextCaptureBounds.height()} " +
+                    "origin=${nextCaptureBounds.left},${nextCaptureBounds.top} " +
+                    "input=${inputBar.width}x${inputBar.height} " +
+                    "menu=${contextMenuLayer.width}x${contextMenuLayer.height}"
+            )
+        }
+        if (nextRects.isEmpty() || nextCaptureBounds.isEmpty) {
+            removeCallbacks(hardwareBackdropCaptureRunnable)
+            hardwareBackdropCaptureScheduled = false
+            hardwareBackdropCaptureRequiresFreshImage = false
+            vulkanOverlay.clearBackdropFrame()
+        } else {
+            scheduleVulkanGlassBackdropCapture(delayMillis = 0L)
+        }
+    }
+
+    private fun addVulkanGlassPreviewRect(out: MutableList<VulkanChatGlassRect>) {
+        if (!ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT || inputBar.top <= 0) {
+            return
+        }
+
+        val horizontal = 18f.dpToPx(density)
+        val gap = 14f.dpToPx(density)
+        val previewHeight = 82f.dpToPx(density)
+        val minTop = 18f.dpToPx(density)
+        val bottom = (inputBar.top.toFloat() - gap).coerceAtLeast(minTop)
+        val top = (bottom - previewHeight).coerceAtLeast(minTop)
+        if (bottom - top < 32f.dpToPx(density)) {
+            return
+        }
+
+        out.add(
+            VulkanChatGlassRect(
+                left = horizontal,
+                top = top,
+                right = width.toFloat() - horizontal,
+                bottom = bottom,
+                cornerRadius = 26f.dpToPx(density),
+                opacity = 0.92f
+            )
+        )
+    }
+
+    private fun buildVulkanGlassCaptureBounds(rects: List<VulkanChatGlassRect>): Rect {
+        if (rects.isEmpty() || recyclerView.width <= 0 || recyclerView.height <= 0) {
+            return Rect()
+        }
+        if (!ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT) {
+            return Rect(0, 0, recyclerView.width, recyclerView.height)
+        }
+
+        val margin = 32f.dpToPx(density).toInt()
+        val left = rects.minOf { it.left }.toInt() - margin
+        val top = rects.minOf { it.top }.toInt() - margin
+        val right = rects.maxOf { it.right }.toInt() + margin
+        val bottom = rects.maxOf { it.bottom }.toInt() + margin
+        return Rect(
+            left.coerceIn(0, recyclerView.width),
+            top.coerceIn(0, recyclerView.height),
+            right.coerceIn(0, recyclerView.width),
+            bottom.coerceIn(0, recyclerView.height)
+        )
+    }
+
+    private fun scheduleVulkanGlassBackdropCapture(
+        delayMillis: Long = VULKAN_GLASS_CAPTURE_DELAY_MS,
+        discardPendingImagesBeforeDraw: Boolean = false
+    ) {
+        if (!isVulkanGlassBackdropEnabled() || vulkanGlassRects.isEmpty()) {
+            return
+        }
+
+        if (delayMillis <= 0L) {
+            if (hardwareBackdropCaptureScheduled) {
+                hardwareBackdropCaptureRequiresFreshImage =
+                    hardwareBackdropCaptureRequiresFreshImage || discardPendingImagesBeforeDraw
+                return
+            }
+            hardwareBackdropCaptureScheduled = true
+            hardwareBackdropCaptureRequiresFreshImage = discardPendingImagesBeforeDraw
+            val elapsed = SystemClock.uptimeMillis() - lastHardwareBackdropCaptureUptimeMs
+            val throttleDelay = (
+                VULKAN_GLASS_REALTIME_CAPTURE_MIN_INTERVAL_MS - elapsed
+            ).coerceAtLeast(0L)
+            if (throttleDelay == 0L) {
+                postOnAnimation(hardwareBackdropCaptureRunnable)
+            } else {
+                postDelayed(hardwareBackdropCaptureRunnable, throttleDelay)
+            }
+            return
+        }
+
+        removeCallbacks(hardwareBackdropCaptureRunnable)
+        hardwareBackdropCaptureScheduled = true
+        hardwareBackdropCaptureRequiresFreshImage = discardPendingImagesBeforeDraw
+        postDelayed(hardwareBackdropCaptureRunnable, delayMillis)
+    }
+
+    private fun forceVulkanGlassBackdropCapture() {
+        if (!isVulkanGlassBackdropEnabled() || vulkanGlassRects.isEmpty()) {
+            return
+        }
+
+        removeCallbacks(hardwareBackdropCaptureRunnable)
+        hardwareBackdropCaptureScheduled = true
+        hardwareBackdropCaptureRequiresFreshImage = true
+        postOnAnimation(hardwareBackdropCaptureRunnable)
+    }
+
+    private fun captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw: Boolean = false) {
         if (
-            !BuildConfig.DEBUG ||
-            !ENABLE_HARDWARE_BUFFER_CHAT_CAPTURE_PROBE ||
-            didRunHardwareCaptureProbe ||
-            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
-            width <= 0 ||
-            height <= 0
+            !isVulkanGlassBackdropEnabled() ||
+            vulkanGlassRects.isEmpty() ||
+            !isAttachedToWindow ||
+            recyclerView.width <= 0 ||
+            recyclerView.height <= 0 ||
+            vulkanGlassCaptureBounds.isEmpty
         ) {
             return
         }
 
-        didRunHardwareCaptureProbe = true
-        post {
-            if (!isAttachedToWindow || recyclerView.width <= 0 || recyclerView.height <= 0) {
-                return@post
-            }
-            val capture = hardwareCaptureProbe ?: HardwareBufferChatCapture().also {
-                hardwareCaptureProbe = it
-            }
-            val frame = capture.capture(
-                source = recyclerView,
-                width = recyclerView.width,
-                height = recyclerView.height,
-                backgroundColor = palette.background
+        val captureBounds = Rect(vulkanGlassCaptureBounds)
+        val rects = vulkanGlassRects.toList()
+        val capture = hardwareBackdropCapture ?: HardwareBufferChatCapture().also {
+            hardwareBackdropCapture = it
+        }
+        val didRequest = capture.captureAsync(
+            source = recyclerView,
+            width = captureBounds.width(),
+            height = captureBounds.height(),
+            backgroundColor = palette.background,
+            sourceLeft = captureBounds.left.toFloat(),
+            sourceTop = captureBounds.top.toFloat(),
+            discardPendingImagesBeforeDraw = discardPendingImagesBeforeDraw
+        ) { frame ->
+            handleVulkanGlassBackdropFrame(
+                frame = frame,
+                rects = rects,
+                captureBounds = captureBounds
             )
-            if (frame == null) {
-                Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "AHB capture probe produced no frame")
-                return@post
+        }
+        if (!didRequest) {
+            if (ENABLE_VULKAN_CHAT_PERF_LOGGING) {
+                recordVulkanGlassPerfDrop()
             }
-
-            try {
-                val nativeOk = if (NativeVulkanChat.isAvailable) {
-                    runCatching {
-                        NativeVulkanChat.nativeProbeHardwareBuffer(frame.hardwareBuffer)
-                    }.getOrElse { error ->
-                        Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "Native AHB probe failed", error)
-                        false
-                    }
-                } else {
-                    false
-                }
-                val renderMs = frame.renderNanos / 1_000_000.0
-                Log.d(
-                    HARDWARE_BUFFER_CAPTURE_TAG,
-                    "AHB capture probe ok " +
-                        "size=${frame.width}x${frame.height} " +
-                        "format=${frame.format} " +
-                        "usage=0x${frame.usage.toString(16)} " +
-                        "renderMs=$renderMs " +
-                        "renderResult=${frame.renderResult} " +
-                        "native=$nativeOk"
-                )
-            } finally {
-                frame.close()
+            if (ENABLE_VULKAN_CHAT_VERBOSE_TIMING) {
+                Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "AHB glass backdrop request failed")
             }
         }
+    }
+
+    private fun handleVulkanGlassBackdropFrame(
+        frame: HardwareBufferChatCapture.CapturedFrame,
+        rects: List<VulkanChatGlassRect>,
+        captureBounds: Rect
+    ) {
+        if (
+            !isVulkanGlassBackdropEnabled() ||
+            !isAttachedToWindow ||
+            rects.isEmpty() ||
+            vulkanGlassRects.isEmpty()
+        ) {
+            frame.close()
+            return
+        }
+
+        val overlayStartNanos = SystemClock.elapsedRealtimeNanos()
+        val overlayResult = vulkanOverlay.setBackdropFrame(
+            frame = frame,
+            rects = rects,
+            textureLeft = captureBounds.left.toFloat(),
+            textureTop = captureBounds.top.toFloat()
+        )
+        val overlayCallNanos = SystemClock.elapsedRealtimeNanos() - overlayStartNanos
+        val tickTotalNanos = frame.renderNanos + overlayCallNanos
+
+        if (ENABLE_VULKAN_CHAT_VERBOSE_TIMING) {
+            val renderMs = frame.renderNanos / 1_000_000.0
+            Log.d(
+                HARDWARE_BUFFER_CAPTURE_TAG,
+                "AHB glass backdrop queued " +
+                    "rects=${rects.size} " +
+                    "origin=${captureBounds.left},${captureBounds.top} " +
+                    "size=${frame.width}x${frame.height} " +
+                    "format=${frame.format} " +
+                    "usage=0x${frame.usage.toString(16)} " +
+                    "renderMs=$renderMs " +
+                    "ensureMs=${frame.ensureTargetNanos.msString()} " +
+                    "recordMs=${frame.recordNanos.msString()} " +
+                    "syncMs=${frame.syncNanos.msString()} " +
+                    "acquireMs=${frame.acquireNanos.msString()} " +
+                    "bufferMs=${frame.hardwareBufferNanos.msString()} " +
+                    "renderResult=${frame.renderResult}"
+            )
+            Log.d(
+                HARDWARE_BUFFER_CAPTURE_TAG,
+                "AHB glass tick " +
+                    "main=${Looper.myLooper() == Looper.getMainLooper()} " +
+                    "rects=${rects.size} " +
+                    "size=${frame.width}x${frame.height} " +
+                    "totalMs=${tickTotalNanos.msString()} " +
+                    "captureCallMs=${frame.renderNanos.msString()} " +
+                    "captureRenderMs=${frame.renderNanos.msString()} " +
+                    "recordMs=${frame.recordNanos.msString()} " +
+                    "syncMs=${frame.syncNanos.msString()} " +
+                    "acquireMs=${frame.acquireNanos.msString()} " +
+                    "overlayCallMs=${overlayCallNanos.msString()} " +
+                    "overlayTotalMs=${overlayResult.totalNanos.msString()} " +
+                    "importMs=${overlayResult.importNanos.msString()} " +
+                    "renderCallMs=${overlayResult.renderCallNanos.msString()} " +
+                    "imported=${overlayResult.imported} " +
+                    "rendered=${overlayResult.rendered} " +
+                    "continue=${overlayResult.willContinueRendering} " +
+                    "overlayMain=${overlayResult.mainThread}"
+            )
+        }
+        if (ENABLE_VULKAN_CHAT_PERF_LOGGING) {
+            recordVulkanGlassPerfSample(
+                tickTotalNanos = tickTotalNanos,
+                captureCallNanos = frame.renderNanos,
+                frame = frame,
+                overlayCallNanos = overlayCallNanos,
+                overlayResult = overlayResult
+            )
+        }
+    }
+
+    private fun recordVulkanGlassPerfDrop() {
+        if (vulkanGlassPerfWindowStartNanos == 0L) {
+            vulkanGlassPerfWindowStartNanos = SystemClock.elapsedRealtimeNanos()
+        }
+        vulkanGlassPerfDrops += 1
+    }
+
+    private fun recordVulkanGlassPerfSample(
+        tickTotalNanos: Long,
+        captureCallNanos: Long,
+        frame: HardwareBufferChatCapture.CapturedFrame,
+        overlayCallNanos: Long,
+        overlayResult: BackdropFrameResult
+    ) {
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        if (vulkanGlassPerfWindowStartNanos == 0L) {
+            vulkanGlassPerfWindowStartNanos = nowNanos
+        }
+        vulkanGlassPerfSamples += 1
+        vulkanGlassPerfTotalNanos += tickTotalNanos
+        vulkanGlassPerfMaxNanos = max(vulkanGlassPerfMaxNanos, tickTotalNanos)
+        vulkanGlassPerfCaptureNanos += captureCallNanos
+        vulkanGlassPerfCaptureMaxNanos = max(vulkanGlassPerfCaptureMaxNanos, captureCallNanos)
+        vulkanGlassPerfSyncNanos += frame.syncNanos
+        vulkanGlassPerfSyncMaxNanos = max(vulkanGlassPerfSyncMaxNanos, frame.syncNanos)
+        vulkanGlassPerfAcquireNanos += frame.acquireNanos
+        vulkanGlassPerfAcquireMaxNanos = max(vulkanGlassPerfAcquireMaxNanos, frame.acquireNanos)
+        vulkanGlassPerfOverlayNanos += overlayCallNanos
+        vulkanGlassPerfOverlayMaxNanos = max(vulkanGlassPerfOverlayMaxNanos, overlayCallNanos)
+        vulkanGlassPerfImportNanos += overlayResult.importNanos
+        vulkanGlassPerfImportMaxNanos = max(vulkanGlassPerfImportMaxNanos, overlayResult.importNanos)
+        vulkanGlassPerfRenderNanos += overlayResult.renderCallNanos
+        vulkanGlassPerfRenderMaxNanos = max(vulkanGlassPerfRenderMaxNanos, overlayResult.renderCallNanos)
+
+        val windowNanos = nowNanos - vulkanGlassPerfWindowStartNanos
+        if (windowNanos < VULKAN_GLASS_PERF_LOG_WINDOW_NANOS) {
+            return
+        }
+
+        val samples = vulkanGlassPerfSamples.coerceAtLeast(1)
+        val hz = samples * 1_000_000_000.0 / windowNanos
+        Log.d(
+            HARDWARE_BUFFER_CAPTURE_TAG,
+            "AHB glass perf " +
+                "samples=$vulkanGlassPerfSamples " +
+                "drops=$vulkanGlassPerfDrops " +
+                "hz=${hz.formatOneDecimal()} " +
+                "main=${Looper.myLooper() == Looper.getMainLooper()} " +
+                "avgMs=${(vulkanGlassPerfTotalNanos / samples).msString()} " +
+                "maxMs=${vulkanGlassPerfMaxNanos.msString()} " +
+                "captureAvgMs=${(vulkanGlassPerfCaptureNanos / samples).msString()} " +
+                "captureMaxMs=${vulkanGlassPerfCaptureMaxNanos.msString()} " +
+                "syncAvgMs=${(vulkanGlassPerfSyncNanos / samples).msString()} " +
+                "syncMaxMs=${vulkanGlassPerfSyncMaxNanos.msString()} " +
+                "acquireAvgMs=${(vulkanGlassPerfAcquireNanos / samples).msString()} " +
+                "acquireMaxMs=${vulkanGlassPerfAcquireMaxNanos.msString()} " +
+                "overlayAvgMs=${(vulkanGlassPerfOverlayNanos / samples).msString()} " +
+                "overlayMaxMs=${vulkanGlassPerfOverlayMaxNanos.msString()} " +
+                "importAvgMs=${(vulkanGlassPerfImportNanos / samples).msString()} " +
+                "importMaxMs=${vulkanGlassPerfImportMaxNanos.msString()} " +
+                "renderAvgMs=${(vulkanGlassPerfRenderNanos / samples).msString()} " +
+                "renderMaxMs=${vulkanGlassPerfRenderMaxNanos.msString()}"
+        )
+        resetVulkanGlassPerfWindow(nowNanos)
+    }
+
+    private fun resetVulkanGlassPerfWindow(startNanos: Long) {
+        vulkanGlassPerfWindowStartNanos = startNanos
+        vulkanGlassPerfSamples = 0
+        vulkanGlassPerfDrops = 0
+        vulkanGlassPerfTotalNanos = 0L
+        vulkanGlassPerfMaxNanos = 0L
+        vulkanGlassPerfCaptureNanos = 0L
+        vulkanGlassPerfCaptureMaxNanos = 0L
+        vulkanGlassPerfSyncNanos = 0L
+        vulkanGlassPerfSyncMaxNanos = 0L
+        vulkanGlassPerfAcquireNanos = 0L
+        vulkanGlassPerfAcquireMaxNanos = 0L
+        vulkanGlassPerfOverlayNanos = 0L
+        vulkanGlassPerfOverlayMaxNanos = 0L
+        vulkanGlassPerfImportNanos = 0L
+        vulkanGlassPerfImportMaxNanos = 0L
+        vulkanGlassPerfRenderNanos = 0L
+        vulkanGlassPerfRenderMaxNanos = 0L
+    }
+
+    private fun isVulkanGlassBackdropEnabled(): Boolean {
+        return BuildConfig.DEBUG &&
+            ENABLE_VULKAN_CHAT_GLASS_BACKDROP &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
     }
 
     private fun handleMessageContextAction(
@@ -535,9 +919,16 @@ private class LockableLinearLayoutManager(context: Context) : LinearLayoutManage
     }
 }
 
-private const val ENABLE_VULKAN_CHAT_DEBUG_OVERLAY = true
-private const val ENABLE_HARDWARE_BUFFER_CHAT_CAPTURE_PROBE = true
+private const val ENABLE_VULKAN_CHAT_OVERLAY = true
+private const val ENABLE_VULKAN_CHAT_GLASS_BACKDROP = true
+private const val ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT = true
+private const val ENABLE_VULKAN_CHAT_VERBOSE_TIMING = false
+private const val ENABLE_VULKAN_CHAT_PERF_LOGGING = false
 private const val HARDWARE_BUFFER_CAPTURE_TAG = "ZynaHwBufferCapture"
+private const val VULKAN_GLASS_CAPTURE_DELAY_MS = 32L
+private const val VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS = 0L
+private const val VULKAN_GLASS_REALTIME_CAPTURE_MIN_INTERVAL_MS = 0L
+private const val VULKAN_GLASS_PERF_LOG_WINDOW_NANOS = 1_000_000_000L
 private const val LOAD_OLDER_THRESHOLD = 240
 private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L
@@ -552,4 +943,8 @@ private fun defaultPalette(): GlassPalette {
         text = 0xff15151a.toInt(),
         hint = 0x9915151a.toInt()
     )
+}
+
+private fun Double.formatOneDecimal(): String {
+    return "%.1f".format(this)
 }

@@ -2,6 +2,8 @@ package com.zyna.app.ui.glass
 
 import android.content.Context
 import android.graphics.SurfaceTexture
+import android.os.Looper
+import android.os.SystemClock
 import android.util.AttributeSet
 import android.util.Log
 import android.view.Choreographer
@@ -23,10 +25,15 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
 ) : TextureView(context, attrs), TextureView.SurfaceTextureListener {
     private var nativeHandle = 0L
     private var surface: Surface? = null
+    private var nativeSurfaceBound = false
+    private var boundSurfaceWidth = 0
+    private var boundSurfaceHeight = 0
     private var frameCallbackPosted = false
     private var creationAttempted = false
     private var enabled = false
     private var pendingPaintSplash: PendingPaintSplash? = null
+    private var pendingBackdropFrame: PendingBackdropFrame? = null
+    private var activeBackdropFrame: ActiveBackdropFrame? = null
     private var idleClearFramesRemaining = 0
 
     private val frameCallback = Choreographer.FrameCallback {
@@ -44,7 +51,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         visibility = GONE
     }
 
-    fun setDebugOverlayEnabled(isEnabled: Boolean) {
+    fun setOverlayEnabled(isEnabled: Boolean) {
         if (enabled == isEnabled) {
             return
         }
@@ -55,6 +62,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         } else {
             stopFrameCallback()
             clearPendingSplash()
+            clearBackdropFrame(clearNative = true)
             clearNativeSurface()
         }
     }
@@ -92,11 +100,72 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             right = bounds.right,
             bottom = bounds.bottom
         )
-        Log.d(TAG, "queue splash bounds=$bounds surfaceReady=${surface != null} visible=$visibility")
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "queue splash bounds=$bounds surfaceReady=${surface != null} visible=$visibility")
+        }
         idleClearFramesRemaining = IDLE_CLEAR_FRAME_COUNT
         visibility = VISIBLE
         bindCurrentSurface()
         startPendingSplashIfReady()
+    }
+
+    fun setBackdropFrame(
+        frame: HardwareBufferChatCapture.CapturedFrame,
+        rects: List<VulkanChatGlassRect>,
+        textureLeft: Float = 0f,
+        textureTop: Float = 0f
+    ): BackdropFrameResult {
+        val startNanos = SystemClock.elapsedRealtimeNanos()
+        val rectValues = rects.toNativeRectValues()
+        if (rectValues.isEmpty()) {
+            frame.close()
+            clearBackdropFrame(clearNative = true)
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+        if (!enabled) {
+            frame.close()
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+        ensureRenderer()
+        if (nativeHandle == 0L) {
+            frame.close()
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+
+        clearPendingBackdropFrame()
+        pendingBackdropFrame = PendingBackdropFrame(
+            frame = frame,
+            rectValues = rectValues,
+            rectCount = rectValues.size / VULKAN_GLASS_RECT_FLOAT_COUNT,
+            textureLeft = textureLeft,
+            textureTop = textureTop
+        )
+        visibility = VISIBLE
+        bindCurrentSurface()
+        val startResult = startPendingBackdropIfReady()
+        return startResult.copy(
+            totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos
+        )
+    }
+
+    fun clearBackdropFrame() {
+        clearPendingBackdropFrame()
+        clearBackdropFrame(clearNative = true)
+        if (pendingPaintSplash == null) {
+            hideIdleSurface()
+        }
     }
 
     override fun onAttachedToWindow() {
@@ -105,6 +174,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             ensureRenderer()
             if (visibility == VISIBLE) {
                 bindCurrentSurface()
+                startPendingBackdropIfReady()
                 startPendingSplashIfReady() || renderActiveEffectsOrDrain()
             }
         }
@@ -113,33 +183,43 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     override fun onDetachedFromWindow() {
         stopFrameCallback()
         clearPendingSplash()
+        clearPendingBackdropFrame()
+        clearBackdropFrame(clearNative = true)
         clearNativeSurface()
         destroyRenderer()
         super.onDetachedFromWindow()
     }
 
     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-        Log.d(TAG, "surface available ${width}x$height visible=$visibility pending=${pendingPaintSplash != null}")
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "surface available ${width}x$height visible=$visibility pending=${pendingPaintSplash != null}")
+        }
         surfaceTexture.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
         surface = Surface(surfaceTexture)
         if (enabled && visibility == VISIBLE) {
             ensureRenderer()
             setNativeSurface(width, height)
+            startPendingBackdropIfReady()
             startPendingSplashIfReady() || renderActiveEffectsOrDrain()
         }
     }
 
     override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
-        Log.d(TAG, "surface size changed ${width}x$height visible=$visibility pending=${pendingPaintSplash != null}")
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "surface size changed ${width}x$height visible=$visibility pending=${pendingPaintSplash != null}")
+        }
         surfaceTexture.setDefaultBufferSize(width.coerceAtLeast(1), height.coerceAtLeast(1))
         if (enabled && visibility == VISIBLE) {
             setNativeSurface(width, height)
+            startPendingBackdropIfReady()
             startPendingSplashIfReady() || renderActiveEffectsOrDrain()
         }
     }
 
     override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
-        Log.d(TAG, "surface destroyed")
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "surface destroyed")
+        }
         stopFrameCallback()
         clearNativeSurface()
         surface?.release()
@@ -177,12 +257,19 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     }
 
     private fun hideIdleSurface() {
-        Log.d(TAG, "hide idle surface")
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "hide idle surface")
+        }
         stopFrameCallback()
         clearPendingSplash()
+        clearPendingBackdropFrame()
         idleClearFramesRemaining = 0
-        clearNativeSurface()
-        visibility = if (enabled && NativeVulkanChat.isAvailable) INVISIBLE else GONE
+        if (activeBackdropFrame == null) {
+            clearNativeSurface()
+            visibility = if (enabled && NativeVulkanChat.isAvailable) INVISIBLE else GONE
+        } else {
+            visibility = VISIBLE
+        }
     }
 
     private fun startPendingSplashIfReady(): Boolean {
@@ -204,9 +291,70 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         } finally {
             splash.bitmap.recycle()
         }
-        Log.d(TAG, "start native splash")
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "start native splash")
+        }
         idleClearFramesRemaining = IDLE_CLEAR_FRAME_COUNT
         return renderActiveEffectsOrDrain()
+    }
+
+    private fun startPendingBackdropIfReady(): BackdropFrameResult {
+        val backdrop = pendingBackdropFrame ?: return BackdropFrameResult(imported = false)
+        val handle = nativeHandle
+        if (handle == 0L || !shouldRender()) {
+            return BackdropFrameResult(imported = false)
+        }
+        pendingBackdropFrame = null
+        val previousBackdrop = activeBackdropFrame
+        activeBackdropFrame = null
+        val importStartNanos = SystemClock.elapsedRealtimeNanos()
+        val didImport = runCatching {
+            NativeVulkanChat.nativeSetBackdropHardwareBuffer(
+                handle,
+                backdrop.frame.hardwareBuffer,
+                backdrop.rectValues,
+                backdrop.textureLeft,
+                backdrop.textureTop
+            )
+        }.getOrElse { error ->
+            Log.w(TAG, "Failed to import backdrop HardwareBuffer", error)
+            false
+        }
+        val importNanos = SystemClock.elapsedRealtimeNanos() - importStartNanos
+        previousBackdrop?.frame?.close()
+
+        if (!didImport) {
+            backdrop.frame.close()
+            if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+                Log.d(TAG, "import backdrop failed nativeMs=${importNanos.msString()}")
+            }
+            return BackdropFrameResult(
+                importNanos = importNanos,
+                imported = false
+            )
+        }
+
+        activeBackdropFrame = ActiveBackdropFrame(backdrop.frame)
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(
+                TAG,
+                "import backdrop rects=${backdrop.rectCount} " +
+                    "origin=${backdrop.textureLeft},${backdrop.textureTop} " +
+                    "size=${backdrop.frame.width}x${backdrop.frame.height} " +
+                    "nativeMs=${importNanos.msString()}"
+            )
+        }
+        val renderStartNanos = SystemClock.elapsedRealtimeNanos()
+        val willContinueRendering = renderActiveEffectsOrDrain()
+        val renderCallNanos = SystemClock.elapsedRealtimeNanos() - renderStartNanos
+        return BackdropFrameResult(
+            importNanos = importNanos,
+            renderCallNanos = renderCallNanos,
+            imported = true,
+            rendered = true,
+            willContinueRendering = willContinueRendering,
+            mainThread = Looper.myLooper() == Looper.getMainLooper()
+        )
     }
 
     private fun clearPendingSplash() {
@@ -214,17 +362,37 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         pendingPaintSplash = null
     }
 
+    private fun clearPendingBackdropFrame() {
+        pendingBackdropFrame?.frame?.close()
+        pendingBackdropFrame = null
+    }
+
+    private fun clearBackdropFrame(clearNative: Boolean) {
+        activeBackdropFrame?.frame?.close()
+        activeBackdropFrame = null
+        if (clearNative && nativeHandle != 0L) {
+            NativeVulkanChat.nativeClearBackdropHardwareBuffer(nativeHandle)
+        }
+    }
+
     private fun renderActiveEffectsOrDrain(): Boolean {
         val handle = nativeHandle
         if (handle == 0L || !shouldRender()) {
             return false
         }
+        val renderStartNanos = SystemClock.elapsedRealtimeNanos()
         val hasActiveEffects = NativeVulkanChat.nativeRenderFrame(handle)
+        val renderNanos = SystemClock.elapsedRealtimeNanos() - renderStartNanos
+        if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
+            Log.d(TAG, "render frame nativeMs=${renderNanos.msString()} active=$hasActiveEffects")
+        }
         var willContinueRendering = false
         if (hasActiveEffects) {
             idleClearFramesRemaining = IDLE_CLEAR_FRAME_COUNT
             postFrameCallback()
             willContinueRendering = true
+        } else if (activeBackdropFrame != null) {
+            idleClearFramesRemaining = 0
         } else if (idleClearFramesRemaining > 0) {
             idleClearFramesRemaining -= 1
             postFrameCallback()
@@ -248,8 +416,21 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         val texture = surfaceTexture ?: return
         if (surface == null) {
             surface = Surface(texture)
+            nativeSurfaceBound = false
         }
-        setNativeSurface(width, height)
+        val nextWidth = width.coerceAtLeast(1)
+        val nextHeight = height.coerceAtLeast(1)
+        if (
+            nativeSurfaceBound &&
+            boundSurfaceWidth == nextWidth &&
+            boundSurfaceHeight == nextHeight
+        ) {
+            return
+        }
+        setNativeSurface(nextWidth, nextHeight)
+        nativeSurfaceBound = true
+        boundSurfaceWidth = nextWidth
+        boundSurfaceHeight = nextHeight
     }
 
     private fun setNativeSurface(width: Int, height: Int) {
@@ -257,12 +438,17 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         if (handle == 0L) {
             return
         }
+        val nextWidth = width.coerceAtLeast(1)
+        val nextHeight = height.coerceAtLeast(1)
         NativeVulkanChat.nativeSetSurface(
             handle,
             surface,
-            width.coerceAtLeast(1),
-            height.coerceAtLeast(1)
+            nextWidth,
+            nextHeight
         )
+        nativeSurfaceBound = surface != null
+        boundSurfaceWidth = if (nativeSurfaceBound) nextWidth else 0
+        boundSurfaceHeight = if (nativeSurfaceBound) nextHeight else 0
     }
 
     private fun clearNativeSurface() {
@@ -270,6 +456,9 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         if (handle != 0L) {
             NativeVulkanChat.nativeSetSurface(handle, null, 1, 1)
         }
+        nativeSurfaceBound = false
+        boundSurfaceWidth = 0
+        boundSurfaceHeight = 0
     }
 
     private fun shouldRender(): Boolean {
@@ -313,3 +502,46 @@ private data class PendingPaintSplash(
     val right: Float,
     val bottom: Float
 )
+
+private data class PendingBackdropFrame(
+    val frame: HardwareBufferChatCapture.CapturedFrame,
+    val rectValues: FloatArray,
+    val rectCount: Int,
+    val textureLeft: Float,
+    val textureTop: Float
+)
+
+private data class ActiveBackdropFrame(
+    val frame: HardwareBufferChatCapture.CapturedFrame
+)
+
+internal data class BackdropFrameResult(
+    val totalNanos: Long = 0L,
+    val importNanos: Long = 0L,
+    val renderCallNanos: Long = 0L,
+    val imported: Boolean,
+    val rendered: Boolean = false,
+    val willContinueRendering: Boolean = false,
+    val mainThread: Boolean = Looper.myLooper() == Looper.getMainLooper()
+)
+
+private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 6
+private const val ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING = false
+
+private fun List<VulkanChatGlassRect>.toNativeRectValues(): FloatArray {
+    val validRects = filter { it.isValid() }
+    if (validRects.isEmpty()) {
+        return FloatArray(0)
+    }
+    val values = FloatArray(validRects.size * VULKAN_GLASS_RECT_FLOAT_COUNT)
+    var index = 0
+    for (rect in validRects) {
+        values[index++] = rect.left
+        values[index++] = rect.top
+        values[index++] = rect.right
+        values[index++] = rect.bottom
+        values[index++] = rect.cornerRadius
+        values[index++] = rect.opacity
+    }
+    return values
+}

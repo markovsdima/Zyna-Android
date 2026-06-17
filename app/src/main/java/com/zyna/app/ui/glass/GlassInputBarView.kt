@@ -1,6 +1,7 @@
 package com.zyna.app.ui.glass
 
 import android.content.Context
+import android.graphics.drawable.GradientDrawable
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -62,6 +63,7 @@ class GlassInputBarView @JvmOverloads constructor(
         addView(attachButton)
         addView(sendButton)
         addView(editText)
+        applyInputGlassState()
 
         editText.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
@@ -95,6 +97,7 @@ class GlassInputBarView @JvmOverloads constructor(
         editText.setHintTextColor(palette.hint)
         attachButton.setTextColor(palette.text)
         sendButton.setTextColor(palette.text)
+        applyInputFallbackStyle(palette, strokeWidth)
 
         editGlass.glassStyle = GlassStyle(
             cornerRadiusPx = 22f.dpToPx(density),
@@ -153,6 +156,51 @@ class GlassInputBarView @JvmOverloads constructor(
             sendButton.alpha = if (sending) 0.48f else 1f
             sendButton.setText(if (sending) "..." else ">")
         }
+    }
+
+    internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
+        if (
+            DISABLE_CHAT_INPUT_HWUI_GLASS ||
+            !isShown ||
+            width <= 0 ||
+            height <= 0
+        ) {
+            return
+        }
+
+        val radius = 22f.dpToPx(density)
+        val strongOpacity = 0.72f
+        val editOpacity = 0.76f
+        addChildGlassRect(out, attachButton, radius, strongOpacity)
+        addChildGlassRect(out, editGlass, radius, editOpacity)
+        addChildGlassRect(out, sendButton, radius, strongOpacity)
+    }
+
+    private fun applyInputGlassState() {
+        val glassEnabled = !DISABLE_CHAT_INPUT_HWUI_GLASS
+        editGlass.visibility = if (glassEnabled) VISIBLE else GONE
+        attachButton.setGlassEnabled(glassEnabled)
+        sendButton.setGlassEnabled(glassEnabled)
+    }
+
+    private fun applyInputFallbackStyle(palette: GlassPalette, strokeWidth: Float) {
+        if (!DISABLE_CHAT_INPUT_HWUI_GLASS) {
+            editText.background = null
+            attachButton.setBackground(null)
+            sendButton.setBackground(null)
+            return
+        }
+
+        val cornerRadius = 22f.dpToPx(density)
+        val fallbackColor = 0x66303034
+        editText.background = GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(fallbackColor)
+            setStroke(strokeWidth.toInt().coerceAtLeast(1), palette.stroke)
+            setCornerRadius(cornerRadius)
+        }
+        attachButton.setSolidBackground(fallbackColor, palette.stroke, strokeWidth, cornerRadius)
+        sendButton.setSolidBackground(fallbackColor, palette.stroke, strokeWidth, cornerRadius)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -230,4 +278,27 @@ class GlassInputBarView @JvmOverloads constructor(
             editText.text?.clear()
         }
     }
+
+    private fun addChildGlassRect(
+        out: MutableList<VulkanChatGlassRect>,
+        child: android.view.View,
+        cornerRadius: Float,
+        opacity: Float
+    ) {
+        if (child.width <= 0 || child.height <= 0 || child.visibility != VISIBLE) {
+            return
+        }
+        out.add(
+            VulkanChatGlassRect(
+                left = (left + child.left).toFloat(),
+                top = (top + child.top).toFloat(),
+                right = (left + child.right).toFloat(),
+                bottom = (top + child.bottom).toFloat(),
+                cornerRadius = cornerRadius,
+                opacity = opacity
+            )
+        )
+    }
 }
+
+private const val DISABLE_CHAT_INPUT_HWUI_GLASS = false

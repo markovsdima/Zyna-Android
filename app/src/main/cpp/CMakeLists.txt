@@ -39,6 +39,8 @@ set(PAINT_SPLASH_VERT_SPV "${GENERATED_SHADER_DIR}/paint_splash_vert_spv.inc")
 set(PAINT_SPLASH_FRAG_SPV "${GENERATED_SHADER_DIR}/paint_splash_frag_spv.inc")
 set(PAINT_SPLASH_COMPOSITE_VERT_SPV "${GENERATED_SHADER_DIR}/paint_splash_composite_vert_spv.inc")
 set(PAINT_SPLASH_COMPOSITE_FRAG_SPV "${GENERATED_SHADER_DIR}/paint_splash_composite_frag_spv.inc")
+set(CHAT_BACKDROP_VERT_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_vert_spv.inc")
+set(CHAT_BACKDROP_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_frag_spv.inc")
 
 compile_spirv_include(
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/paint_splash.vert"
@@ -60,6 +62,16 @@ compile_spirv_include(
     frag
     "${PAINT_SPLASH_COMPOSITE_FRAG_SPV}"
 )
+compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/chat_backdrop.vert"
+    vert
+    "${CHAT_BACKDROP_VERT_SPV}"
+)
+compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/chat_backdrop.frag"
+    frag
+    "${CHAT_BACKDROP_FRAG_SPV}"
+)
 
 add_custom_target(
     zyna_vulkan_chat_shaders
@@ -68,6 +80,8 @@ add_custom_target(
         "${PAINT_SPLASH_FRAG_SPV}"
         "${PAINT_SPLASH_COMPOSITE_VERT_SPV}"
         "${PAINT_SPLASH_COMPOSITE_FRAG_SPV}"
+        "${CHAT_BACKDROP_VERT_SPV}"
+        "${CHAT_BACKDROP_FRAG_SPV}"
 )
 
 add_library(

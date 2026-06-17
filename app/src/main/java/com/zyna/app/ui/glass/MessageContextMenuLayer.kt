@@ -222,6 +222,28 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         return request.cell.capturePaintSplashTarget(root)
     }
 
+    internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
+        if (
+            visibility != VISIBLE ||
+            menuGlass.width <= 0 ||
+            menuGlass.height <= 0 ||
+            menuProgress <= 0.01f
+        ) {
+            return
+        }
+
+        out.add(
+            VulkanChatGlassRect(
+                left = (left + menuGlass.left).toFloat(),
+                top = (top + menuGlass.top).toFloat(),
+                right = (left + menuGlass.right).toFloat(),
+                bottom = (top + menuGlass.bottom).toFloat(),
+                cornerRadius = 14f.dpToPx(density),
+                opacity = 0.76f * menuProgress
+            )
+        )
+    }
+
     fun playSelectedCellDeleteAnticipation(onEnd: () -> Unit): Boolean {
         if (visibility != VISIBLE || selectedRequest == null) {
             return false

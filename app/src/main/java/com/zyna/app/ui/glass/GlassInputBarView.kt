@@ -53,6 +53,7 @@ class GlassInputBarView @JvmOverloads constructor(
     private var isSending = false
     private var pendingSentText: String? = null
     private var palette: GlassPalette? = null
+    private var vulkanGlassBackgroundEnabled = false
 
     init {
         clipChildren = false
@@ -144,6 +145,18 @@ class GlassInputBarView @JvmOverloads constructor(
         )
     }
 
+    fun setVulkanGlassBackgroundEnabled(enabled: Boolean) {
+        if (vulkanGlassBackgroundEnabled == enabled) {
+            return
+        }
+        vulkanGlassBackgroundEnabled = enabled
+        applyInputGlassState()
+        palette?.let { currentPalette ->
+            applyInputFallbackStyle(currentPalette, 1f.dpToPx(density))
+        }
+        controller.invalidateRegions()
+    }
+
     fun setSending(sending: Boolean, sendFailed: Boolean) {
         val wasSending = isSending
         if (wasSending && !sending) {
@@ -160,7 +173,7 @@ class GlassInputBarView @JvmOverloads constructor(
 
     internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
         if (
-            DISABLE_CHAT_INPUT_HWUI_GLASS ||
+            !vulkanGlassBackgroundEnabled ||
             !isShown ||
             width <= 0 ||
             height <= 0
@@ -169,22 +182,38 @@ class GlassInputBarView @JvmOverloads constructor(
         }
 
         val radius = 22f.dpToPx(density)
-        val strongOpacity = 0.72f
-        val editOpacity = 0.76f
-        addChildGlassRect(out, attachButton, radius, strongOpacity)
-        addChildGlassRect(out, editGlass, radius, editOpacity)
-        addChildGlassRect(out, sendButton, radius, strongOpacity)
+        addChildGlassRect(
+            out = out,
+            child = attachButton,
+            cornerRadius = radius,
+            bevelWidth = 32f.dpToPx(density),
+            glassThickness = 48f.dpToPx(density)
+        )
+        addChildGlassRect(
+            out = out,
+            child = editText,
+            cornerRadius = radius,
+            bevelWidth = 36f.dpToPx(density),
+            glassThickness = 55f.dpToPx(density)
+        )
+        addChildGlassRect(
+            out = out,
+            child = sendButton,
+            cornerRadius = radius,
+            bevelWidth = 32f.dpToPx(density),
+            glassThickness = 48f.dpToPx(density)
+        )
     }
 
     private fun applyInputGlassState() {
-        val glassEnabled = !DISABLE_CHAT_INPUT_HWUI_GLASS
+        val glassEnabled = !vulkanGlassBackgroundEnabled && !DISABLE_CHAT_INPUT_HWUI_GLASS
         editGlass.visibility = if (glassEnabled) VISIBLE else GONE
         attachButton.setGlassEnabled(glassEnabled)
         sendButton.setGlassEnabled(glassEnabled)
     }
 
     private fun applyInputFallbackStyle(palette: GlassPalette, strokeWidth: Float) {
-        if (!DISABLE_CHAT_INPUT_HWUI_GLASS) {
+        if (!DISABLE_CHAT_INPUT_HWUI_GLASS || vulkanGlassBackgroundEnabled) {
             editText.background = null
             attachButton.setBackground(null)
             sendButton.setBackground(null)
@@ -283,7 +312,8 @@ class GlassInputBarView @JvmOverloads constructor(
         out: MutableList<VulkanChatGlassRect>,
         child: android.view.View,
         cornerRadius: Float,
-        opacity: Float
+        bevelWidth: Float,
+        glassThickness: Float
     ) {
         if (child.width <= 0 || child.height <= 0 || child.visibility != VISIBLE) {
             return
@@ -295,9 +325,9 @@ class GlassInputBarView @JvmOverloads constructor(
                 right = (left + child.right).toFloat(),
                 bottom = (top + child.bottom).toFloat(),
                 cornerRadius = cornerRadius,
-                opacity = opacity,
-                bezelWidth = 36f.dpToPx(density),
-                glassThickness = 55f.dpToPx(density)
+                opacity = 1f,
+                bezelWidth = bevelWidth,
+                glassThickness = glassThickness
             )
         )
     }

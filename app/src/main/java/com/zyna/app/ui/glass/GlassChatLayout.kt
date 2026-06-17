@@ -167,6 +167,7 @@ class GlassChatLayout @JvmOverloads constructor(
         addView(composerErrorView)
         addView(inputBar)
         addView(contextMenuLayer)
+        inputBar.setVulkanGlassBackgroundEnabled(isVulkanChatInputGlassEnabled())
 
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
@@ -479,9 +480,8 @@ class GlassChatLayout @JvmOverloads constructor(
         val nextRects = ArrayList<VulkanChatGlassRect>(4)
         if (ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT) {
             addVulkanGlassPreviewRect(nextRects)
-        } else {
+        } else if (isVulkanChatInputGlassEnabled()) {
             inputBar.collectVulkanGlassRects(nextRects)
-            contextMenuLayer.collectVulkanGlassRects(nextRects)
         }
         val nextCaptureBounds = buildVulkanGlassCaptureBounds(nextRects)
         if (vulkanGlassRects == nextRects && vulkanGlassCaptureBounds == nextCaptureBounds) {
@@ -544,10 +544,6 @@ class GlassChatLayout @JvmOverloads constructor(
         if (rects.isEmpty() || recyclerView.width <= 0 || recyclerView.height <= 0) {
             return Rect()
         }
-        if (!ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT) {
-            return Rect(0, 0, recyclerView.width, recyclerView.height)
-        }
-
         val margin = (
             rects.maxOfOrNull { it.glassThickness } ?: 55f.dpToPx(density)
         ).plus(16f.dpToPx(density)).toInt()
@@ -818,6 +814,13 @@ class GlassChatLayout @JvmOverloads constructor(
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
     }
 
+    private fun isVulkanChatInputGlassEnabled(): Boolean {
+        return ENABLE_VULKAN_CHAT_INPUT_GLASS &&
+            !ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT &&
+            isVulkanGlassBackdropEnabled() &&
+            NativeVulkanChat.isAvailable
+    }
+
     private fun handleMessageContextAction(
         message: MessageRenderModel,
         action: MessageContextMenuAction
@@ -925,7 +928,8 @@ private class LockableLinearLayoutManager(context: Context) : LinearLayoutManage
 
 private const val ENABLE_VULKAN_CHAT_OVERLAY = true
 private const val ENABLE_VULKAN_CHAT_GLASS_BACKDROP = true
-private const val ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT = true
+private const val ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT = false
+private const val ENABLE_VULKAN_CHAT_INPUT_GLASS = true
 private const val ENABLE_VULKAN_CHAT_VERBOSE_TIMING = false
 private const val ENABLE_VULKAN_CHAT_PERF_LOGGING = false
 private const val HARDWARE_BUFFER_CAPTURE_TAG = "ZynaHwBufferCapture"

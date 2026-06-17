@@ -43,6 +43,7 @@ set(PAINT_SPLASH_COMPOSITE_VERT_SPV "${GENERATED_SHADER_DIR}/paint_splash_compos
 set(PAINT_SPLASH_COMPOSITE_FRAG_SPV "${GENERATED_SHADER_DIR}/paint_splash_composite_frag_spv.inc")
 set(CHAT_BACKDROP_VERT_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_vert_spv.inc")
 set(CHAT_BACKDROP_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_frag_spv.inc")
+set(CHAT_BACKDROP_OVERLAY_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_overlay_frag_spv.inc")
 set(CHAT_BACKDROP_BLUR_VERT_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_blur_vert_spv.inc")
 set(CHAT_BACKDROP_BLUR_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_blur_frag_spv.inc")
 set(CHAT_BACKDROP_STATS_COMP_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_stats_comp_spv.inc")
@@ -88,6 +89,11 @@ compile_spirv_include(
     "${CHAT_BACKDROP_FRAG_SPV}"
 )
 compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/chat_backdrop_overlay.frag"
+    frag
+    "${CHAT_BACKDROP_OVERLAY_FRAG_SPV}"
+)
+compile_spirv_include(
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/chat_backdrop_blur.vert"
     vert
     "${CHAT_BACKDROP_BLUR_VERT_SPV}"
@@ -114,6 +120,7 @@ add_custom_target(
         "${PAINT_SPLASH_COMPOSITE_FRAG_SPV}"
         "${CHAT_BACKDROP_VERT_SPV}"
         "${CHAT_BACKDROP_FRAG_SPV}"
+        "${CHAT_BACKDROP_OVERLAY_FRAG_SPV}"
         "${CHAT_BACKDROP_BLUR_VERT_SPV}"
         "${CHAT_BACKDROP_BLUR_FRAG_SPV}"
         "${CHAT_BACKDROP_STATS_COMP_SPV}"

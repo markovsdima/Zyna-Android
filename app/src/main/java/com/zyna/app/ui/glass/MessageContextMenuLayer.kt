@@ -239,7 +239,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
                 right = (left + menuGlass.right).toFloat(),
                 bottom = (top + menuGlass.bottom).toFloat(),
                 cornerRadius = 14f.dpToPx(density),
-                opacity = 0.76f * menuProgress
+                opacity = 0.76f * menuProgress,
+                bezelWidth = 36f.dpToPx(density),
+                glassThickness = 55f.dpToPx(density)
             )
         )
     }

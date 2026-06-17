@@ -36,7 +36,7 @@ constexpr uint32_t kVerticesPerParticle = 6;
 constexpr uint32_t kMaxParticleVertices =
     kMaxSplashItems * kMaxParticlesPerSplash * kVerticesPerParticle;
 constexpr uint32_t kMaxBackdropRects = 16;
-constexpr uint32_t kBackdropRectFloatCount = 6;
+constexpr uint32_t kBackdropRectFloatCount = 8;
 constexpr size_t kMaxBackdropImportCacheEntries = 6;
 
 alignas(uint32_t) constexpr uint32_t kPaintSplashVertSpv[] =
@@ -63,6 +63,14 @@ alignas(uint32_t) constexpr uint32_t kChatBackdropFragSpv[] =
 #include "chat_backdrop_frag_spv.inc"
 ;
 
+alignas(uint32_t) constexpr uint32_t kChatBackdropBlurVertSpv[] =
+#include "chat_backdrop_blur_vert_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kChatBackdropBlurFragSpv[] =
+#include "chat_backdrop_blur_frag_spv.inc"
+;
+
 struct ParticleVertex {
     float position[2];
     float local[2];
@@ -80,6 +88,14 @@ struct BackdropPushConstants {
     float opacity;
     float cornerRadius;
     float textureOrigin[2];
+    float bezelWidth;
+    float glassThickness;
+    float adaptiveAppearance;
+    float adaptiveContrast;
+};
+
+struct BlurPushConstants {
+    float texelStep[2];
 };
 
 struct BackdropRect {
@@ -89,6 +105,8 @@ struct BackdropRect {
     float bottom;
     float cornerRadius;
     float opacity;
+    float bezelWidth;
+    float glassThickness;
 };
 
 struct BackdropImportEntry {
@@ -679,7 +697,9 @@ private:
             createRenderPassLocked() &&
             createBlobResourcesLocked() &&
             createBackdropDescriptorResourcesLocked() &&
+            createBackdropBlurResourcesLocked() &&
             createParticlePipelineLocked() &&
+            createBackdropBlurPipelineLocked() &&
             createBackdropPipelineLocked() &&
             createCompositePipelineLocked() &&
             createFramebuffersLocked() &&
@@ -1071,16 +1091,20 @@ private:
         }
 
         if (backdropDescriptorSetLayout_ == VK_NULL_HANDLE) {
-            VkDescriptorSetLayoutBinding binding{};
-            binding.binding = 0;
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            binding.descriptorCount = 1;
-            binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+            bindings[0].binding = 0;
+            bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[0].descriptorCount = 1;
+            bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            bindings[1].binding = 1;
+            bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[1].descriptorCount = 1;
+            bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
             VkDescriptorSetLayoutCreateInfo layoutInfo{};
             layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            layoutInfo.bindingCount = 1;
-            layoutInfo.pBindings = &binding;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
             if (!isOk(
                     vkCreateDescriptorSetLayout(
                         device_,
@@ -1097,7 +1121,7 @@ private:
         if (backdropDescriptorPool_ == VK_NULL_HANDLE) {
             VkDescriptorPoolSize poolSize{};
             poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            poolSize.descriptorCount = 1;
+            poolSize.descriptorCount = 2;
 
             VkDescriptorPoolCreateInfo poolInfo{};
             poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1125,7 +1149,8 @@ private:
         }
 
         if (activeBackdropEntry_ != nullptr &&
-            activeBackdropEntry_->imageView != VK_NULL_HANDLE) {
+            activeBackdropEntry_->imageView != VK_NULL_HANDLE &&
+            backdropBlurImageView_ != VK_NULL_HANDLE) {
             updateBackdropDescriptorLocked();
         }
         return true;
@@ -1135,18 +1160,336 @@ private:
         if (backdropDescriptorSet_ == VK_NULL_HANDLE ||
             backdropSampler_ == VK_NULL_HANDLE ||
             activeBackdropEntry_ == nullptr ||
-            activeBackdropEntry_->imageView == VK_NULL_HANDLE) {
+            activeBackdropEntry_->imageView == VK_NULL_HANDLE ||
+            backdropBlurImageView_ == VK_NULL_HANDLE) {
             return;
         }
 
+        std::array<VkDescriptorImageInfo, 2> imageInfos{};
+        imageInfos[0].sampler = backdropSampler_;
+        imageInfos[0].imageView = activeBackdropEntry_->imageView;
+        imageInfos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[1].sampler = backdropSampler_;
+        imageInfos[1].imageView = backdropBlurImageView_;
+        imageInfos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        for (uint32_t index = 0; index < static_cast<uint32_t>(writes.size()); ++index) {
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = backdropDescriptorSet_;
+            writes[index].dstBinding = index;
+            writes[index].descriptorCount = 1;
+            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[index].pImageInfo = &imageInfos[index];
+        }
+        vkUpdateDescriptorSets(
+            device_,
+            static_cast<uint32_t>(writes.size()),
+            writes.data(),
+            0,
+            nullptr
+        );
+    }
+
+    bool createBackdropBlurResourcesLocked() {
+        return createBackdropBlurDescriptorResourcesLocked() &&
+            createBackdropBlurRenderPassLocked();
+    }
+
+    bool createBackdropBlurDescriptorResourcesLocked() {
+        if (backdropBlurDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = 0;
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            binding.descriptorCount = 1;
+            binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = 1;
+            layoutInfo.pBindings = &binding;
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &backdropBlurDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout backdrop blur failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (backdropBlurDescriptorPool_ == VK_NULL_HANDLE) {
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSize.descriptorCount = 2;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 2;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = &poolSize;
+            if (!isOk(
+                    vkCreateDescriptorPool(device_, &poolInfo, nullptr, &backdropBlurDescriptorPool_),
+                    "vkCreateDescriptorPool backdrop blur failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (backdropBlurSourceDescriptorSet_ == VK_NULL_HANDLE ||
+            backdropBlurTempDescriptorSet_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorSetLayout, 2> layouts = {
+                backdropBlurDescriptorSetLayout_,
+                backdropBlurDescriptorSetLayout_
+            };
+            std::array<VkDescriptorSet, 2> sets{};
+            VkDescriptorSetAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateInfo.descriptorPool = backdropBlurDescriptorPool_;
+            allocateInfo.descriptorSetCount = static_cast<uint32_t>(sets.size());
+            allocateInfo.pSetLayouts = layouts.data();
+            if (!isOk(
+                    vkAllocateDescriptorSets(device_, &allocateInfo, sets.data()),
+                    "vkAllocateDescriptorSets backdrop blur failed"
+                )) {
+                return false;
+            }
+            backdropBlurSourceDescriptorSet_ = sets[0];
+            backdropBlurTempDescriptorSet_ = sets[1];
+        }
+        return true;
+    }
+
+    bool createBackdropBlurRenderPassLocked() {
+        if (backdropBlurRenderPass_ != VK_NULL_HANDLE) {
+            return true;
+        }
+
+        VkAttachmentDescription colorAttachment{};
+        colorAttachment.format = backdropBlurFormat_;
+        colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+        colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        colorAttachment.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkAttachmentReference colorAttachmentRef{};
+        colorAttachmentRef.attachment = 0;
+        colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorAttachmentRef;
+
+        std::array<VkSubpassDependency, 2> dependencies{};
+        dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[0].dstSubpass = 0;
+        dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependencies[1].srcSubpass = 0;
+        dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        VkRenderPassCreateInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        renderPassInfo.attachmentCount = 1;
+        renderPassInfo.pAttachments = &colorAttachment;
+        renderPassInfo.subpassCount = 1;
+        renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+        renderPassInfo.pDependencies = dependencies.data();
+
+        return isOk(
+            vkCreateRenderPass(device_, &renderPassInfo, nullptr, &backdropBlurRenderPass_),
+            "vkCreateRenderPass backdrop blur failed"
+        );
+    }
+
+    bool ensureBackdropBlurSizeResourcesLocked(uint32_t width, uint32_t height) {
+        if (width == 0 || height == 0) {
+            return false;
+        }
+        if (backdropBlurWidth_ == width &&
+            backdropBlurHeight_ == height &&
+            backdropBlurTempImageView_ != VK_NULL_HANDLE &&
+            backdropBlurImageView_ != VK_NULL_HANDLE &&
+            backdropBlurTempFramebuffer_ != VK_NULL_HANDLE &&
+            backdropBlurFramebuffer_ != VK_NULL_HANDLE) {
+            return true;
+        }
+
+        destroyBackdropBlurSizeResourcesLocked();
+        backdropBlurWidth_ = width;
+        backdropBlurHeight_ = height;
+        if (!createBackdropBlurImageLocked(
+                width,
+                height,
+                backdropBlurTempImage_,
+                backdropBlurTempImageMemory_,
+                backdropBlurTempImageView_
+            ) ||
+            !createBackdropBlurImageLocked(
+                width,
+                height,
+                backdropBlurImage_,
+                backdropBlurImageMemory_,
+                backdropBlurImageView_
+            ) ||
+            !createBackdropBlurFramebufferLocked(
+                width,
+                height,
+                backdropBlurTempImageView_,
+                backdropBlurTempFramebuffer_
+            ) ||
+            !createBackdropBlurFramebufferLocked(
+                width,
+                height,
+                backdropBlurImageView_,
+                backdropBlurFramebuffer_
+            )) {
+            destroyBackdropBlurSizeResourcesLocked();
+            return false;
+        }
+
+        backdropBlurTempLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        backdropBlurLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        updateBackdropBlurTempDescriptorLocked();
+        updateBackdropDescriptorLocked();
+        return true;
+    }
+
+    bool createBackdropBlurImageLocked(
+        uint32_t width,
+        uint32_t height,
+        VkImage& image,
+        VkDeviceMemory& memory,
+        VkImageView& imageView
+    ) {
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = width;
+        imageInfo.extent.height = height;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = backdropBlurFormat_;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!isOk(vkCreateImage(device_, &imageInfo, nullptr, &image),
+                  "vkCreateImage backdrop blur failed")) {
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(device_, image, &memoryRequirements);
+        uint32_t memoryTypeIndex = 0;
+        if (!findMemoryTypeLocked(
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                memoryTypeIndex
+            )) {
+            logWarn("No device local memory for backdrop blur image");
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (!isOk(vkAllocateMemory(device_, &allocateInfo, nullptr, &memory),
+                  "vkAllocateMemory backdrop blur failed")) {
+            return false;
+        }
+        if (!isOk(vkBindImageMemory(device_, image, memory, 0),
+                  "vkBindImageMemory backdrop blur failed")) {
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = backdropBlurFormat_;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        return isOk(
+            vkCreateImageView(device_, &viewInfo, nullptr, &imageView),
+            "vkCreateImageView backdrop blur failed"
+        );
+    }
+
+    bool createBackdropBlurFramebufferLocked(
+        uint32_t width,
+        uint32_t height,
+        VkImageView imageView,
+        VkFramebuffer& framebuffer
+    ) {
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = backdropBlurRenderPass_;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = &imageView;
+        framebufferInfo.width = width;
+        framebufferInfo.height = height;
+        framebufferInfo.layers = 1;
+        return isOk(
+            vkCreateFramebuffer(device_, &framebufferInfo, nullptr, &framebuffer),
+            "vkCreateFramebuffer backdrop blur failed"
+        );
+    }
+
+    void updateBackdropBlurSourceDescriptorLocked() {
+        if (backdropBlurSourceDescriptorSet_ == VK_NULL_HANDLE ||
+            backdropSampler_ == VK_NULL_HANDLE ||
+            activeBackdropEntry_ == nullptr ||
+            activeBackdropEntry_->imageView == VK_NULL_HANDLE) {
+            return;
+        }
+        updateSingleImageDescriptorLocked(
+            backdropBlurSourceDescriptorSet_,
+            activeBackdropEntry_->imageView
+        );
+    }
+
+    void updateBackdropBlurTempDescriptorLocked() {
+        if (backdropBlurTempDescriptorSet_ == VK_NULL_HANDLE ||
+            backdropSampler_ == VK_NULL_HANDLE ||
+            backdropBlurTempImageView_ == VK_NULL_HANDLE) {
+            return;
+        }
+        updateSingleImageDescriptorLocked(
+            backdropBlurTempDescriptorSet_,
+            backdropBlurTempImageView_
+        );
+    }
+
+    void updateSingleImageDescriptorLocked(VkDescriptorSet descriptorSet, VkImageView imageView) {
         VkDescriptorImageInfo imageInfo{};
         imageInfo.sampler = backdropSampler_;
-        imageInfo.imageView = activeBackdropEntry_->imageView;
+        imageInfo.imageView = imageView;
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         VkWriteDescriptorSet write{};
         write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = backdropDescriptorSet_;
+        write.dstSet = descriptorSet;
         write.dstBinding = 0;
         write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1245,7 +1588,15 @@ private:
             backdropWidth_ = cachedEntry->width;
             backdropHeight_ = cachedEntry->height;
             backdropNeedsTransition_ = true;
+            if (!ensureBackdropBlurSizeResourcesLocked(
+                    static_cast<uint32_t>(cachedEntry->width),
+                    static_cast<uint32_t>(cachedEntry->height)
+                )) {
+                clearBackdropLocked();
+                return false;
+            }
             const int64_t descriptorStartNs = nowNanos();
+            updateBackdropBlurSourceDescriptorLocked();
             updateBackdropDescriptorLocked();
             const int64_t descriptorNs = nowNanos() - descriptorStartNs;
             const int64_t cacheNs = nowNanos() - cacheStartNs;
@@ -1440,7 +1791,15 @@ private:
         backdropWidth_ = entryPtr->width;
         backdropHeight_ = entryPtr->height;
         backdropNeedsTransition_ = true;
+        if (!ensureBackdropBlurSizeResourcesLocked(
+                static_cast<uint32_t>(entryPtr->width),
+                static_cast<uint32_t>(entryPtr->height)
+            )) {
+            clearBackdropLocked();
+            return false;
+        }
         const int64_t descriptorStartNs = nowNanos();
+        updateBackdropBlurSourceDescriptorLocked();
         updateBackdropDescriptorLocked();
         const int64_t descriptorNs = nowNanos() - descriptorStartNs;
         const int64_t importTotalNs = nowNanos() - importStartNs;
@@ -1530,6 +1889,53 @@ private:
         destroyBackdropImportCacheLocked();
     }
 
+    void destroyBackdropBlurSizeResourcesLocked() {
+        if (device_ == VK_NULL_HANDLE) {
+            backdropBlurWidth_ = 0;
+            backdropBlurHeight_ = 0;
+            backdropBlurTempLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+            backdropBlurLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+            return;
+        }
+
+        if (backdropBlurTempFramebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, backdropBlurTempFramebuffer_, nullptr);
+            backdropBlurTempFramebuffer_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurFramebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, backdropBlurFramebuffer_, nullptr);
+            backdropBlurFramebuffer_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurTempImageView_ != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, backdropBlurTempImageView_, nullptr);
+            backdropBlurTempImageView_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurImageView_ != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, backdropBlurImageView_, nullptr);
+            backdropBlurImageView_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurTempImage_ != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, backdropBlurTempImage_, nullptr);
+            backdropBlurTempImage_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurImage_ != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, backdropBlurImage_, nullptr);
+            backdropBlurImage_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurTempImageMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, backdropBlurTempImageMemory_, nullptr);
+            backdropBlurTempImageMemory_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurImageMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, backdropBlurImageMemory_, nullptr);
+            backdropBlurImageMemory_ = VK_NULL_HANDLE;
+        }
+        backdropBlurWidth_ = 0;
+        backdropBlurHeight_ = 0;
+        backdropBlurTempLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        backdropBlurLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
     void destroyBackdropImportEntryLocked(BackdropImportEntry& entry) {
         if (device_ != VK_NULL_HANDLE) {
             if (entry.imageView != VK_NULL_HANDLE) {
@@ -1576,6 +1982,7 @@ private:
             activeBackdropEntry_->image != VK_NULL_HANDLE &&
             activeBackdropEntry_->imageView != VK_NULL_HANDLE &&
             backdropDescriptorSet_ != VK_NULL_HANDLE &&
+            backdropBlurImageView_ != VK_NULL_HANDLE &&
             backdropWidth_ > 0 &&
             backdropHeight_ > 0;
     }
@@ -1790,6 +2197,143 @@ private:
             return VK_NULL_HANDLE;
         }
         return shaderModule;
+    }
+
+    bool createBackdropBlurPipelineLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(BlurPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &backdropBlurDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &backdropBlurPipelineLayout_),
+                "vkCreatePipelineLayout backdrop blur failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule vertexShader = createShaderModuleLocked(
+            kChatBackdropBlurVertSpv,
+            sizeof(kChatBackdropBlurVertSpv)
+        );
+        VkShaderModule fragmentShader = createShaderModuleLocked(
+            kChatBackdropBlurFragSpv,
+            sizeof(kChatBackdropBlurFragSpv)
+        );
+        if (vertexShader == VK_NULL_HANDLE || fragmentShader == VK_NULL_HANDLE) {
+            if (vertexShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, vertexShader, nullptr);
+            }
+            if (fragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, fragmentShader, nullptr);
+            }
+            vkDestroyPipelineLayout(device_, backdropBlurPipelineLayout_, nullptr);
+            backdropBlurPipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo vertexStage{};
+        vertexStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertexStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertexStage.module = vertexShader;
+        vertexStage.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragmentStage{};
+        fragmentStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragmentStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragmentStage.module = fragmentShader;
+        fragmentStage.pName = "main";
+
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+            vertexStage,
+            fragmentStage
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        blendAttachment.blendEnable = VK_FALSE;
+        blendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &blendAttachment;
+
+        const std::array<VkDynamicState, 2> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        pipelineInfo.pStages = shaderStages.data();
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = backdropBlurPipelineLayout_;
+        pipelineInfo.renderPass = backdropBlurRenderPass_;
+        pipelineInfo.subpass = 0;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateGraphicsPipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &backdropBlurPipeline_
+            ),
+            "vkCreateGraphicsPipelines backdrop blur failed"
+        );
+
+        vkDestroyShaderModule(device_, fragmentShader, nullptr);
+        vkDestroyShaderModule(device_, vertexShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, backdropBlurPipelineLayout_, nullptr);
+            backdropBlurPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
     }
 
     bool createBackdropPipelineLocked() {
@@ -2290,6 +2834,7 @@ private:
             recordBlobPassLocked(commandBuffer, vertexCount);
         }
         transitionBackdropImageForSamplingLocked(commandBuffer);
+        recordBackdropBlurPassesLocked(commandBuffer);
         recordCompositePassLocked(commandBuffer, imageIndex, vertexCount > 0);
         isOk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer failed");
     }
@@ -2351,6 +2896,157 @@ private:
         VkDeviceSize vertexOffset = 0;
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, &particleVertexBuffer_, &vertexOffset);
         vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
+        vkCmdEndRenderPass(commandBuffer);
+    }
+
+    void recordBackdropBlurPassesLocked(VkCommandBuffer commandBuffer) {
+        if (!hasBackdropImageLocked() ||
+            !hasBackdropBlurResourcesLocked() ||
+            backdropBlurPipeline_ == VK_NULL_HANDLE ||
+            backdropBlurPipelineLayout_ == VK_NULL_HANDLE ||
+            backdropBlurSourceDescriptorSet_ == VK_NULL_HANDLE ||
+            backdropBlurTempDescriptorSet_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        transitionImageForColorAttachmentLocked(
+            commandBuffer,
+            backdropBlurTempImage_,
+            backdropBlurTempLayout_
+        );
+        recordSingleBackdropBlurPassLocked(
+            commandBuffer,
+            backdropBlurTempFramebuffer_,
+            backdropBlurSourceDescriptorSet_,
+            1.0f / static_cast<float>(std::max(1u, backdropBlurWidth_)),
+            0.0f
+        );
+        backdropBlurTempLayout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        transitionImageForColorAttachmentLocked(
+            commandBuffer,
+            backdropBlurImage_,
+            backdropBlurLayout_
+        );
+        recordSingleBackdropBlurPassLocked(
+            commandBuffer,
+            backdropBlurFramebuffer_,
+            backdropBlurTempDescriptorSet_,
+            0.0f,
+            1.0f / static_cast<float>(std::max(1u, backdropBlurHeight_))
+        );
+        backdropBlurLayout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    bool hasBackdropBlurResourcesLocked() const {
+        return backdropBlurWidth_ > 0 &&
+            backdropBlurHeight_ > 0 &&
+            backdropBlurRenderPass_ != VK_NULL_HANDLE &&
+            backdropBlurTempImage_ != VK_NULL_HANDLE &&
+            backdropBlurImage_ != VK_NULL_HANDLE &&
+            backdropBlurTempImageView_ != VK_NULL_HANDLE &&
+            backdropBlurImageView_ != VK_NULL_HANDLE &&
+            backdropBlurTempFramebuffer_ != VK_NULL_HANDLE &&
+            backdropBlurFramebuffer_ != VK_NULL_HANDLE;
+    }
+
+    void transitionImageForColorAttachmentLocked(
+        VkCommandBuffer commandBuffer,
+        VkImage image,
+        VkImageLayout oldLayout
+    ) {
+        if (image == VK_NULL_HANDLE || oldLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            return;
+        }
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = oldLayout;
+        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+
+        VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            srcStage,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            1,
+            &barrier
+        );
+    }
+
+    void recordSingleBackdropBlurPassLocked(
+        VkCommandBuffer commandBuffer,
+        VkFramebuffer framebuffer,
+        VkDescriptorSet descriptorSet,
+        float texelStepX,
+        float texelStepY
+    ) {
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = backdropBlurRenderPass_;
+        renderPassInfo.framebuffer = framebuffer;
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = {backdropBlurWidth_, backdropBlurHeight_};
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(backdropBlurWidth_);
+        viewport.height = static_cast<float>(backdropBlurHeight_);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = {backdropBlurWidth_, backdropBlurHeight_};
+
+        BlurPushConstants pushConstants{};
+        pushConstants.texelStep[0] = texelStepX;
+        pushConstants.texelStep[1] = texelStepY;
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, backdropBlurPipeline_);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            backdropBlurPipelineLayout_,
+            0,
+            1,
+            &descriptorSet,
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            backdropBlurPipelineLayout_,
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(BlurPushConstants),
+            &pushConstants
+        );
+        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
         vkCmdEndRenderPass(commandBuffer);
     }
 
@@ -2484,6 +3180,10 @@ private:
             pushConstants.cornerRadius = rect.cornerRadius;
             pushConstants.textureOrigin[0] = backdropTextureOrigin_[0];
             pushConstants.textureOrigin[1] = backdropTextureOrigin_[1];
+            pushConstants.bezelWidth = rect.bezelWidth;
+            pushConstants.glassThickness = rect.glassThickness;
+            pushConstants.adaptiveAppearance = 1.0f;
+            pushConstants.adaptiveContrast = 0.0f;
 
             vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
             vkCmdPushConstants(
@@ -2721,6 +3421,20 @@ private:
             vkDestroyPipelineLayout(device_, backdropPipelineLayout_, nullptr);
             backdropPipelineLayout_ = VK_NULL_HANDLE;
         }
+        if (backdropBlurPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, backdropBlurPipeline_, nullptr);
+            backdropBlurPipeline_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurPipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, backdropBlurPipelineLayout_, nullptr);
+            backdropBlurPipelineLayout_ = VK_NULL_HANDLE;
+        }
+
+        destroyBackdropBlurSizeResourcesLocked();
+        if (backdropBlurRenderPass_ != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(device_, backdropBlurRenderPass_, nullptr);
+            backdropBlurRenderPass_ = VK_NULL_HANDLE;
+        }
 
         if (blobFramebuffer_ != VK_NULL_HANDLE) {
             vkDestroyFramebuffer(device_, blobFramebuffer_, nullptr);
@@ -2815,6 +3529,12 @@ private:
             backdropDescriptorPool_ = VK_NULL_HANDLE;
             backdropDescriptorSet_ = VK_NULL_HANDLE;
         }
+        if (backdropBlurDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, backdropBlurDescriptorPool_, nullptr);
+            backdropBlurDescriptorPool_ = VK_NULL_HANDLE;
+            backdropBlurSourceDescriptorSet_ = VK_NULL_HANDLE;
+            backdropBlurTempDescriptorSet_ = VK_NULL_HANDLE;
+        }
         if (compositeDescriptorSetLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_, compositeDescriptorSetLayout_, nullptr);
             compositeDescriptorSetLayout_ = VK_NULL_HANDLE;
@@ -2822,6 +3542,10 @@ private:
         if (backdropDescriptorSetLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_, backdropDescriptorSetLayout_, nullptr);
             backdropDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (backdropBlurDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, backdropBlurDescriptorSetLayout_, nullptr);
+            backdropBlurDescriptorSetLayout_ = VK_NULL_HANDLE;
         }
 
         vkDestroyDevice(device_, nullptr);
@@ -2877,6 +3601,26 @@ private:
     VkDescriptorSetLayout backdropDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool backdropDescriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet backdropDescriptorSet_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout backdropBlurDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool backdropBlurDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet backdropBlurSourceDescriptorSet_ = VK_NULL_HANDLE;
+    VkDescriptorSet backdropBlurTempDescriptorSet_ = VK_NULL_HANDLE;
+    VkFormat backdropBlurFormat_ = VK_FORMAT_R8G8B8A8_UNORM;
+    VkRenderPass backdropBlurRenderPass_ = VK_NULL_HANDLE;
+    VkPipelineLayout backdropBlurPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline backdropBlurPipeline_ = VK_NULL_HANDLE;
+    VkImage backdropBlurTempImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory backdropBlurTempImageMemory_ = VK_NULL_HANDLE;
+    VkImageView backdropBlurTempImageView_ = VK_NULL_HANDLE;
+    VkFramebuffer backdropBlurTempFramebuffer_ = VK_NULL_HANDLE;
+    VkImageLayout backdropBlurTempLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage backdropBlurImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory backdropBlurImageMemory_ = VK_NULL_HANDLE;
+    VkImageView backdropBlurImageView_ = VK_NULL_HANDLE;
+    VkFramebuffer backdropBlurFramebuffer_ = VK_NULL_HANDLE;
+    VkImageLayout backdropBlurLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    uint32_t backdropBlurWidth_ = 0;
+    uint32_t backdropBlurHeight_ = 0;
     VkPipelineLayout backdropPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline backdropPipeline_ = VK_NULL_HANDLE;
     int backdropWidth_ = 0;
@@ -3075,7 +3819,15 @@ Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeSetBackdropHardwareBuffer(
         rect.bottom = values[base + 3];
         rect.cornerRadius = std::max(0.0f, values[base + 4]);
         rect.opacity = std::clamp(values[base + 5], 0.0f, 1.0f);
-        if (rect.right > rect.left && rect.bottom > rect.top && rect.opacity > 0.0f) {
+        rect.bezelWidth = std::max(0.0f, values[base + 6]);
+        rect.glassThickness = std::max(0.0f, values[base + 7]);
+        if (
+            rect.right > rect.left &&
+            rect.bottom > rect.top &&
+            rect.opacity > 0.0f &&
+            rect.bezelWidth > 0.0f &&
+            rect.glassThickness > 0.0f
+        ) {
             rects.push_back(rect);
         }
     }

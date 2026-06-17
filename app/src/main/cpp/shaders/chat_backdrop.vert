@@ -7,6 +7,10 @@ layout(push_constant) uniform PushConstants {
     float opacity;
     float cornerRadius;
     vec2 textureOrigin;
+    float bezelWidth;
+    float glassThickness;
+    float adaptiveAppearance;
+    float adaptiveContrast;
 } pc;
 
 layout(location = 0) out vec2 fragScreen;

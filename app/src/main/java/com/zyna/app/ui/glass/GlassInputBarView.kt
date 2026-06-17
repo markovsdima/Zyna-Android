@@ -295,7 +295,9 @@ class GlassInputBarView @JvmOverloads constructor(
                 right = (left + child.right).toFloat(),
                 bottom = (top + child.bottom).toFloat(),
                 cornerRadius = cornerRadius,
-                opacity = opacity
+                opacity = opacity,
+                bezelWidth = 36f.dpToPx(density),
+                glassThickness = 55f.dpToPx(density)
             )
         )
     }

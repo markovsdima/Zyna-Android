@@ -6,9 +6,16 @@ internal data class VulkanChatGlassRect(
     val right: Float,
     val bottom: Float,
     val cornerRadius: Float,
-    val opacity: Float
+    val opacity: Float,
+    val bezelWidth: Float = cornerRadius * (36f / 26f),
+    val glassThickness: Float = cornerRadius * (55f / 26f)
 ) {
     fun isValid(): Boolean {
-        return right > left && bottom > top && opacity > 0f && cornerRadius >= 0f
+        return right > left &&
+            bottom > top &&
+            opacity > 0f &&
+            cornerRadius >= 0f &&
+            bezelWidth > 0f &&
+            glassThickness > 0f
     }
 }

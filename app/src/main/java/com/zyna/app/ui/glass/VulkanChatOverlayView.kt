@@ -525,7 +525,7 @@ internal data class BackdropFrameResult(
     val mainThread: Boolean = Looper.myLooper() == Looper.getMainLooper()
 )
 
-private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 6
+private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 8
 private const val ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING = false
 
 private fun List<VulkanChatGlassRect>.toNativeRectValues(): FloatArray {
@@ -542,6 +542,8 @@ private fun List<VulkanChatGlassRect>.toNativeRectValues(): FloatArray {
         values[index++] = rect.bottom
         values[index++] = rect.cornerRadius
         values[index++] = rect.opacity
+        values[index++] = rect.bezelWidth
+        values[index++] = rect.glassThickness
     }
     return values
 }

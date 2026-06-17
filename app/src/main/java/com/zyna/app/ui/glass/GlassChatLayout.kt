@@ -533,7 +533,9 @@ class GlassChatLayout @JvmOverloads constructor(
                 right = width.toFloat() - horizontal,
                 bottom = bottom,
                 cornerRadius = 26f.dpToPx(density),
-                opacity = 0.92f
+                opacity = 1f,
+                bezelWidth = 36f.dpToPx(density),
+                glassThickness = 55f.dpToPx(density)
             )
         )
     }
@@ -546,7 +548,9 @@ class GlassChatLayout @JvmOverloads constructor(
             return Rect(0, 0, recyclerView.width, recyclerView.height)
         }
 
-        val margin = 32f.dpToPx(density).toInt()
+        val margin = (
+            rects.maxOfOrNull { it.glassThickness } ?: 55f.dpToPx(density)
+        ).plus(16f.dpToPx(density)).toInt()
         val left = rects.minOf { it.left }.toInt() - margin
         val top = rects.minOf { it.top }.toInt() - margin
         val right = rects.maxOf { it.right }.toInt() + margin

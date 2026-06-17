@@ -1,0 +1,136 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Droplet {
+    vec2 position;
+    vec2 velocity;
+    vec4 color;
+    vec2 srcUv;
+    float baseSize;
+    float flightAge;
+    float rotation;
+    float lifetime;
+    float dragFactor;
+    uint phase;
+};
+
+layout(set = 0, binding = 0, std430) buffer DropletBuffer {
+    Droplet droplets[];
+};
+
+layout(set = 0, binding = 1) uniform sampler2D snapshotTex;
+
+layout(push_constant) uniform PushConstants {
+    vec2 itemSize;
+    uint dropletCount;
+} pc;
+
+const float PI = 3.14159265358979323846;
+const uint SPLASH_PHASE_FADING = 1u;
+const uint SPLASH_PHASE_GLASS_CHECKED = 4u;
+
+float splashHash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float rand(uint gid, float salt) {
+    return splashHash(vec2(float(gid) * 12.9898 + salt, float(gid) * 78.233 + salt * 0.37));
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.dropletCount) {
+        return;
+    }
+
+    vec2 itemSize = max(pc.itemSize, vec2(1.0));
+    float areaScale = pow(sqrt(itemSize.x * itemSize.y) / 90.0, 0.35);
+    areaScale = clamp(areaScale, 1.0, 1.6);
+
+    uint cols = uint(ceil(sqrt(float(pc.dropletCount) * itemSize.x / itemSize.y)));
+    cols = max(cols, 1u);
+    uint rows = (pc.dropletCount + cols - 1u) / cols;
+    rows = max(rows, 1u);
+
+    float cellW = itemSize.x / float(cols);
+    float cellH = itemSize.y / float(rows);
+    uint col = gid % cols;
+    uint row = gid / cols;
+
+    float jitterX = (rand(gid, 1.0) - 0.5) * cellW * 0.3;
+    float jitterY = (rand(gid, 2.0) - 0.5) * cellH * 0.3;
+    float posX = clamp((float(col) + 0.5) * cellW + jitterX, 0.0, itemSize.x);
+    float posY = clamp((float(row) + 0.5) * cellH + jitterY, 0.0, itemSize.y);
+
+    vec2 uv = vec2(posX / itemSize.x, posY / itemSize.y);
+    vec4 sampledColor = texture(snapshotTex, uv);
+    float coverage = clamp(sampledColor.a, 0.0, 1.0);
+
+    Droplet d;
+    d.position = vec2(posX, posY);
+    d.velocity = vec2(0.0);
+    d.srcUv = uv;
+    d.flightAge = 0.0;
+    d.rotation = 0.0;
+    d.dragFactor = 1.0;
+
+    if (coverage < 0.018) {
+        d.color = vec4(0.0);
+        d.baseSize = 0.0;
+        d.lifetime = -1.0;
+        d.phase = SPLASH_PHASE_FADING | SPLASH_PHASE_GLASS_CHECKED;
+        droplets[gid] = d;
+        return;
+    }
+
+    float coverageWeight = smoothstep(0.018, 0.18, coverage);
+    vec3 paintColor = clamp(sampledColor.rgb / max(coverage, 0.001), 0.0, 1.0);
+    float opacity = mix(0.4, 1.0, rand(gid, 113.0)) * coverageWeight;
+    d.color = vec4(paintColor, opacity);
+
+    float baseGridSize = max(cellW, cellH);
+    float sizeRoll = rand(gid, 79.0);
+    float sizeMul;
+    if (sizeRoll < 0.70) {
+        sizeMul = mix(0.4, 0.8, rand(gid, 83.0));
+    } else if (sizeRoll < 0.92) {
+        sizeMul = mix(0.8, 1.5, rand(gid, 89.0));
+    } else {
+        sizeMul = mix(1.5, 3.0, rand(gid, 97.0));
+    }
+    d.baseSize = max(baseGridSize * sizeMul * areaScale, 2.0);
+
+    vec2 center = itemSize * 0.5;
+    vec2 toEdge = vec2(posX, posY) - center;
+    float distFromCenter = length(toEdge);
+    vec2 dir;
+    if (distFromCenter > 0.001) {
+        dir = toEdge / distFromCenter;
+    } else {
+        float a = rand(gid, 41.0) * PI * 2.0;
+        dir = vec2(cos(a), sin(a));
+    }
+
+    float spread = (rand(gid, 53.0) - 0.5) * 0.6;
+    float cs = cos(spread);
+    float sn = sin(spread);
+    dir = vec2(dir.x * cs - dir.y * sn, dir.x * sn + dir.y * cs);
+
+    float bubbleDiag = length(itemSize);
+    float normalizedDist = distFromCenter / max(bubbleDiag * 0.5, 0.001);
+    float sizeFactor = max(d.baseSize / max(baseGridSize * areaScale, 0.001), 0.5);
+    float speed = bubbleDiag * (1.2 + rand(gid, 67.0) * 1.5);
+    speed *= 0.7 + normalizedDist * 0.6;
+    speed /= sizeFactor;
+
+    d.velocity = dir * speed;
+    d.rotation = rand(gid, 101.0) * PI * 2.0;
+    d.lifetime = mix(0.5, 0.9, rand(gid, 127.0));
+    d.phase = 0u;
+    d.dragFactor = 5.0 / max(d.baseSize / max(baseGridSize * areaScale, 0.001), 1.0);
+
+    droplets[gid] = d;
+}

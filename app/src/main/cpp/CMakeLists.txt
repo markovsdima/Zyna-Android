@@ -37,6 +37,8 @@ endfunction()
 
 set(PAINT_SPLASH_VERT_SPV "${GENERATED_SHADER_DIR}/paint_splash_vert_spv.inc")
 set(PAINT_SPLASH_FRAG_SPV "${GENERATED_SHADER_DIR}/paint_splash_frag_spv.inc")
+set(PAINT_SPLASH_INIT_COMP_SPV "${GENERATED_SHADER_DIR}/paint_splash_init_comp_spv.inc")
+set(PAINT_SPLASH_UPDATE_COMP_SPV "${GENERATED_SHADER_DIR}/paint_splash_update_comp_spv.inc")
 set(PAINT_SPLASH_COMPOSITE_VERT_SPV "${GENERATED_SHADER_DIR}/paint_splash_composite_vert_spv.inc")
 set(PAINT_SPLASH_COMPOSITE_FRAG_SPV "${GENERATED_SHADER_DIR}/paint_splash_composite_frag_spv.inc")
 set(CHAT_BACKDROP_VERT_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_vert_spv.inc")
@@ -54,6 +56,16 @@ compile_spirv_include(
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/paint_splash.frag"
     frag
     "${PAINT_SPLASH_FRAG_SPV}"
+)
+compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/paint_splash_init.comp"
+    comp
+    "${PAINT_SPLASH_INIT_COMP_SPV}"
+)
+compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/paint_splash_update.comp"
+    comp
+    "${PAINT_SPLASH_UPDATE_COMP_SPV}"
 )
 compile_spirv_include(
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/paint_splash_composite.vert"
@@ -96,6 +108,8 @@ add_custom_target(
     DEPENDS
         "${PAINT_SPLASH_VERT_SPV}"
         "${PAINT_SPLASH_FRAG_SPV}"
+        "${PAINT_SPLASH_INIT_COMP_SPV}"
+        "${PAINT_SPLASH_UPDATE_COMP_SPV}"
         "${PAINT_SPLASH_COMPOSITE_VERT_SPV}"
         "${PAINT_SPLASH_COMPOSITE_FRAG_SPV}"
         "${CHAT_BACKDROP_VERT_SPV}"

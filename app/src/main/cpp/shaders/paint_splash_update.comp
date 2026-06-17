@@ -1,0 +1,72 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+struct Droplet {
+    vec2 position;
+    vec2 velocity;
+    vec4 color;
+    vec2 srcUv;
+    float baseSize;
+    float flightAge;
+    float rotation;
+    float lifetime;
+    float dragFactor;
+    uint phase;
+};
+
+layout(set = 0, binding = 0, std430) buffer DropletBuffer {
+    Droplet droplets[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float timeStep;
+    uint dropletCount;
+} pc;
+
+const uint SPLASH_PHASE_MASK = 3u;
+const uint SPLASH_PHASE_FLYING = 0u;
+const uint SPLASH_PHASE_FADING = 1u;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.dropletCount) {
+        return;
+    }
+
+    Droplet d = droplets[gid];
+    if (d.lifetime < -0.5 || d.color.a <= 0.001) {
+        droplets[gid] = d;
+        return;
+    }
+
+    float dt = clamp(pc.timeStep, 0.001, 0.05);
+    uint motionPhase = d.phase & SPLASH_PHASE_MASK;
+
+    if (motionPhase == SPLASH_PHASE_FLYING) {
+        vec2 vel = d.velocity;
+        vec2 pos = d.position;
+
+        vel.y += 800.0 * dt;
+        float drag = max(1.0 - d.dragFactor * dt, 0.0);
+        vel *= drag;
+        pos += vel * dt;
+
+        d.velocity = vel;
+        d.position = pos;
+        d.flightAge = min(d.flightAge + dt, 2.0);
+        d.lifetime -= dt;
+        if (d.lifetime <= 0.0) {
+            d.phase = (d.phase & ~SPLASH_PHASE_MASK) | SPLASH_PHASE_FADING;
+            d.lifetime = 0.15;
+        }
+    } else {
+        d.lifetime -= dt;
+        if (d.lifetime <= 0.0) {
+            d.position = vec2(-1000.0, -1000.0);
+            d.lifetime = -1.0;
+        }
+    }
+
+    droplets[gid] = d;
+}

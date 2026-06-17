@@ -24,7 +24,6 @@
 namespace {
 
 constexpr const char* kTag = "ZynaVulkanChat";
-constexpr float kPi = 3.14159265358979323846f;
 constexpr int64_t kPaintSplashDurationNs = 1200000000LL;
 constexpr float kPaintSplashReferenceArea = 8000.0f;
 constexpr float kPaintSplashBaseParticleCount = 300.0f;
@@ -32,9 +31,6 @@ constexpr float kPaintSplashBlobScale = 2.5f;
 constexpr uint32_t kMaxSplashItems = 8;
 constexpr uint32_t kMinParticlesPerSplash = 200;
 constexpr uint32_t kMaxParticlesPerSplash = 1200;
-constexpr uint32_t kVerticesPerParticle = 6;
-constexpr uint32_t kMaxParticleVertices =
-    kMaxSplashItems * kMaxParticlesPerSplash * kVerticesPerParticle;
 constexpr uint32_t kMaxBackdropRects = 16;
 constexpr uint32_t kBackdropRectFloatCount = 10;
 constexpr size_t kMaxBackdropImportCacheEntries = 6;
@@ -46,6 +42,14 @@ alignas(uint32_t) constexpr uint32_t kPaintSplashVertSpv[] =
 
 alignas(uint32_t) constexpr uint32_t kPaintSplashFragSpv[] =
 #include "paint_splash_frag_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kPaintSplashInitCompSpv[] =
+#include "paint_splash_init_comp_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kPaintSplashUpdateCompSpv[] =
+#include "paint_splash_update_comp_spv.inc"
 ;
 
 alignas(uint32_t) constexpr uint32_t kPaintSplashCompositeVertSpv[] =
@@ -76,15 +80,46 @@ alignas(uint32_t) constexpr uint32_t kChatBackdropStatsCompSpv[] =
 #include "chat_backdrop_stats_comp_spv.inc"
 ;
 
-struct ParticleVertex {
+struct GpuDroplet {
     float position[2];
-    float local[2];
+    float velocity[2];
     float color[4];
+    float srcUv[2];
+    float baseSize;
+    float flightAge;
+    float rotation;
+    float lifetime;
+    float dragFactor;
+    uint32_t phase;
 };
 
 struct ParticlePushConstants {
     float viewportSize[2];
+    float itemOrigin[2];
+    float itemSize[2];
+    float blobScale;
+    float _padding0;
 };
+
+struct SplashInitPushConstants {
+    float itemSize[2];
+    uint32_t dropletCount;
+    uint32_t _padding0;
+};
+
+struct SplashUpdatePushConstants {
+    float timeStep;
+    uint32_t dropletCount;
+    uint32_t _padding0[2];
+};
+
+static_assert(sizeof(GpuDroplet) == sizeof(float) * 16);
+static_assert(offsetof(GpuDroplet, position) == 0);
+static_assert(offsetof(GpuDroplet, velocity) == 8);
+static_assert(offsetof(GpuDroplet, color) == 16);
+static_assert(offsetof(GpuDroplet, srcUv) == 32);
+static_assert(offsetof(GpuDroplet, baseSize) == 40);
+static_assert(offsetof(GpuDroplet, phase) == 60);
 
 struct BackdropPushConstants {
     float viewportSize[2];
@@ -145,35 +180,33 @@ struct BackdropStatsResult {
     float darkFraction;
 };
 
-struct BitmapColor {
-    float red;
-    float green;
-    float blue;
-    float alpha;
+struct SplashStagingBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize capacity = 0;
+    void* mapped = nullptr;
+    bool inUse = false;
 };
 
-struct PaintParticle {
-    float originX;
-    float originY;
-    float velocityX;
-    float velocityY;
-    float halfWidth;
-    float halfHeight;
-    float red;
-    float green;
-    float blue;
-    float alpha;
-    float lifetime;
-    float fadeDuration;
-    float dragFactor;
-};
 struct PaintSplashItem {
     float left;
     float top;
     float right;
     float bottom;
     int64_t startTimeNs;
-    std::vector<PaintParticle> particles;
+    int64_t lastUpdateNs;
+    uint32_t dropletCount;
+    bool initialized;
+    VkImage snapshotImage = VK_NULL_HANDLE;
+    VkDeviceMemory snapshotMemory = VK_NULL_HANDLE;
+    VkImageView snapshotImageView = VK_NULL_HANDLE;
+    SplashStagingBuffer* snapshotStaging = nullptr;
+    uint32_t snapshotWidth = 0;
+    uint32_t snapshotHeight = 0;
+    bool snapshotUploadPending = false;
+    VkBuffer dropletBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory dropletMemory = VK_NULL_HANDLE;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
 };
 
 void logWarn(const char* message, VkResult result = VK_SUCCESS) {
@@ -206,33 +239,9 @@ uint32_t clampUint(uint32_t value, uint32_t minValue, uint32_t maxValue) {
     return std::max(minValue, std::min(value, maxValue));
 }
 
-uint32_t hashUint(uint32_t value) {
-    value ^= value >> 16;
-    value *= 0x7feb352du;
-    value ^= value >> 15;
-    value *= 0x846ca68bu;
-    value ^= value >> 16;
-    return value;
-}
-
-float randomFloat(uint32_t seed) {
-    return static_cast<float>(hashUint(seed) & 0x00ffffffu) /
-        static_cast<float>(0x01000000u);
-}
-
-float mixFloat(float from, float to, float progress) {
-    return from + (to - from) * progress;
-}
-
-float smoothStep(float edge0, float edge1, float value) {
-    const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
-    return t * t * (3.0f - 2.0f * t);
-}
-
 class VulkanChatRenderer {
 public:
     VulkanChatRenderer() {
-        particleVertices_.reserve(kMaxParticleVertices);
         createInstance();
     }
 
@@ -327,7 +336,9 @@ public:
         if (right <= left || bottom <= top) {
             return;
         }
+        waitForFrameFenceLocked();
         if (splashItems_.size() >= kMaxSplashItems) {
+            destroyPaintSplashItemLocked(splashItems_.front());
             splashItems_.erase(splashItems_.begin());
         }
         PaintSplashItem item{};
@@ -336,14 +347,14 @@ public:
         item.right = right;
         item.bottom = bottom;
         item.startTimeNs = nowNanos();
-        buildPaintParticlesLocked(item, bitmapInfo, bitmapPixels);
-        if (item.particles.empty()) {
-            addFallbackParticleLocked(item);
+        item.lastUpdateNs = item.startTimeNs;
+        if (!createGpuPaintSplashItemLocked(item, bitmapInfo, bitmapPixels)) {
+            destroyPaintSplashItemLocked(item);
+            return;
         }
         splashItems_.push_back(std::move(item));
         didLogParticleDraw_ = false;
-        logDebugf("native splash queued particles=%u",
-                  static_cast<uint32_t>(splashItems_.back().particles.size()));
+        logDebugf("native splash queued particles=%u", splashItems_.back().dropletCount);
     }
 
     void setSurface(JNIEnv* env, jobject surfaceObject, int width, int height) {
@@ -403,6 +414,7 @@ public:
             return false;
         }
         consumeCompletedBackdropStatsLocked();
+        releaseCompletedSplashUploadStagingLocked();
         vkResetFences(device_, 1, &inFlightFence_);
 
         uint32_t imageIndex = 0;
@@ -468,7 +480,7 @@ public:
             return false;
         }
 
-        return hasActivePaintSplashesLocked();
+        return !splashItems_.empty();
     }
 
 private:
@@ -602,11 +614,6 @@ private:
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         if (!isOk(vkCreateFence(device_, &fenceInfo, nullptr, &inFlightFence_),
                   "vkCreateFence failed")) {
-            destroyDeviceLocked();
-            return false;
-        }
-
-        if (!createParticleBufferLocked()) {
             destroyDeviceLocked();
             return false;
         }
@@ -756,9 +763,12 @@ private:
         return createImageViewsLocked() &&
             createRenderPassLocked() &&
             createBlobResourcesLocked() &&
+            createSplashDescriptorResourcesLocked() &&
             createBackdropDescriptorResourcesLocked() &&
             createBackdropStatsResourcesLocked() &&
             createBackdropBlurResourcesLocked() &&
+            createSplashInitPipelineLocked() &&
+            createSplashUpdatePipelineLocked() &&
             createParticlePipelineLocked() &&
             createBackdropStatsPipelineLocked() &&
             createBackdropBlurPipelineLocked() &&
@@ -1132,6 +1142,58 @@ private:
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         write.pImageInfo = &imageInfo;
         vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+        return true;
+    }
+
+    bool createSplashDescriptorResourcesLocked() {
+        if (splashDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+            bindings[0].binding = 0;
+            bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[0].descriptorCount = 1;
+            bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT;
+            bindings[1].binding = 1;
+            bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[1].descriptorCount = 1;
+            bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &splashDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout splash failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (splashDescriptorPool_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorPoolSize, 2> poolSizes{};
+            poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSizes[0].descriptorCount = kMaxSplashItems;
+            poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSizes[1].descriptorCount = kMaxSplashItems;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+            poolInfo.maxSets = kMaxSplashItems;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+            if (!isOk(
+                    vkCreateDescriptorPool(device_, &poolInfo, nullptr, &splashDescriptorPool_),
+                    "vkCreateDescriptorPool splash failed"
+                )) {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -1751,47 +1813,6 @@ private:
         vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
     }
 
-    bool createParticleBufferLocked() {
-        const VkDeviceSize bufferSize = sizeof(ParticleVertex) * kMaxParticleVertices;
-
-        VkBufferCreateInfo bufferInfo{};
-        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = bufferSize;
-        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (!isOk(vkCreateBuffer(device_, &bufferInfo, nullptr, &particleVertexBuffer_),
-                  "vkCreateBuffer particle failed")) {
-            return false;
-        }
-
-        VkMemoryRequirements memoryRequirements{};
-        vkGetBufferMemoryRequirements(device_, particleVertexBuffer_, &memoryRequirements);
-
-        uint32_t memoryTypeIndex = 0;
-        if (!findMemoryTypeLocked(
-                memoryRequirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                memoryTypeIndex
-            )) {
-            logWarn("No host visible memory for particle buffer");
-            return false;
-        }
-
-        VkMemoryAllocateInfo allocateInfo{};
-        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocateInfo.allocationSize = memoryRequirements.size;
-        allocateInfo.memoryTypeIndex = memoryTypeIndex;
-        if (!isOk(vkAllocateMemory(device_, &allocateInfo, nullptr, &particleVertexMemory_),
-                  "vkAllocateMemory particle failed")) {
-            return false;
-        }
-
-        return isOk(
-            vkBindBufferMemory(device_, particleVertexBuffer_, particleVertexMemory_, 0),
-            "vkBindBufferMemory particle failed"
-        );
-    }
-
     bool findMemoryTypeLocked(
         uint32_t typeFilter,
         VkMemoryPropertyFlags properties,
@@ -2133,6 +2154,7 @@ private:
         if (device_ != VK_NULL_HANDLE && inFlightFence_ != VK_NULL_HANDLE) {
             if (vkWaitForFences(device_, 1, &inFlightFence_, VK_TRUE, 100000000) == VK_SUCCESS) {
                 consumeCompletedBackdropStatsLocked();
+                releaseCompletedSplashUploadStagingLocked();
             }
         }
     }
@@ -2146,6 +2168,7 @@ private:
         const VkResult fenceStatus = vkGetFenceStatus(device_, inFlightFence_);
         if (fenceStatus == VK_SUCCESS) {
             consumeCompletedBackdropStatsLocked();
+            releaseCompletedSplashUploadStagingLocked();
         }
     }
 
@@ -2458,6 +2481,126 @@ private:
         backdropStatsPending_ = true;
     }
 
+    bool createSplashInitPipelineLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(SplashInitPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &splashDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &splashInitPipelineLayout_),
+                "vkCreatePipelineLayout splash init failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule computeShader = createShaderModuleLocked(
+            kPaintSplashInitCompSpv,
+            sizeof(kPaintSplashInitCompSpv)
+        );
+        if (computeShader == VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, splashInitPipelineLayout_, nullptr);
+            splashInitPipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo computeStage{};
+        computeStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        computeStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        computeStage.module = computeShader;
+        computeStage.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = computeStage;
+        pipelineInfo.layout = splashInitPipelineLayout_;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateComputePipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &splashInitPipeline_
+            ),
+            "vkCreateComputePipelines splash init failed"
+        );
+
+        vkDestroyShaderModule(device_, computeShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, splashInitPipelineLayout_, nullptr);
+            splashInitPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
+    }
+
+    bool createSplashUpdatePipelineLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(SplashUpdatePushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &splashDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &splashUpdatePipelineLayout_),
+                "vkCreatePipelineLayout splash update failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule computeShader = createShaderModuleLocked(
+            kPaintSplashUpdateCompSpv,
+            sizeof(kPaintSplashUpdateCompSpv)
+        );
+        if (computeShader == VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, splashUpdatePipelineLayout_, nullptr);
+            splashUpdatePipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo computeStage{};
+        computeStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        computeStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        computeStage.module = computeShader;
+        computeStage.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = computeStage;
+        pipelineInfo.layout = splashUpdatePipelineLayout_;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateComputePipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &splashUpdatePipeline_
+            ),
+            "vkCreateComputePipelines splash update failed"
+        );
+
+        vkDestroyShaderModule(device_, computeShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, splashUpdatePipelineLayout_, nullptr);
+            splashUpdatePipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
+    }
+
     bool createParticlePipelineLocked() {
         VkPushConstantRange pushConstantRange{};
         pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
@@ -2466,6 +2609,8 @@ private:
 
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &splashDescriptorSetLayout_;
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &pushConstantRange;
         if (!isOk(vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &particlePipelineLayout_),
@@ -2510,32 +2655,8 @@ private:
             fragmentStage
         };
 
-        VkVertexInputBindingDescription bindingDescription{};
-        bindingDescription.binding = 0;
-        bindingDescription.stride = sizeof(ParticleVertex);
-        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-        std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
-        attributeDescriptions[0].binding = 0;
-        attributeDescriptions[0].location = 0;
-        attributeDescriptions[0].format = VK_FORMAT_R32G32_SFLOAT;
-        attributeDescriptions[0].offset = offsetof(ParticleVertex, position);
-        attributeDescriptions[1].binding = 0;
-        attributeDescriptions[1].location = 1;
-        attributeDescriptions[1].format = VK_FORMAT_R32G32_SFLOAT;
-        attributeDescriptions[1].offset = offsetof(ParticleVertex, local);
-        attributeDescriptions[2].binding = 0;
-        attributeDescriptions[2].location = 2;
-        attributeDescriptions[2].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        attributeDescriptions[2].offset = offsetof(ParticleVertex, color);
-
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertexInputInfo.vertexBindingDescriptionCount = 1;
-        vertexInputInfo.pVertexBindingDescriptions = &bindingDescription;
-        vertexInputInfo.vertexAttributeDescriptionCount =
-            static_cast<uint32_t>(attributeDescriptions.size());
-        vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
         inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -3111,16 +3232,22 @@ private:
         return didCreatePipeline;
     }
 
-    void buildPaintParticlesLocked(
+    bool createGpuPaintSplashItemLocked(
         PaintSplashItem& item,
         const AndroidBitmapInfo& bitmapInfo,
         const void* bitmapPixels
     ) {
-        if (bitmapPixels == nullptr ||
+        if (device_ == VK_NULL_HANDLE ||
+            commandPool_ == VK_NULL_HANDLE ||
+            graphicsQueue_ == VK_NULL_HANDLE ||
+            splashDescriptorSetLayout_ == VK_NULL_HANDLE ||
+            splashDescriptorPool_ == VK_NULL_HANDLE ||
+            blobSampler_ == VK_NULL_HANDLE ||
+            bitmapPixels == nullptr ||
             bitmapInfo.width == 0 ||
             bitmapInfo.height == 0 ||
             bitmapInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-            return;
+            return false;
         }
 
         const float width = std::max(1.0f, item.right - item.left);
@@ -3128,193 +3255,324 @@ private:
         const float area = width * height;
         const float scaledCount = kPaintSplashBaseParticleCount *
             std::pow(area / kPaintSplashReferenceArea, 0.6f);
-        const uint32_t targetCount = clampUint(
+        item.dropletCount = clampUint(
             static_cast<uint32_t>(scaledCount),
             kMinParticlesPerSplash,
             kMaxParticlesPerSplash
         );
-        item.particles.reserve(targetCount);
 
-        const float aspect = width / std::max(1.0f, height);
-        const uint32_t columns = std::max<uint32_t>(
-            1,
-            static_cast<uint32_t>(std::ceil(std::sqrt(static_cast<float>(targetCount) * aspect)))
-        );
-        const uint32_t rows = std::max<uint32_t>(
-            1,
-            static_cast<uint32_t>(std::ceil(static_cast<float>(targetCount) / columns))
-        );
-        const float cellWidth = width / static_cast<float>(columns);
-        const float cellHeight = height / static_cast<float>(rows);
-        const float baseGridSize = std::max(cellWidth, cellHeight);
-        const float areaScale = std::clamp(
-            std::pow(std::sqrt(area) / 90.0f, 0.35f),
-            1.0f,
-            1.6f
-        );
-        const float diagonal = std::sqrt(width * width + height * height);
+        if (!createBufferLocked(
+                sizeof(GpuDroplet) * item.dropletCount,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                item.dropletBuffer,
+                item.dropletMemory
+        )) {
+            return false;
+        }
+        if (!uploadSnapshotTextureLocked(item, bitmapInfo, bitmapPixels)) {
+            return false;
+        }
+        if (!allocateSplashDescriptorSetLocked(item)) {
+            return false;
+        }
+        item.initialized = false;
+        return true;
+    }
 
-        for (uint32_t index = 0; index < targetCount; ++index) {
-            const uint32_t column = index % columns;
-            const uint32_t row = index / columns;
-            const uint32_t seed = hashUint(index * 747796405u + bitmapInfo.width * 97u +
-                bitmapInfo.height * 193u);
+    bool createBufferLocked(
+        VkDeviceSize size,
+        VkBufferUsageFlags usage,
+        VkMemoryPropertyFlags properties,
+        VkBuffer& buffer,
+        VkDeviceMemory& memory
+    ) {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        bufferInfo.usage = usage;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!isOk(vkCreateBuffer(device_, &bufferInfo, nullptr, &buffer),
+                  "vkCreateBuffer failed")) {
+            return false;
+        }
 
-            const float jitterX = (randomFloat(seed + 1u) - 0.5f) * cellWidth * 0.3f;
-            const float jitterY = (randomFloat(seed + 2u) - 0.5f) * cellHeight * 0.3f;
-            const float positionX = std::clamp(
-                (static_cast<float>(column) + 0.5f) * cellWidth + jitterX,
-                0.0f,
-                width
-            );
-            const float positionY = std::clamp(
-                (static_cast<float>(row) + 0.5f) * cellHeight + jitterY,
-                0.0f,
-                height
-            );
-            const float u = positionX / width;
-            const float v = positionY / height;
+        VkMemoryRequirements memoryRequirements{};
+        vkGetBufferMemoryRequirements(device_, buffer, &memoryRequirements);
+        uint32_t memoryTypeIndex = 0;
+        if (!findMemoryTypeLocked(memoryRequirements.memoryTypeBits, properties, memoryTypeIndex)) {
+            logWarn("No matching buffer memory type");
+            vkDestroyBuffer(device_, buffer, nullptr);
+            buffer = VK_NULL_HANDLE;
+            return false;
+        }
 
-            const BitmapColor color = sampleBitmapColor(bitmapInfo, bitmapPixels, u, v);
-            if (color.alpha < 0.018f) {
-                continue;
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (!isOk(vkAllocateMemory(device_, &allocateInfo, nullptr, &memory),
+                  "vkAllocateMemory buffer failed")) {
+            vkDestroyBuffer(device_, buffer, nullptr);
+            buffer = VK_NULL_HANDLE;
+            return false;
+        }
+
+        if (!isOk(vkBindBufferMemory(device_, buffer, memory, 0),
+                  "vkBindBufferMemory failed")) {
+            vkDestroyBuffer(device_, buffer, nullptr);
+            vkFreeMemory(device_, memory, nullptr);
+            buffer = VK_NULL_HANDLE;
+            memory = VK_NULL_HANDLE;
+            return false;
+        }
+        return true;
+    }
+
+    SplashStagingBuffer* acquireSplashStagingBufferLocked(VkDeviceSize requiredBytes) {
+        for (const auto& staging : splashStagingPool_) {
+            if (!staging->inUse && staging->capacity >= requiredBytes) {
+                staging->inUse = true;
+                return staging.get();
             }
-            const float coverageWeight = smoothStep(0.018f, 0.18f, color.alpha);
+        }
 
-            const float toEdgeX = positionX - width * 0.5f;
-            const float toEdgeY = positionY - height * 0.5f;
-            const float distanceFromCenter = std::sqrt(toEdgeX * toEdgeX + toEdgeY * toEdgeY);
-            float directionX = 0.0f;
-            float directionY = 0.0f;
-            if (distanceFromCenter > 0.001f) {
-                directionX = toEdgeX / distanceFromCenter;
-                directionY = toEdgeY / distanceFromCenter;
-            } else {
-                const float angle = randomFloat(seed + 41u) * kPi * 2.0f;
-                directionX = std::cos(angle);
-                directionY = std::sin(angle);
-            }
+        auto staging = std::make_unique<SplashStagingBuffer>();
+        staging->capacity = requiredBytes;
+        if (!createBufferLocked(
+                requiredBytes,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                staging->buffer,
+                staging->memory
+        )) {
+            return nullptr;
+        }
 
-            const float spreadAngle = (randomFloat(seed + 53u) - 0.5f) * 0.6f;
-            const float cosSpread = std::cos(spreadAngle);
-            const float sinSpread = std::sin(spreadAngle);
-            const float rotatedX = directionX * cosSpread - directionY * sinSpread;
-            const float rotatedY = directionX * sinSpread + directionY * cosSpread;
+        if (!isOk(
+                vkMapMemory(device_, staging->memory, 0, requiredBytes, 0, &staging->mapped),
+                "vkMapMemory splash staging failed"
+            )) {
+            vkDestroyBuffer(device_, staging->buffer, nullptr);
+            vkFreeMemory(device_, staging->memory, nullptr);
+            return nullptr;
+        }
 
-            const float sizeBucket = randomFloat(seed + 79u);
-            const float sizeScale = sizeBucket < 0.70f
-                ? mixFloat(0.40f, 0.80f, randomFloat(seed + 83u))
-                : (sizeBucket < 0.92f
-                    ? mixFloat(0.80f, 1.50f, randomFloat(seed + 89u))
-                    : mixFloat(1.50f, 3.00f, randomFloat(seed + 97u)));
-            const float baseSize = std::max(baseGridSize * sizeScale * areaScale, 2.0f);
-            const float rawSizeFactor = baseSize / std::max(baseGridSize * areaScale, 0.001f);
-            const float speedSizeFactor = std::max(rawSizeFactor, 0.5f);
-            const float halfExtent = baseSize * kPaintSplashBlobScale * 0.5f;
-            const float normalizedDistance = distanceFromCenter / std::max(diagonal * 0.5f, 0.001f);
-            float speed = diagonal * (1.2f + randomFloat(seed + 67u) * 1.5f);
-            speed *= 0.7f + normalizedDistance * 0.6f;
-            speed /= speedSizeFactor;
+        staging->inUse = true;
+        SplashStagingBuffer* result = staging.get();
+        splashStagingPool_.push_back(std::move(staging));
+        return result;
+    }
 
-            PaintParticle particle{};
-            particle.originX = u;
-            particle.originY = v;
-            particle.velocityX = rotatedX * speed;
-            particle.velocityY = rotatedY * speed;
-            particle.halfWidth = halfExtent;
-            particle.halfHeight = halfExtent;
-            particle.red = color.red;
-            particle.green = color.green;
-            particle.blue = color.blue;
-            particle.alpha = mixFloat(0.40f, 1.0f, randomFloat(seed + 113u)) * coverageWeight;
-            particle.lifetime = mixFloat(0.50f, 0.90f, randomFloat(seed + 127u));
-            particle.fadeDuration = mixFloat(0.12f, 0.20f, randomFloat(seed + 131u));
-            particle.dragFactor = 5.0f / std::max(rawSizeFactor, 1.0f);
-            item.particles.push_back(particle);
+    void releaseSplashStagingBufferLocked(SplashStagingBuffer* staging) {
+        if (staging != nullptr) {
+            staging->inUse = false;
         }
     }
 
-    BitmapColor sampleBitmapColor(
+    void releaseCompletedSplashUploadStagingLocked() {
+        for (SplashStagingBuffer* staging : pendingSplashStagingRelease_) {
+            releaseSplashStagingBufferLocked(staging);
+        }
+        pendingSplashStagingRelease_.clear();
+    }
+
+    void destroySplashStagingPoolLocked() {
+        pendingSplashStagingRelease_.clear();
+        for (const auto& staging : splashStagingPool_) {
+            if (staging->mapped != nullptr) {
+                vkUnmapMemory(device_, staging->memory);
+                staging->mapped = nullptr;
+            }
+            if (staging->buffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_, staging->buffer, nullptr);
+                staging->buffer = VK_NULL_HANDLE;
+            }
+            if (staging->memory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, staging->memory, nullptr);
+                staging->memory = VK_NULL_HANDLE;
+            }
+        }
+        splashStagingPool_.clear();
+    }
+
+    bool markSnapshotUploadPendingLocked(
+        PaintSplashItem& item,
+        uint32_t width,
+        uint32_t height
+    ) {
+        item.snapshotWidth = width;
+        item.snapshotHeight = height;
+        item.snapshotUploadPending = item.snapshotStaging != nullptr;
+        return item.snapshotUploadPending;
+    }
+
+    bool uploadSnapshotTextureLocked(
+        PaintSplashItem& item,
         const AndroidBitmapInfo& bitmapInfo,
-        const void* bitmapPixels,
-        float u,
-        float v
-    ) const {
-        const float pixelX = std::clamp(
-            u * static_cast<float>(bitmapInfo.width) - 0.5f,
-            0.0f,
-            static_cast<float>(bitmapInfo.width - 1)
-        );
-        const float pixelY = std::clamp(
-            v * static_cast<float>(bitmapInfo.height) - 0.5f,
-            0.0f,
-            static_cast<float>(bitmapInfo.height - 1)
-        );
-        const uint32_t x0 = static_cast<uint32_t>(std::floor(pixelX));
-        const uint32_t y0 = static_cast<uint32_t>(std::floor(pixelY));
-        const uint32_t x1 = std::min(bitmapInfo.width - 1, x0 + 1);
-        const uint32_t y1 = std::min(bitmapInfo.height - 1, y0 + 1);
-        const float tx = pixelX - static_cast<float>(x0);
-        const float ty = pixelY - static_cast<float>(y0);
+        const void* bitmapPixels
+    ) {
+        const VkDeviceSize rowBytes = static_cast<VkDeviceSize>(bitmapInfo.width) * 4;
+        const VkDeviceSize imageBytes = rowBytes * static_cast<VkDeviceSize>(bitmapInfo.height);
+        SplashStagingBuffer* staging = acquireSplashStagingBufferLocked(imageBytes);
+        if (staging == nullptr || staging->mapped == nullptr) {
+            return false;
+        }
+        item.snapshotStaging = staging;
 
-        const auto readPixel = [&](uint32_t x, uint32_t y) -> BitmapColor {
-            const auto* row = static_cast<const uint8_t*>(bitmapPixels) + y * bitmapInfo.stride;
-            const auto* pixel = row + x * 4;
-            return BitmapColor{
-                static_cast<float>(pixel[0]) / 255.0f,
-                static_cast<float>(pixel[1]) / 255.0f,
-                static_cast<float>(pixel[2]) / 255.0f,
-                static_cast<float>(pixel[3]) / 255.0f
-            };
-        };
-
-        const BitmapColor c00 = readPixel(x0, y0);
-        const BitmapColor c10 = readPixel(x1, y0);
-        const BitmapColor c01 = readPixel(x0, y1);
-        const BitmapColor c11 = readPixel(x1, y1);
-
-        const float redTop = mixFloat(c00.red, c10.red, tx);
-        const float greenTop = mixFloat(c00.green, c10.green, tx);
-        const float blueTop = mixFloat(c00.blue, c10.blue, tx);
-        const float alphaTop = mixFloat(c00.alpha, c10.alpha, tx);
-        const float redBottom = mixFloat(c01.red, c11.red, tx);
-        const float greenBottom = mixFloat(c01.green, c11.green, tx);
-        const float blueBottom = mixFloat(c01.blue, c11.blue, tx);
-        const float alphaBottom = mixFloat(c01.alpha, c11.alpha, tx);
-
-        const float red = mixFloat(redTop, redBottom, ty);
-        const float green = mixFloat(greenTop, greenBottom, ty);
-        const float blue = mixFloat(blueTop, blueBottom, ty);
-        const float alpha = mixFloat(alphaTop, alphaBottom, ty);
-        if (alpha <= 0.001f) {
-            return BitmapColor{0.0f, 0.0f, 0.0f, 0.0f};
+        auto* dst = static_cast<uint8_t*>(staging->mapped);
+        const auto* src = static_cast<const uint8_t*>(bitmapPixels);
+        for (uint32_t y = 0; y < bitmapInfo.height; ++y) {
+            std::memcpy(dst + y * rowBytes, src + y * bitmapInfo.stride, rowBytes);
         }
 
-        const float inverseAlpha = 1.0f / alpha;
-        return BitmapColor{
-            std::min(1.0f, red * inverseAlpha),
-            std::min(1.0f, green * inverseAlpha),
-            std::min(1.0f, blue * inverseAlpha),
-            alpha
-        };
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent.width = bitmapInfo.width;
+        imageInfo.extent.height = bitmapInfo.height;
+        imageInfo.extent.depth = 1;
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!isOk(vkCreateImage(device_, &imageInfo, nullptr, &item.snapshotImage),
+                  "vkCreateImage splash snapshot failed")) {
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetImageMemoryRequirements(device_, item.snapshotImage, &memoryRequirements);
+        uint32_t memoryTypeIndex = 0;
+        if (!findMemoryTypeLocked(
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                memoryTypeIndex
+            )) {
+            logWarn("No device local memory for splash snapshot");
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (!isOk(vkAllocateMemory(device_, &allocateInfo, nullptr, &item.snapshotMemory),
+                  "vkAllocateMemory splash snapshot failed") ||
+            !isOk(vkBindImageMemory(device_, item.snapshotImage, item.snapshotMemory, 0),
+                  "vkBindImageMemory splash snapshot failed")) {
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = item.snapshotImage;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        const bool viewCreated = isOk(
+            vkCreateImageView(device_, &viewInfo, nullptr, &item.snapshotImageView),
+            "vkCreateImageView splash snapshot failed"
+        );
+        return viewCreated && markSnapshotUploadPendingLocked(item, bitmapInfo.width, bitmapInfo.height);
     }
 
-    void addFallbackParticleLocked(PaintSplashItem& item) {
-        PaintParticle particle{};
-        particle.originX = 0.5f;
-        particle.originY = 0.5f;
-        particle.velocityX = 0.0f;
-        particle.velocityY = -120.0f;
-        particle.halfWidth = 16.0f;
-        particle.halfHeight = 16.0f;
-        particle.red = clearColor_[0];
-        particle.green = clearColor_[1];
-        particle.blue = clearColor_[2];
-        particle.alpha = clearColor_[3];
-        particle.lifetime = 0.6f;
-        particle.fadeDuration = 0.15f;
-        particle.dragFactor = 5.0f;
-        item.particles.push_back(particle);
+    bool allocateSplashDescriptorSetLocked(PaintSplashItem& item) {
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = splashDescriptorPool_;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &splashDescriptorSetLayout_;
+        if (!isOk(
+                vkAllocateDescriptorSets(device_, &allocateInfo, &item.descriptorSet),
+                "vkAllocateDescriptorSets splash failed"
+            )) {
+            return false;
+        }
+
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = item.dropletBuffer;
+        bufferInfo.offset = 0;
+        bufferInfo.range = sizeof(GpuDroplet) * item.dropletCount;
+
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.sampler = blobSampler_;
+        imageInfo.imageView = item.snapshotImageView;
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = item.descriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[0].pBufferInfo = &bufferInfo;
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = item.descriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[1].pImageInfo = &imageInfo;
+        vkUpdateDescriptorSets(
+            device_,
+            static_cast<uint32_t>(writes.size()),
+            writes.data(),
+            0,
+            nullptr
+        );
+        return true;
+    }
+
+    void destroyPaintSplashItemLocked(PaintSplashItem& item) {
+        if (device_ == VK_NULL_HANDLE) {
+            item = PaintSplashItem{};
+            return;
+        }
+        if (item.descriptorSet != VK_NULL_HANDLE && splashDescriptorPool_ != VK_NULL_HANDLE) {
+            vkFreeDescriptorSets(device_, splashDescriptorPool_, 1, &item.descriptorSet);
+            item.descriptorSet = VK_NULL_HANDLE;
+        }
+        if (item.dropletBuffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, item.dropletBuffer, nullptr);
+            item.dropletBuffer = VK_NULL_HANDLE;
+        }
+        if (item.dropletMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, item.dropletMemory, nullptr);
+            item.dropletMemory = VK_NULL_HANDLE;
+        }
+        if (item.snapshotImageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, item.snapshotImageView, nullptr);
+            item.snapshotImageView = VK_NULL_HANDLE;
+        }
+        if (item.snapshotStaging != nullptr) {
+            releaseSplashStagingBufferLocked(item.snapshotStaging);
+            item.snapshotStaging = nullptr;
+            item.snapshotUploadPending = false;
+        }
+        if (item.snapshotImage != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, item.snapshotImage, nullptr);
+            item.snapshotImage = VK_NULL_HANDLE;
+        }
+        if (item.snapshotMemory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, item.snapshotMemory, nullptr);
+            item.snapshotMemory = VK_NULL_HANDLE;
+        }
+    }
+
+    void destroyPaintSplashItemsLocked() {
+        for (PaintSplashItem& item : splashItems_) {
+            destroyPaintSplashItemLocked(item);
+        }
+        splashItems_.clear();
+        didLogParticleDraw_ = false;
     }
 
     void recordClearPassLocked(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
@@ -3325,23 +3583,213 @@ private:
             return;
         }
 
-        const uint32_t vertexCount = uploadPaintParticleVerticesLocked();
-        if (vertexCount > 0) {
-            recordBlobPassLocked(commandBuffer, vertexCount);
+        const int64_t frameTimeNs = nowNanos();
+        const bool hasPaintSplashes = hasActivePaintSplashesLocked(frameTimeNs);
+        if (hasPaintSplashes) {
+            recordPendingPaintSplashUploadsLocked(commandBuffer);
+            recordPaintSplashComputeLocked(commandBuffer, frameTimeNs);
+            recordBlobPassLocked(commandBuffer);
         }
         transitionBackdropImageForSamplingLocked(commandBuffer);
         recordBackdropStatsLocked(commandBuffer);
         recordBackdropBlurPassesLocked(commandBuffer);
-        recordCompositePassLocked(commandBuffer, imageIndex, vertexCount > 0);
+        recordCompositePassLocked(commandBuffer, imageIndex, hasPaintSplashes);
         isOk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer failed");
     }
 
-    void recordBlobPassLocked(VkCommandBuffer commandBuffer, uint32_t vertexCount) {
+    void recordPendingPaintSplashUploadsLocked(VkCommandBuffer commandBuffer) {
+        for (PaintSplashItem& item : splashItems_) {
+            if (!item.snapshotUploadPending ||
+                item.snapshotStaging == nullptr ||
+                item.snapshotStaging->buffer == VK_NULL_HANDLE ||
+                item.snapshotImage == VK_NULL_HANDLE ||
+                item.snapshotWidth == 0 ||
+                item.snapshotHeight == 0) {
+                continue;
+            }
+
+            VkImageMemoryBarrier toTransfer{};
+            toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toTransfer.image = item.snapshotImage;
+            toTransfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            toTransfer.subresourceRange.baseMipLevel = 0;
+            toTransfer.subresourceRange.levelCount = 1;
+            toTransfer.subresourceRange.baseArrayLayer = 0;
+            toTransfer.subresourceRange.layerCount = 1;
+            toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &toTransfer
+            );
+
+            VkBufferImageCopy copyRegion{};
+            copyRegion.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copyRegion.imageSubresource.mipLevel = 0;
+            copyRegion.imageSubresource.baseArrayLayer = 0;
+            copyRegion.imageSubresource.layerCount = 1;
+            copyRegion.imageExtent = {item.snapshotWidth, item.snapshotHeight, 1};
+            vkCmdCopyBufferToImage(
+                commandBuffer,
+                item.snapshotStaging->buffer,
+                item.snapshotImage,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &copyRegion
+            );
+
+            VkImageMemoryBarrier toShader{};
+            toShader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            toShader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toShader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            toShader.image = item.snapshotImage;
+            toShader.subresourceRange = toTransfer.subresourceRange;
+            vkCmdPipelineBarrier(
+                commandBuffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                0,
+                0,
+                nullptr,
+                0,
+                nullptr,
+                1,
+                &toShader
+            );
+
+            pendingSplashStagingRelease_.push_back(item.snapshotStaging);
+            item.snapshotStaging = nullptr;
+            item.snapshotUploadPending = false;
+        }
+    }
+
+    void recordPaintSplashComputeLocked(VkCommandBuffer commandBuffer, int64_t frameTimeNs) {
+        if (splashItems_.empty() ||
+            splashInitPipeline_ == VK_NULL_HANDLE ||
+            splashInitPipelineLayout_ == VK_NULL_HANDLE ||
+            splashUpdatePipeline_ == VK_NULL_HANDLE ||
+            splashUpdatePipelineLayout_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        bool didWriteDroplets = false;
+        for (PaintSplashItem& item : splashItems_) {
+            if (item.descriptorSet == VK_NULL_HANDLE ||
+                item.dropletBuffer == VK_NULL_HANDLE ||
+                item.snapshotUploadPending ||
+                item.dropletCount == 0) {
+                continue;
+            }
+
+            const uint32_t groups = (item.dropletCount + 63u) / 64u;
+            if (!item.initialized) {
+                SplashInitPushConstants pushConstants{};
+                pushConstants.itemSize[0] = std::max(1.0f, item.right - item.left);
+                pushConstants.itemSize[1] = std::max(1.0f, item.bottom - item.top);
+                pushConstants.dropletCount = item.dropletCount;
+
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, splashInitPipeline_);
+                vkCmdBindDescriptorSets(
+                    commandBuffer,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    splashInitPipelineLayout_,
+                    0,
+                    1,
+                    &item.descriptorSet,
+                    0,
+                    nullptr
+                );
+                vkCmdPushConstants(
+                    commandBuffer,
+                    splashInitPipelineLayout_,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    sizeof(SplashInitPushConstants),
+                    &pushConstants
+                );
+                vkCmdDispatch(commandBuffer, groups, 1, 1);
+                item.initialized = true;
+                item.lastUpdateNs = frameTimeNs;
+                didWriteDroplets = true;
+                continue;
+            }
+
+            const float dt = std::clamp(
+                static_cast<float>(frameTimeNs - item.lastUpdateNs) / 1000000000.0f,
+                0.001f,
+                0.05f
+            );
+            item.lastUpdateNs = frameTimeNs;
+            SplashUpdatePushConstants pushConstants{};
+            pushConstants.timeStep = dt;
+            pushConstants.dropletCount = item.dropletCount;
+
+            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, splashUpdatePipeline_);
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                splashUpdatePipelineLayout_,
+                0,
+                1,
+                &item.descriptorSet,
+                0,
+                nullptr
+            );
+            vkCmdPushConstants(
+                commandBuffer,
+                splashUpdatePipelineLayout_,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                sizeof(SplashUpdatePushConstants),
+                &pushConstants
+            );
+            vkCmdDispatch(commandBuffer, groups, 1, 1);
+            didWriteDroplets = true;
+        }
+
+        if (!didWriteDroplets) {
+            return;
+        }
+
+        VkMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            0,
+            1,
+            &barrier,
+            0,
+            nullptr,
+            0,
+            nullptr
+        );
+    }
+
+    void recordBlobPassLocked(VkCommandBuffer commandBuffer) {
         if (blobRenderPass_ == VK_NULL_HANDLE ||
             blobFramebuffer_ == VK_NULL_HANDLE ||
             particlePipeline_ == VK_NULL_HANDLE ||
             particlePipelineLayout_ == VK_NULL_HANDLE ||
-            particleVertexBuffer_ == VK_NULL_HANDLE) {
+            splashDescriptorSetLayout_ == VK_NULL_HANDLE) {
             return;
         }
 
@@ -3374,25 +3822,41 @@ private:
         scissor.offset = {0, 0};
         scissor.extent = swapchainExtent_;
 
-        ParticlePushConstants pushConstants{};
-        pushConstants.viewportSize[0] = viewport.width;
-        pushConstants.viewportSize[1] = viewport.height;
-
         vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, particlePipeline_);
         vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-        vkCmdPushConstants(
-            commandBuffer,
-            particlePipelineLayout_,
-            VK_SHADER_STAGE_VERTEX_BIT,
-            0,
-            sizeof(ParticlePushConstants),
-            &pushConstants
-        );
-
-        VkDeviceSize vertexOffset = 0;
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &particleVertexBuffer_, &vertexOffset);
-        vkCmdDraw(commandBuffer, vertexCount, 1, 0, 0);
+        for (const PaintSplashItem& item : splashItems_) {
+            if (item.descriptorSet == VK_NULL_HANDLE || item.dropletCount == 0) {
+                continue;
+            }
+            ParticlePushConstants pushConstants{};
+            pushConstants.viewportSize[0] = viewport.width;
+            pushConstants.viewportSize[1] = viewport.height;
+            pushConstants.itemOrigin[0] = item.left;
+            pushConstants.itemOrigin[1] = item.top;
+            pushConstants.itemSize[0] = std::max(1.0f, item.right - item.left);
+            pushConstants.itemSize[1] = std::max(1.0f, item.bottom - item.top);
+            pushConstants.blobScale = kPaintSplashBlobScale;
+            vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                particlePipelineLayout_,
+                0,
+                1,
+                &item.descriptorSet,
+                0,
+                nullptr
+            );
+            vkCmdPushConstants(
+                commandBuffer,
+                particlePipelineLayout_,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                sizeof(ParticlePushConstants),
+                &pushConstants
+            );
+            vkCmdDraw(commandBuffer, 6, item.dropletCount, 0, 0);
+        }
         vkCmdEndRenderPass(commandBuffer);
     }
 
@@ -3696,149 +4160,23 @@ private:
     }
 
     bool hasActivePaintSplashesLocked() {
+        return hasActivePaintSplashesLocked(nowNanos());
+    }
+
+    bool hasActivePaintSplashesLocked(int64_t nowNs) {
         if (splashItems_.empty()) {
             return false;
         }
 
-        const int64_t nowNs = nowNanos();
-        splashItems_.erase(
-            std::remove_if(
-                splashItems_.begin(),
-                splashItems_.end(),
-                [nowNs](const PaintSplashItem& item) {
-                    return nowNs - item.startTimeNs >= kPaintSplashDurationNs;
-                }
-            ),
-            splashItems_.end()
-        );
+        for (auto it = splashItems_.begin(); it != splashItems_.end();) {
+            if (nowNs - it->startTimeNs >= kPaintSplashDurationNs) {
+                destroyPaintSplashItemLocked(*it);
+                it = splashItems_.erase(it);
+            } else {
+                ++it;
+            }
+        }
         return !splashItems_.empty();
-    }
-
-    uint32_t uploadPaintParticleVerticesLocked() {
-        const uint32_t vertexCount = buildPaintParticleVerticesLocked();
-        if (vertexCount == 0 ||
-            particleVertexBuffer_ == VK_NULL_HANDLE ||
-            particleVertexMemory_ == VK_NULL_HANDLE) {
-            return 0;
-        }
-        if (!didLogParticleDraw_) {
-            logDebugf("draw particles vertexCount=%u", vertexCount);
-            didLogParticleDraw_ = true;
-        }
-
-        void* mappedMemory = nullptr;
-        if (!isOk(
-                vkMapMemory(
-                    device_,
-                    particleVertexMemory_,
-                    0,
-                    sizeof(ParticleVertex) * vertexCount,
-                    0,
-                    &mappedMemory
-                ),
-                "vkMapMemory particle failed"
-            )) {
-            return 0;
-        }
-        std::memcpy(
-            mappedMemory,
-            particleVertices_.data(),
-            sizeof(ParticleVertex) * vertexCount
-        );
-        vkUnmapMemory(device_, particleVertexMemory_);
-        return vertexCount;
-    }
-
-    uint32_t buildPaintParticleVerticesLocked() {
-        particleVertices_.clear();
-        if (splashItems_.empty()) {
-            return 0;
-        }
-
-        const int64_t nowNs = nowNanos();
-        std::vector<PaintSplashItem> activeItems;
-        activeItems.reserve(splashItems_.size());
-        for (PaintSplashItem& item : splashItems_) {
-            if (nowNs - item.startTimeNs < kPaintSplashDurationNs) {
-                activeItems.push_back(std::move(item));
-            }
-        }
-        splashItems_.swap(activeItems);
-
-        for (const PaintSplashItem& item : splashItems_) {
-            const float elapsedSeconds = static_cast<float>(nowNs - item.startTimeNs) /
-                1000000000.0f;
-            for (const PaintParticle& particle : item.particles) {
-                const float fadeStart = particle.lifetime;
-                const float fadeEnd = particle.lifetime + particle.fadeDuration;
-                if (elapsedSeconds >= fadeEnd) {
-                    continue;
-                }
-                const float fade = elapsedSeconds <= fadeStart
-                    ? 1.0f
-                    : 1.0f - std::clamp(
-                        (elapsedSeconds - fadeStart) /
-                            std::max(0.001f, particle.fadeDuration),
-                        0.0f,
-                        1.0f
-                    );
-                const float dragFactor = std::max(0.001f, particle.dragFactor);
-                const float dragSeconds = (1.0f - std::exp(-elapsedSeconds * dragFactor)) /
-                    dragFactor;
-                const float gravitySeconds = (elapsedSeconds - dragSeconds) / dragFactor;
-                const float x = item.left + (item.right - item.left) * particle.originX +
-                    particle.velocityX * dragSeconds;
-                const float y = item.top + (item.bottom - item.top) * particle.originY +
-                    particle.velocityY * dragSeconds +
-                    800.0f * gravitySeconds;
-                appendParticleQuadLocked(
-                    x,
-                    y,
-                    particle.halfWidth,
-                    particle.halfHeight,
-                    particle.red,
-                    particle.green,
-                    particle.blue,
-                    particle.alpha * fade
-                );
-            }
-        }
-        return static_cast<uint32_t>(particleVertices_.size());
-    }
-
-    void appendParticleQuadLocked(
-        float centerX,
-        float centerY,
-        float halfWidth,
-        float halfHeight,
-        float red,
-        float green,
-        float blue,
-        float alpha
-    ) {
-        if (alpha <= 0.001f || particleVertices_.size() + kVerticesPerParticle > kMaxParticleVertices) {
-            return;
-        }
-
-        const float left = centerX - halfWidth;
-        const float right = centerX + halfWidth;
-        const float top = centerY - halfHeight;
-        const float bottom = centerY + halfHeight;
-
-        const std::array<ParticleVertex, kVerticesPerParticle> vertices = {
-            ParticleVertex{{left, top}, {-1.0f, -1.0f}, {red, green, blue, alpha}},
-            ParticleVertex{{right, top}, {1.0f, -1.0f}, {red, green, blue, alpha}},
-            ParticleVertex{{right, bottom}, {1.0f, 1.0f}, {red, green, blue, alpha}},
-            ParticleVertex{{left, top}, {-1.0f, -1.0f}, {red, green, blue, alpha}},
-            ParticleVertex{{right, bottom}, {1.0f, 1.0f}, {red, green, blue, alpha}},
-            ParticleVertex{{left, bottom}, {-1.0f, 1.0f}, {red, green, blue, alpha}}
-        };
-
-        particleVertices_.insert(
-            particleVertices_.end(),
-            vertices.begin(),
-            vertices.end()
-        );
     }
 
     int64_t nowNanos() const {
@@ -3894,6 +4232,25 @@ private:
         }
         framebuffers_.clear();
 
+        destroyPaintSplashItemsLocked();
+        releaseCompletedSplashUploadStagingLocked();
+
+        if (splashInitPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, splashInitPipeline_, nullptr);
+            splashInitPipeline_ = VK_NULL_HANDLE;
+        }
+        if (splashInitPipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, splashInitPipelineLayout_, nullptr);
+            splashInitPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (splashUpdatePipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, splashUpdatePipeline_, nullptr);
+            splashUpdatePipeline_ = VK_NULL_HANDLE;
+        }
+        if (splashUpdatePipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, splashUpdatePipelineLayout_, nullptr);
+            splashUpdatePipelineLayout_ = VK_NULL_HANDLE;
+        }
         if (particlePipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, particlePipeline_, nullptr);
             particlePipeline_ = VK_NULL_HANDLE;
@@ -3955,6 +4312,15 @@ private:
             blobImageMemory_ = VK_NULL_HANDLE;
         }
 
+        if (splashDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, splashDescriptorPool_, nullptr);
+            splashDescriptorPool_ = VK_NULL_HANDLE;
+        }
+        if (splashDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, splashDescriptorSetLayout_, nullptr);
+            splashDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+
         if (renderPass_ != VK_NULL_HANDLE) {
             vkDestroyRenderPass(device_, renderPass_, nullptr);
             renderPass_ = VK_NULL_HANDLE;
@@ -3984,6 +4350,7 @@ private:
         vkDeviceWaitIdle(device_);
         cleanupSwapchainLocked();
         destroyBackdropImportCacheLocked();
+        destroySplashStagingPoolLocked();
 
         if (inFlightFence_ != VK_NULL_HANDLE) {
             vkDestroyFence(device_, inFlightFence_, nullptr);
@@ -4000,14 +4367,6 @@ private:
         if (commandPool_ != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device_, commandPool_, nullptr);
             commandPool_ = VK_NULL_HANDLE;
-        }
-        if (particleVertexBuffer_ != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device_, particleVertexBuffer_, nullptr);
-            particleVertexBuffer_ = VK_NULL_HANDLE;
-        }
-        if (particleVertexMemory_ != VK_NULL_HANDLE) {
-            vkFreeMemory(device_, particleVertexMemory_, nullptr);
-            particleVertexMemory_ = VK_NULL_HANDLE;
         }
         if (blobSampler_ != VK_NULL_HANDLE) {
             vkDestroySampler(device_, blobSampler_, nullptr);
@@ -4077,12 +4436,16 @@ private:
     VkSemaphore imageAvailableSemaphore_ = VK_NULL_HANDLE;
     VkSemaphore renderFinishedSemaphore_ = VK_NULL_HANDLE;
     VkFence inFlightFence_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout splashDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool splashDescriptorPool_ = VK_NULL_HANDLE;
+    VkPipelineLayout splashInitPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline splashInitPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout splashUpdatePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline splashUpdatePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline particlePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout compositePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline compositePipeline_ = VK_NULL_HANDLE;
-    VkBuffer particleVertexBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory particleVertexMemory_ = VK_NULL_HANDLE;
     VkFormat blobFormat_ = VK_FORMAT_R16G16B16A16_SFLOAT;
     VkRenderPass blobRenderPass_ = VK_NULL_HANDLE;
     VkImage blobImage_ = VK_NULL_HANDLE;
@@ -4146,7 +4509,8 @@ private:
     bool hardwareBufferImportSupported_ = false;
 
     std::vector<PaintSplashItem> splashItems_;
-    std::vector<ParticleVertex> particleVertices_;
+    std::vector<std::unique_ptr<SplashStagingBuffer>> splashStagingPool_;
+    std::vector<SplashStagingBuffer*> pendingSplashStagingRelease_;
     bool didLogParticleDraw_ = false;
 };
 

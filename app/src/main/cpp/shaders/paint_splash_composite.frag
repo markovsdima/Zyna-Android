@@ -2,6 +2,11 @@
 
 layout(set = 0, binding = 0) uniform sampler2D blobTex;
 
+layout(push_constant) uniform PushConstants {
+    vec2 viewportSize;
+    vec2 blobTextureSize;
+} pc;
+
 layout(location = 0) in vec2 fragUv;
 layout(location = 0) out vec4 outColor;
 
@@ -29,8 +34,8 @@ void main() {
         discard;
     }
 
-    vec2 textureSizePx = vec2(textureSize(blobTex, 0));
-    vec2 pixelCoord = fragUv * textureSizePx;
+    vec2 textureSizePx = max(pc.blobTextureSize, vec2(1.0));
+    vec2 pixelCoord = fragUv * max(pc.viewportSize, vec2(1.0));
     float n = splashNoise(pixelCoord * 0.04) * 0.06
         + splashNoise(pixelCoord * 0.12) * 0.04;
 

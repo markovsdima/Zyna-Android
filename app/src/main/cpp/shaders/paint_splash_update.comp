@@ -19,14 +19,260 @@ layout(set = 0, binding = 0, std430) buffer DropletBuffer {
     Droplet droplets[];
 };
 
+struct GlassHitTarget {
+    vec4 rect;
+    vec4 params;
+};
+
+struct GlassDroplet {
+    vec2 position;
+    vec2 velocity;
+    vec4 color;
+    float radius;
+    float age;
+    float lifetime;
+    float seed;
+    float stretch;
+    float activeValue;
+    float impact;
+    float pad;
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer GlassHitTargetBuffer {
+    GlassHitTarget glassHitTargets[];
+};
+
+layout(set = 0, binding = 3, std430) buffer GlassDropletBuffer {
+    GlassDroplet glassDroplets[];
+};
+
+layout(set = 0, binding = 4, std430) buffer GlassCursorBuffer {
+    uint glassCursor[];
+};
+
+layout(set = 0, binding = 5, std430) buffer GlassCellBuffer {
+    uint glassCells[];
+};
+
 layout(push_constant) uniform PushConstants {
     float timeStep;
     uint dropletCount;
+    uint glassHitTargetCount;
+    uint glassEventCapacity;
+    vec2 itemOrigin;
 } pc;
 
 const uint SPLASH_PHASE_MASK = 3u;
 const uint SPLASH_PHASE_FLYING = 0u;
 const uint SPLASH_PHASE_FADING = 1u;
+const uint SPLASH_PHASE_GLASS_CHECKED = 4u;
+const uint SPLASH_GLASS_CELL_COLS = 12u;
+const uint SPLASH_GLASS_CELL_ROWS = 8u;
+const uint SPLASH_GLASS_CELLS_PER_TARGET = SPLASH_GLASS_CELL_COLS * SPLASH_GLASS_CELL_ROWS;
+
+float splashHash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float roundedRectDistance(vec2 point, vec2 size, float radius) {
+    radius = min(radius, min(size.x, size.y) * 0.5);
+    vec2 halfSize = size * 0.5;
+    vec2 q = abs(point - halfSize) - (halfSize - vec2(radius));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+vec2 clampToRoundedRect(vec2 point, vec2 size, float radius) {
+    radius = min(radius, min(size.x, size.y) * 0.5);
+    vec2 clamped = clamp(point, vec2(0.0), size);
+    vec2 center = size * 0.5;
+    vec2 innerHalf = max(size * 0.5 - vec2(radius), vec2(0.0));
+    vec2 delta = clamped - center;
+    vec2 inner = clamp(delta, -innerHalf, innerHalf);
+    vec2 cornerCenter = center + inner;
+    vec2 cornerDelta = clamped - cornerCenter;
+    float len = length(cornerDelta);
+    if (radius <= 0.001 || len <= radius || len <= 0.001) {
+        return clamped;
+    }
+    return cornerCenter + cornerDelta / len * radius;
+}
+
+vec2 glassTargetNormal(vec2 point, vec2 size, float radius) {
+    float eps = max(0.35, min(size.x, size.y) * 0.002);
+    float dx = roundedRectDistance(point + vec2(eps, 0.0), size, radius)
+        - roundedRectDistance(point - vec2(eps, 0.0), size, radius);
+    float dy = roundedRectDistance(point + vec2(0.0, eps), size, radius)
+        - roundedRectDistance(point - vec2(0.0, eps), size, radius);
+    vec2 normal = vec2(dx, dy);
+    float len = length(normal);
+    return len > 0.0001 ? normal / len : vec2(0.0, 1.0);
+}
+
+void spawnGlassDroplet(
+    Droplet source,
+    vec2 overlayPosition,
+    vec2 sourceVelocity,
+    vec2 impactNormal,
+    float seed,
+    float radiusScale,
+    vec2 velocityBias,
+    float lifetimeScale,
+    float opacityScale
+) {
+    if (pc.glassEventCapacity == 0u) {
+        return;
+    }
+
+    uint slot = atomicAdd(glassCursor[0], 1u);
+    if (slot >= pc.glassEventCapacity) {
+        return;
+    }
+
+    float sizeSeed = splashHash(vec2(seed * 17.0 + 3.0, overlayPosition.x * 0.071));
+    float speedSeed = splashHash(vec2(seed * 29.0 + 7.0, overlayPosition.y * 0.053));
+    vec2 tangent = normalize(vec2(-impactNormal.y, impactNormal.x));
+    float tangentSpeed = dot(sourceVelocity, tangent);
+    vec2 surfaceVelocity = tangent * tangentSpeed * 0.018;
+    surfaceVelocity += vec2((sizeSeed - 0.5) * 5.0, mix(2.0, 13.0, speedSeed));
+
+    vec4 sourceColor = source.color;
+    float sourceLuma = dot(sourceColor.rgb, vec3(0.299, 0.587, 0.114));
+    vec3 paintColor = clamp(mix(vec3(sourceLuma), sourceColor.rgb, 1.28), 0.0, 1.0);
+
+    float mainDrop = radiusScale >= 0.75 ? 1.0 : 0.0;
+    float radiusRoll = pow(sizeSeed, mix(0.82, 1.65, mainDrop));
+    float occasionalLarge = smoothstep(0.82, 1.0, sizeSeed) * mainDrop;
+    float radiusVariation = mix(0.50, 1.34, radiusRoll) + occasionalLarge * 0.42;
+    float minRadius = mix(1.20, 3.8, mainDrop);
+    float radiusBoost = mix(0.92, 1.14, mainDrop);
+
+    GlassDroplet gd;
+    gd.position = overlayPosition;
+    gd.velocity = surfaceVelocity + velocityBias;
+    gd.color = vec4(paintColor, opacityScale);
+    gd.radius = clamp(
+        source.baseSize * radiusVariation * radiusScale * radiusBoost,
+        minRadius,
+        mix(7.0, 18.0, mainDrop)
+    );
+    gd.age = 0.0;
+    gd.lifetime = max(0.38, mix(2.0, 3.45, speedSeed) * lifetimeScale);
+    gd.seed = seed;
+    gd.stretch = mix(0.92, 1.22, speedSeed);
+    gd.activeValue = 1.0;
+    gd.impact = mix(0.55, 1.0, sizeSeed) * clamp(opacityScale + radiusScale * 0.25, 0.0, 1.0);
+    gd.pad = 0.0;
+    glassDroplets[slot] = gd;
+}
+
+bool tryApplyGlassHit(
+    inout Droplet d,
+    uint gid,
+    vec2 overlayPosition,
+    vec2 velocity
+) {
+    if ((d.phase & SPLASH_PHASE_GLASS_CHECKED) != 0u || pc.glassHitTargetCount == 0u) {
+        return false;
+    }
+
+    for (uint i = 0u; i < pc.glassHitTargetCount; ++i) {
+        GlassHitTarget target = glassHitTargets[i];
+        vec2 origin = target.rect.xy;
+        vec2 size = target.rect.zw;
+        if (size.x <= 0.0 || size.y <= 0.0) {
+            continue;
+        }
+
+        vec2 local = overlayPosition - origin;
+        float radius = target.params.x;
+        float hitDistance = roundedRectDistance(local, size, radius);
+        float hitSlop = max(3.0, d.baseSize * 0.62);
+        if (hitDistance > hitSlop) {
+            continue;
+        }
+
+        float insideMask = 1.0 - smoothstep(0.0, hitSlop, max(hitDistance, 0.0));
+        vec2 impactLocal = clampToRoundedRect(local, size, radius);
+        vec2 surfaceNormal = glassTargetNormal(impactLocal, size, radius);
+        float flightAge = d.flightAge;
+        float attempt = floor(flightAge * 52.0 + float(gid) * 0.07);
+        float seed = splashHash(vec2(
+            float(gid) * 12.9898 + attempt + target.params.w,
+            dot(overlayPosition, vec2(0.031, 0.047)) + flightAge * 0.37
+        ));
+        float speedBias = smoothstep(45.0, 180.0, length(velocity));
+        float sizeBias = smoothstep(3.8, 13.5, d.baseSize);
+        float delaySeed = splashHash(vec2(float(gid) * 3.17, d.baseSize * 0.41 + target.params.w));
+        float gateStart = mix(0.045, 0.26, delaySeed);
+        float gateEnd = gateStart + mix(0.16, 0.42, splashHash(vec2(delaySeed * 19.0, 4.0)));
+        float flightGate = smoothstep(gateStart, gateEnd, flightAge);
+        float probability = target.params.y
+            * sizeBias
+            * mix(0.62, 1.42, speedBias)
+            * insideMask
+            * flightGate
+            * 3.25;
+        probability = clamp(probability, 0.0, 0.64);
+
+        if (sizeBias > 0.05 && seed < probability) {
+            vec2 spawnPosition = origin + impactLocal;
+            vec2 cellUv = clamp((spawnPosition - origin) / max(size, vec2(1.0)), vec2(0.0), vec2(0.999));
+            uint cellX = min(uint(cellUv.x * float(SPLASH_GLASS_CELL_COLS)), SPLASH_GLASS_CELL_COLS - 1u);
+            uint cellY = min(uint(cellUv.y * float(SPLASH_GLASS_CELL_ROWS)), SPLASH_GLASS_CELL_ROWS - 1u);
+            uint cellIndex = i * SPLASH_GLASS_CELLS_PER_TARGET + cellY * SPLASH_GLASS_CELL_COLS + cellX;
+            uint previousHits = atomicAdd(glassCells[cellIndex], 1u);
+            if (previousHits >= 1u) {
+                break;
+            }
+
+            vec2 spawnJitter = vec2(
+                splashHash(vec2(seed * 43.0 + 2.0, float(cellIndex))),
+                splashHash(vec2(seed * 59.0 + 3.0, float(cellIndex)))
+            ) - 0.5;
+            spawnPosition += spawnJitter * max(d.baseSize * 0.42, 1.8);
+            spawnPosition = origin + clampToRoundedRect(spawnPosition - origin, size, radius);
+
+            spawnGlassDroplet(d, spawnPosition, velocity, surfaceNormal, seed, 1.0, vec2(0.0), 1.0, 1.0);
+
+            vec2 sideAxis = normalize(vec2(-velocity.y, velocity.x));
+            uint microCount = seed > 0.96 ? 1u : 0u;
+            for (uint m = 0u; m < microCount; ++m) {
+                float mSeed = splashHash(vec2(seed * 71.0 + float(m) * 5.31, float(gid) * 0.11));
+                float mSeed2 = splashHash(vec2(seed * 97.0 + float(m) * 3.17, float(cellIndex) + 0.41));
+                float sideSign = mSeed < 0.5 ? -1.0 : 1.0;
+                vec2 side = sideAxis * sideSign;
+                vec2 offset = side * mix(1.8, 5.8, mSeed2) + vec2(0.0, mix(0.8, 3.6, mSeed));
+                vec2 microPosition = origin + clampToRoundedRect(spawnPosition + offset - origin, size, radius);
+                vec2 sideKick = side * mix(12.0, 38.0, mSeed2);
+                vec2 liftKick = vec2(0.0, mix(3.0, 12.0, mSeed));
+                spawnGlassDroplet(
+                    d,
+                    microPosition,
+                    velocity,
+                    surfaceNormal,
+                    splashHash(vec2(seed * 113.0, float(m) + 0.29)),
+                    mix(0.18, 0.34, mSeed2),
+                    sideKick + liftKick,
+                    mix(0.42, 0.70, mSeed),
+                    mix(0.34, 0.58, mSeed2)
+                );
+            }
+
+            d.position = spawnPosition - pc.itemOrigin;
+            d.velocity = velocity * -0.06;
+            d.phase = ((d.phase & ~SPLASH_PHASE_MASK) |
+                SPLASH_PHASE_FADING |
+                SPLASH_PHASE_GLASS_CHECKED);
+            d.lifetime = min(d.lifetime, 0.075);
+            return true;
+        }
+        break;
+    }
+
+    return false;
+}
 
 void main() {
     uint gid = gl_GlobalInvocationID.x;
@@ -55,6 +301,7 @@ void main() {
         d.velocity = vel;
         d.position = pos;
         d.flightAge = min(d.flightAge + dt, 2.0);
+        tryApplyGlassHit(d, gid, pc.itemOrigin + pos, vel);
         d.lifetime -= dt;
         if (d.lifetime <= 0.0) {
             d.phase = (d.phase & ~SPLASH_PHASE_MASK) | SPLASH_PHASE_FADING;

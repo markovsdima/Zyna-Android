@@ -1,0 +1,268 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D surfaceIn;
+layout(set = 0, binding = 1) uniform sampler2D velocityIn;
+layout(set = 0, binding = 2) uniform sampler2D impactIn;
+layout(set = 0, binding = 3) uniform sampler2D impactVelocityIn;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D surfaceOut;
+layout(set = 0, binding = 5, rgba16f) uniform writeonly image2D velocityOut;
+
+struct GlassHitTarget {
+    vec4 rect;
+    vec4 params;
+};
+
+layout(set = 0, binding = 6, std430) readonly buffer GlassHitTargetBuffer {
+    GlassHitTarget glassHitTargets[];
+};
+
+layout(push_constant) uniform PushConstants {
+    float timeStep;
+    uint hitTargetCount;
+    vec2 viewportSize;
+    ivec2 dispatchOrigin;
+} pc;
+
+float saturate(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+
+float splashHash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float splashNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = splashHash(i);
+    float b = splashHash(i + vec2(1.0, 0.0));
+    float c = splashHash(i + vec2(0.0, 1.0));
+    float d = splashHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float roundedRectDistance(vec2 point, vec2 size, float radius) {
+    radius = min(radius, min(size.x, size.y) * 0.5);
+    vec2 halfSize = size * 0.5;
+    vec2 q = abs(point - halfSize) - (halfSize - vec2(radius));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float roundedRectBottomY(float x, vec2 size, float radius) {
+    radius = min(radius, min(size.x, size.y) * 0.5);
+    float clampedX = clamp(x, 0.0, size.x);
+    if (radius <= 0.001) {
+        return size.y;
+    }
+    if (clampedX < radius) {
+        float dx = clampedX - radius;
+        return size.y - radius + sqrt(max(radius * radius - dx * dx, 0.0));
+    }
+    if (clampedX > size.x - radius) {
+        float dx = clampedX - (size.x - radius);
+        return size.y - radius + sqrt(max(radius * radius - dx * dx, 0.0));
+    }
+    return size.y;
+}
+
+struct BottomInfo {
+    float distance;
+    float footMask;
+    float bottomY;
+};
+
+BottomInfo bottomInfo(vec2 local, vec2 size, vec4 params) {
+    BottomInfo info;
+    float radius = min(params.x, min(size.x, size.y) * 0.5);
+    float bottomY = roundedRectBottomY(local.x, size, radius);
+    info.distance = bottomY - local.y;
+    float sideSoftness = min(max(size.y * 0.16, 5.0), 18.0);
+    info.footMask = smoothstep(-4.0, sideSoftness, local.x)
+        * (1.0 - smoothstep(size.x - sideSoftness, size.x + 4.0, local.x));
+
+    info.bottomY = bottomY;
+    return info;
+}
+
+struct TargetInfo {
+    float mask;
+    float glassMask;
+    float bottomRim;
+};
+
+TargetInfo targetInfo(vec2 overlayPoint) {
+    TargetInfo info;
+    info.mask = 0.0;
+    info.glassMask = 0.0;
+    info.bottomRim = 0.0;
+
+    for (uint i = 0u; i < pc.hitTargetCount; ++i) {
+        GlassHitTarget target = glassHitTargets[i];
+        vec2 origin = target.rect.xy;
+        vec2 size = target.rect.zw;
+        if (size.x <= 0.0 || size.y <= 0.0) {
+            continue;
+        }
+
+        vec2 local = overlayPoint - origin;
+        float distance = roundedRectDistance(local, size, target.params.x);
+        float glassMask = 1.0 - smoothstep(0.0, 2.75, distance);
+        float bottomRim = 0.0;
+        if (glassMask > 0.001 && local.y > size.y - 28.0 && local.y < size.y + 4.0) {
+            BottomInfo bottom = bottomInfo(local, size, target.params);
+            float bottomBand = (1.0 - smoothstep(2.0, 22.0, bottom.distance))
+                * smoothstep(-3.0, 3.0, bottom.distance);
+            bottomRim = bottomBand * bottom.footMask * glassMask;
+        }
+
+        info.glassMask = max(info.glassMask, glassMask);
+        info.mask = max(info.mask, glassMask);
+        info.bottomRim = max(info.bottomRim, bottomRim);
+    }
+
+    return info;
+}
+
+void main() {
+    ivec2 pixel = pc.dispatchOrigin + ivec2(gl_GlobalInvocationID.xy);
+    ivec2 imageSize = imageSize(surfaceOut);
+    if (pixel.x >= imageSize.x || pixel.y >= imageSize.y) {
+        return;
+    }
+
+    float dt = clamp(pc.timeStep, 0.001, 0.05);
+    vec2 textureSize = vec2(imageSize);
+    vec2 pixelCenter = vec2(pixel) + vec2(0.5);
+    vec2 uv = pixelCenter / textureSize;
+    vec2 texel = 1.0 / textureSize;
+    vec2 overlayPoint = uv * pc.viewportSize;
+    TargetInfo target = targetInfo(overlayPoint);
+    float targetMask = target.mask;
+    float glassRegion = target.glassMask;
+    if (targetMask <= 0.001 && pc.hitTargetCount > 0u) {
+        imageStore(surfaceOut, pixel, vec4(0.0));
+        imageStore(velocityOut, pixel, vec4(0.0));
+        return;
+    }
+
+    vec4 centerState = texture(surfaceIn, uv);
+    vec2 centerVelocity = texture(velocityIn, uv).xy;
+    float centerMass = centerState.a;
+    float heavyMass = smoothstep(0.18, 0.66, centerMass);
+    float beadMass = smoothstep(0.085, 0.30, centerMass);
+    float laneWarp = (splashNoise(vec2(pixelCenter.y * 0.018, 8.1)) - 0.5) * 21.0
+        + (splashNoise(vec2(pixelCenter.y * 0.052, 4.2)) - 0.5) * 6.0;
+    float laneNoise = splashNoise(vec2((pixelCenter.x + laneWarp) * 0.050, pixelCenter.y * 0.018));
+    float laneBreak = splashNoise(vec2(pixelCenter.x * 0.017, pixelCenter.y * 0.070));
+    float lane = smoothstep(0.70, 0.96, laneNoise + beadMass * 0.10)
+        * smoothstep(0.26, 0.78, laneBreak + beadMass * 0.12);
+    float laneLeft = splashNoise(vec2((pixelCenter.x - 4.0 + laneWarp) * 0.050, pixelCenter.y * 0.018));
+    float laneRight = splashNoise(vec2((pixelCenter.x + 4.0 + laneWarp) * 0.050, pixelCenter.y * 0.018));
+    float laneSlope = laneRight - laneLeft;
+    float mobility = smoothstep(0.070, 0.32, centerMass);
+    float pinNoise = splashNoise(pixelCenter * 0.173 + vec2(3.1, 7.7));
+    float adhesion = mix(1.62, 0.60, saturate(centerMass * 1.55 + lane * 0.20))
+        * mix(0.82, 1.26, pinNoise);
+
+    float gravityPull = mix(5.0, 46.0, heavyMass) * mobility;
+    gravityPull += lane * beadMass * 7.0;
+    centerVelocity.y += gravityPull / max(adhesion, 0.25) * dt;
+    centerVelocity.x += (splashNoise(pixelCenter * 0.087 + centerMass * 11.0) - 0.5)
+        * mobility * dt * mix(4.0, 10.0, lane);
+    centerVelocity.x += laneSlope * lane * beadMass * dt * 18.0;
+    centerVelocity.x *= 1.0 - min(dt * lane * 3.6, 0.28);
+
+    float damping = mix(6.4, 0.82, saturate(mobility + heavyMass * 0.55));
+    damping *= mix(1.12, 0.72, lane);
+    centerVelocity *= max(0.0, 1.0 - damping * dt);
+    float maxSpeed = mix(12.0, 134.0, saturate(centerMass * 1.45 + heavyMass * 0.42 + lane * 0.10));
+    centerVelocity = clamp(centerVelocity, vec2(-maxSpeed), vec2(maxSpeed));
+
+    vec2 backUv = uv - centerVelocity * dt / max(pc.viewportSize, vec2(1.0));
+    vec4 advected = texture(surfaceIn, backUv);
+    vec4 advectedVelocity = texture(velocityIn, backUv);
+    vec2 velocity = advectedVelocity.xy;
+
+    vec4 leftState = texture(surfaceIn, backUv - vec2(texel.x, 0.0));
+    vec4 rightState = texture(surfaceIn, backUv + vec2(texel.x, 0.0));
+    vec4 upState = texture(surfaceIn, backUv - vec2(0.0, texel.y));
+    vec4 downState = texture(surfaceIn, backUv + vec2(0.0, texel.y));
+    vec4 nwState = texture(surfaceIn, backUv - texel);
+    vec4 neState = texture(surfaceIn, backUv + vec2(texel.x, -texel.y));
+    vec4 swState = texture(surfaceIn, backUv + vec2(-texel.x, texel.y));
+    vec4 seState = texture(surfaceIn, backUv + texel);
+
+    vec4 crossAverage = (leftState + rightState + upState + downState) * 0.25;
+    vec4 diagonalAverage = (nwState + neState + swState + seState) * 0.25;
+    vec4 verticalAverage = (upState + downState) * 0.5;
+    vec4 tensionTarget = crossAverage * 0.66 + diagonalAverage * 0.22 + advected * 0.12;
+    float neighborhoodMass = max(max(max(leftState.a, rightState.a), max(upState.a, downState.a)),
+        max(max(nwState.a, neState.a), max(swState.a, seState.a)));
+    neighborhoodMass = max(neighborhoodMass, advected.a);
+    float wetNeighborhood = smoothstep(0.032, 0.18, neighborhoodMass) * glassRegion;
+    float pathPull = smoothstep(0.045, 0.22, downState.a) * smoothstep(0.035, 0.18, advected.a);
+    float rivulet = lane * wetNeighborhood * glassRegion * smoothstep(0.12, 0.38, max(advected.a, downState.a));
+    float tension = saturate(dt * mix(1.05, 3.85, saturate(neighborhoodMass * 1.25)) * wetNeighborhood);
+    vec4 surface = mix(advected, tensionTarget, tension);
+    surface = mix(surface, verticalAverage, saturate(dt * 0.10 * rivulet));
+
+    float impactMass = texture(impactIn, uv).a * glassRegion;
+    if (impactMass > 0.0001) {
+        vec4 impactState = texture(impactIn, uv);
+        vec4 impactVelocityState = texture(impactVelocityIn, uv);
+        vec2 incomingVelocity = impactVelocityState.xy / max(impactVelocityState.a, 0.001);
+        float previousMass = surface.a;
+        surface.rgb += impactState.rgb * 0.88;
+        surface.a += impactState.a * 0.88;
+        float impulseMass = impactState.a * 0.68;
+        velocity = (velocity * previousMass + incomingVelocity * impulseMass) / max(surface.a, 0.001);
+        velocity.y += impactState.a * 18.0;
+    }
+
+    vec2 heightGradient = vec2(rightState.a - leftState.a, downState.a - upState.a);
+    velocity += heightGradient * (-14.0 * dt * wetNeighborhood);
+    velocity.y += (pathPull * 12.0 + rivulet * 7.0 + heavyMass * 16.0) * dt;
+    velocity.x *= 1.0 - min(dt * (pathPull + rivulet) * 2.4, 0.30);
+
+    vec2 leftVelocity = texture(velocityIn, backUv - vec2(texel.x, 0.0)).xy;
+    vec2 rightVelocity = texture(velocityIn, backUv + vec2(texel.x, 0.0)).xy;
+    vec2 upVelocity = texture(velocityIn, backUv - vec2(0.0, texel.y)).xy;
+    vec2 downVelocity = texture(velocityIn, backUv + vec2(0.0, texel.y)).xy;
+    vec2 averageVelocity = (leftVelocity + rightVelocity + upVelocity + downVelocity) * 0.25;
+    velocity = mix(velocity, averageVelocity, saturate(dt * 2.8 * wetNeighborhood));
+    velocity = mix(velocity, vec2(velocity.x * 0.58, max(velocity.y, downVelocity.y)), saturate(dt * 2.1 * rivulet));
+    velocity *= max(0.0, 1.0 - dt * mix(5.1, 0.70, smoothstep(0.04, 0.34, surface.a)));
+
+    float bottomRim = target.bottomRim;
+    float rimRelease = smoothstep(0.38, 0.78, surface.a);
+    float rimHold = bottomRim * (1.0 - rimRelease);
+    velocity.y *= 1.0 - min(rimHold * dt * 6.4, 0.42);
+    velocity.y = mix(velocity.y, max(velocity.y, 52.0 + surface.a * 74.0), bottomRim * rimRelease);
+    velocity.x *= 1.0 - min(bottomRim * dt * 5.8, 0.42);
+
+    float thinFilm = 1.0 - smoothstep(0.050, 0.20, surface.a);
+    float dryRate = mix(0.038, 0.92, thinFilm);
+    dryRate += rivulet * (1.0 - heavyMass) * 0.14;
+    dryRate += glassRegion * (1.0 - smoothstep(0.070, 0.24, surface.a)) * 0.44;
+    surface *= max(0.0, 1.0 - dryRate * dt);
+
+    surface *= targetMask;
+    velocity *= targetMask;
+
+    if (surface.a < 0.018) {
+        surface = vec4(0.0);
+        velocity = vec2(0.0);
+    } else {
+        float colorScale = min(surface.a, 3.2) / max(surface.a, 0.001);
+        surface.rgb *= colorScale;
+        surface.a = min(surface.a, 3.2);
+    }
+
+    imageStore(surfaceOut, pixel, surface);
+    imageStore(velocityOut, pixel, vec4(velocity, 0.0, surface.a));
+}

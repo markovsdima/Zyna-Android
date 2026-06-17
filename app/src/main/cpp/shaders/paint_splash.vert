@@ -20,7 +20,7 @@ layout(set = 0, binding = 0, std430) readonly buffer DropletBuffer {
 layout(push_constant) uniform PushConstants {
     vec2 viewportSize;
     vec2 itemOrigin;
-    vec2 itemSize;
+    vec2 screenToTargetScale;
     float blobScale;
 } pc;
 
@@ -53,11 +53,11 @@ void main() {
     float cosR = cos(d.rotation);
     float sinR = sin(d.rotation);
     vec2 local = q * halfExtent;
-    vec2 rotated = vec2(
+    vec2 rotatedScreen = vec2(
         local.x * cosR - local.y * sinR,
         local.x * sinR + local.y * cosR
     );
-    vec2 screen = pc.itemOrigin + d.position + rotated;
+    vec2 screen = (pc.itemOrigin + d.position + rotatedScreen) * pc.screenToTargetScale;
     vec2 ndc = vec2(
         (screen.x / pc.viewportSize.x) * 2.0 - 1.0,
         (screen.y / pc.viewportSize.y) * 2.0 - 1.0

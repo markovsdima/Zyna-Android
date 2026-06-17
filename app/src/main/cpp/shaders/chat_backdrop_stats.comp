@@ -1,0 +1,81 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D clearTex;
+layout(set = 0, binding = 1, std430) buffer StatsBuffer {
+    float values[];
+} stats;
+
+layout(push_constant) uniform PushConstants {
+    vec2 textureSize;
+    vec4 rect;
+    vec2 textureOrigin;
+    float cornerRadius;
+} pc;
+
+shared float sSum[128];
+shared float sSumSq[128];
+shared float sBright[128];
+shared float sDark[128];
+shared float sCount[128];
+
+float sdRoundedRect(vec2 point, vec2 halfExtent, float radius) {
+    float safeRadius = min(radius, min(halfExtent.x, halfExtent.y));
+    vec2 q = abs(point) - halfExtent + vec2(safeRadius);
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+vec2 clampUv(vec2 uv) {
+    vec2 texel = 1.0 / max(pc.textureSize, vec2(1.0));
+    return clamp(uv, texel * 0.5, vec2(1.0) - texel * 0.5);
+}
+
+void main() {
+    uint index = gl_LocalInvocationIndex;
+    vec2 rectSize = max(pc.rect.zw - pc.rect.xy, vec2(1.0));
+    vec2 samplePoint = pc.rect.xy + (vec2(gl_LocalInvocationID.xy) + vec2(0.5)) /
+        vec2(16.0, 8.0) * rectSize;
+    vec2 rectCenter = (pc.rect.xy + pc.rect.zw) * 0.5;
+    vec2 halfExtent = rectSize * 0.5;
+    float sdf = sdRoundedRect(samplePoint - rectCenter, halfExtent, pc.cornerRadius);
+
+    float luma = 0.0;
+    float count = 0.0;
+    float bright = 0.0;
+    float dark = 0.0;
+    if (sdf <= 0.0) {
+        vec2 uv = clampUv((samplePoint - pc.textureOrigin) / max(pc.textureSize, vec2(1.0)));
+        vec3 rgb = texture(clearTex, uv).rgb;
+        luma = dot(rgb, vec3(0.299, 0.587, 0.114));
+        count = 1.0;
+        bright = luma > 0.72 ? 1.0 : 0.0;
+        dark = luma < 0.28 ? 1.0 : 0.0;
+    }
+
+    sSum[index] = luma;
+    sSumSq[index] = luma * luma;
+    sBright[index] = bright;
+    sDark[index] = dark;
+    sCount[index] = count;
+    barrier();
+
+    for (uint stride = 64; stride > 0; stride >>= 1) {
+        if (index < stride) {
+            sSum[index] += sSum[index + stride];
+            sSumSq[index] += sSumSq[index + stride];
+            sBright[index] += sBright[index + stride];
+            sDark[index] += sDark[index + stride];
+            sCount[index] += sCount[index + stride];
+        }
+        barrier();
+    }
+
+    if (index == 0) {
+        stats.values[0] = sSum[0];
+        stats.values[1] = sSumSq[0];
+        stats.values[2] = sBright[0];
+        stats.values[3] = sDark[0];
+        stats.values[4] = sCount[0];
+    }
+}

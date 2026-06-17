@@ -35,10 +35,17 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     private var pendingBackdropFrame: PendingBackdropFrame? = null
     private var activeBackdropFrame: ActiveBackdropFrame? = null
     private var idleClearFramesRemaining = 0
+    private var backdropStatsPollCallbackPosted = false
+    private var backdropStatsPollAttemptsRemaining = 0
+    var onBackdropStats: (VulkanGlassBackdropStats) -> Unit = {}
 
     private val frameCallback = Choreographer.FrameCallback {
         frameCallbackPosted = false
         renderActiveEffectsOrDrain()
+    }
+    private val backdropStatsPollCallback = Choreographer.FrameCallback {
+        backdropStatsPollCallbackPosted = false
+        runBackdropStatsPoll()
     }
 
     init {
@@ -61,6 +68,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             ensureRenderer()
         } else {
             stopFrameCallback()
+            stopBackdropStatsPollCallback()
             clearPendingSplash()
             clearBackdropFrame(clearNative = true)
             clearNativeSurface()
@@ -160,6 +168,74 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         )
     }
 
+    fun updateBackdropRects(
+        rects: List<VulkanChatGlassRect>,
+        textureLeft: Float = 0f,
+        textureTop: Float = 0f
+    ): BackdropFrameResult {
+        val startNanos = SystemClock.elapsedRealtimeNanos()
+        val rectValues = rects.toNativeRectValues()
+        if (rectValues.isEmpty() || activeBackdropFrame == null) {
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+        if (!enabled) {
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+        ensureRenderer()
+        if (nativeHandle == 0L) {
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+
+        visibility = VISIBLE
+        bindCurrentSurface()
+        val updateStartNanos = SystemClock.elapsedRealtimeNanos()
+        val didUpdate = runCatching {
+            NativeVulkanChat.nativeUpdateBackdropRects(
+                nativeHandle,
+                rectValues,
+                textureLeft,
+                textureTop
+            )
+        }.getOrElse { error ->
+            Log.w(TAG, "Failed to update backdrop rects", error)
+            false
+        }
+        val updateNanos = SystemClock.elapsedRealtimeNanos() - updateStartNanos
+        if (!didUpdate) {
+            return BackdropFrameResult(
+                totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+                importNanos = updateNanos,
+                imported = false,
+                rendered = false
+            )
+        }
+
+        val renderStartNanos = SystemClock.elapsedRealtimeNanos()
+        val willContinueRendering = renderActiveEffectsOrDrain()
+        val renderCallNanos = SystemClock.elapsedRealtimeNanos() - renderStartNanos
+        return BackdropFrameResult(
+            totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
+            importNanos = updateNanos,
+            renderCallNanos = renderCallNanos,
+            imported = true,
+            rendered = true,
+            willContinueRendering = willContinueRendering,
+            mainThread = Looper.myLooper() == Looper.getMainLooper()
+        )
+    }
+
     fun clearBackdropFrame() {
         clearPendingBackdropFrame()
         clearBackdropFrame(clearNative = true)
@@ -182,6 +258,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         stopFrameCallback()
+        stopBackdropStatsPollCallback()
         clearPendingSplash()
         clearPendingBackdropFrame()
         clearBackdropFrame(clearNative = true)
@@ -221,6 +298,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             Log.d(TAG, "surface destroyed")
         }
         stopFrameCallback()
+        stopBackdropStatsPollCallback()
         clearNativeSurface()
         surface?.release()
         surface = null
@@ -261,6 +339,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             Log.d(TAG, "hide idle surface")
         }
         stopFrameCallback()
+        stopBackdropStatsPollCallback()
         clearPendingSplash()
         clearPendingBackdropFrame()
         idleClearFramesRemaining = 0
@@ -347,6 +426,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         val renderStartNanos = SystemClock.elapsedRealtimeNanos()
         val willContinueRendering = renderActiveEffectsOrDrain()
         val renderCallNanos = SystemClock.elapsedRealtimeNanos() - renderStartNanos
+        scheduleBackdropStatsPoll()
         return BackdropFrameResult(
             importNanos = importNanos,
             renderCallNanos = renderCallNanos,
@@ -370,6 +450,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     private fun clearBackdropFrame(clearNative: Boolean) {
         activeBackdropFrame?.frame?.close()
         activeBackdropFrame = null
+        stopBackdropStatsPollCallback()
         if (clearNative && nativeHandle != 0L) {
             NativeVulkanChat.nativeClearBackdropHardwareBuffer(nativeHandle)
         }
@@ -478,11 +559,71 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         }
     }
 
+    private fun scheduleBackdropStatsPoll() {
+        if (nativeHandle == 0L || activeBackdropFrame == null || !isAttachedToWindow) {
+            return
+        }
+        backdropStatsPollAttemptsRemaining = BACKDROP_STATS_POLL_ATTEMPTS
+        if (!backdropStatsPollCallbackPosted) {
+            backdropStatsPollCallbackPosted = true
+            Choreographer.getInstance().postFrameCallback(backdropStatsPollCallback)
+        }
+    }
+
+    private fun runBackdropStatsPoll() {
+        if (nativeHandle == 0L || activeBackdropFrame == null || !isAttachedToWindow) {
+            backdropStatsPollAttemptsRemaining = 0
+            return
+        }
+        if (pollBackdropStats()) {
+            backdropStatsPollAttemptsRemaining = 0
+            return
+        }
+        backdropStatsPollAttemptsRemaining -= 1
+        if (backdropStatsPollAttemptsRemaining > 0 && !backdropStatsPollCallbackPosted) {
+            backdropStatsPollCallbackPosted = true
+            Choreographer.getInstance().postFrameCallback(backdropStatsPollCallback)
+        }
+    }
+
+    private fun pollBackdropStats(): Boolean {
+        val handle = nativeHandle
+        if (handle == 0L) {
+            return false
+        }
+        val values = runCatching {
+            NativeVulkanChat.nativePollBackdropStats(handle)
+        }.getOrElse { error ->
+            Log.w(TAG, "Failed to poll backdrop stats", error)
+            null
+        } ?: return false
+        if (values.size < 4) {
+            return false
+        }
+        onBackdropStats(
+            VulkanGlassBackdropStats(
+                meanLuma = values[0],
+                variance = values[1],
+                brightFraction = values[2],
+                darkFraction = values[3]
+            )
+        )
+        return true
+    }
+
     private fun stopFrameCallback() {
         if (frameCallbackPosted) {
             Choreographer.getInstance().removeFrameCallback(frameCallback)
             frameCallbackPosted = false
         }
+    }
+
+    private fun stopBackdropStatsPollCallback() {
+        if (backdropStatsPollCallbackPosted) {
+            Choreographer.getInstance().removeFrameCallback(backdropStatsPollCallback)
+            backdropStatsPollCallbackPosted = false
+        }
+        backdropStatsPollAttemptsRemaining = 0
     }
 
     private companion object {
@@ -492,6 +633,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         const val DEBUG_CLEAR_BLUE = 0.86f
         const val DEBUG_MARKER_ALPHA = 0.82f
         const val IDLE_CLEAR_FRAME_COUNT = 4
+        const val BACKDROP_STATS_POLL_ATTEMPTS = 4
     }
 }
 
@@ -525,7 +667,14 @@ internal data class BackdropFrameResult(
     val mainThread: Boolean = Looper.myLooper() == Looper.getMainLooper()
 )
 
-private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 8
+internal data class VulkanGlassBackdropStats(
+    val meanLuma: Float,
+    val variance: Float,
+    val brightFraction: Float,
+    val darkFraction: Float
+)
+
+private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 10
 private const val ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING = false
 
 private fun List<VulkanChatGlassRect>.toNativeRectValues(): FloatArray {
@@ -544,6 +693,8 @@ private fun List<VulkanChatGlassRect>.toNativeRectValues(): FloatArray {
         values[index++] = rect.opacity
         values[index++] = rect.bezelWidth
         values[index++] = rect.glassThickness
+        values[index++] = rect.adaptiveAppearance
+        values[index++] = rect.adaptiveContrast
     }
     return values
 }

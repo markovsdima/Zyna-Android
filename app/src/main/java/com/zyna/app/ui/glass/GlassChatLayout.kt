@@ -23,7 +23,11 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
+import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 
 /** Chat view shell that gives the list and input glass a shared backdrop source. */
 class GlassChatLayout @JvmOverloads constructor(
@@ -72,6 +76,9 @@ class GlassChatLayout @JvmOverloads constructor(
     private var lastHardwareBackdropCaptureUptimeMs = 0L
     private var vulkanGlassRects: List<VulkanChatGlassRect> = emptyList()
     private var vulkanGlassCaptureBounds = Rect()
+    private val vulkanGlassAdaptiveMaterial = VulkanGlassAdaptiveMaterialState()
+    private var lastVulkanGlassAdaptiveUpdateNanos = 0L
+    private var vulkanGlassAdaptiveRenderScheduled = false
     private var vulkanGlassPerfWindowStartNanos = 0L
     private var vulkanGlassPerfSamples = 0
     private var vulkanGlassPerfDrops = 0
@@ -99,6 +106,10 @@ class GlassChatLayout @JvmOverloads constructor(
         captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw = requiresFreshImage)
         lastHardwareBackdropCaptureUptimeMs = SystemClock.uptimeMillis()
     }
+    private val vulkanGlassAdaptiveRenderRunnable = Runnable {
+        vulkanGlassAdaptiveRenderScheduled = false
+        renderVulkanGlassAdaptiveTransitionFrame()
+    }
     private val recyclerDrawListener = ViewTreeObserver.OnDrawListener {
         val scrollOffset = recyclerView.computeVerticalScrollOffset()
         if (scrollOffset != lastRecyclerDrawScrollOffset) {
@@ -112,6 +123,9 @@ class GlassChatLayout @JvmOverloads constructor(
     private val source = RecyclerViewGlassBackdropSource(recyclerView, palette.background)
     private val vulkanOverlay = VulkanChatOverlayView(context).apply {
         setOverlayEnabled(BuildConfig.DEBUG && ENABLE_VULKAN_CHAT_OVERLAY)
+        onBackdropStats = { stats ->
+            handleVulkanGlassBackdropStats(stats)
+        }
     }
     private val contextMenuLayer = MessageContextMenuLayer(context, glassController).apply {
         onDismissRequested = {
@@ -209,8 +223,10 @@ class GlassChatLayout @JvmOverloads constructor(
         detachRecyclerDrawListener()
         removeCallbacks(readReceiptCandidateEvaluationRunnable)
         removeCallbacks(hardwareBackdropCaptureRunnable)
+        removeCallbacks(vulkanGlassAdaptiveRenderRunnable)
         hardwareBackdropCaptureScheduled = false
         hardwareBackdropCaptureRequiresFreshImage = false
+        vulkanGlassAdaptiveRenderScheduled = false
         vulkanOverlay.clearBackdropFrame()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             hardwareBackdropCapture?.close()
@@ -503,8 +519,10 @@ class GlassChatLayout @JvmOverloads constructor(
         }
         if (nextRects.isEmpty() || nextCaptureBounds.isEmpty) {
             removeCallbacks(hardwareBackdropCaptureRunnable)
+            removeCallbacks(vulkanGlassAdaptiveRenderRunnable)
             hardwareBackdropCaptureScheduled = false
             hardwareBackdropCaptureRequiresFreshImage = false
+            vulkanGlassAdaptiveRenderScheduled = false
             vulkanOverlay.clearBackdropFrame()
         } else {
             scheduleVulkanGlassBackdropCapture(delayMillis = 0L)
@@ -662,9 +680,13 @@ class GlassChatLayout @JvmOverloads constructor(
         }
 
         val overlayStartNanos = SystemClock.elapsedRealtimeNanos()
+        val adaptiveRects = applyVulkanGlassAdaptiveMaterial(
+            rects = rects,
+            nowNanos = overlayStartNanos
+        )
         val overlayResult = vulkanOverlay.setBackdropFrame(
             frame = frame,
-            rects = rects,
+            rects = adaptiveRects,
             textureLeft = captureBounds.left.toFloat(),
             textureTop = captureBounds.top.toFloat()
         )
@@ -720,6 +742,134 @@ class GlassChatLayout @JvmOverloads constructor(
                 overlayResult = overlayResult
             )
         }
+    }
+
+    private fun applyVulkanGlassAdaptiveMaterial(
+        rects: List<VulkanChatGlassRect>,
+        nowNanos: Long
+    ): List<VulkanChatGlassRect> {
+        if (rects.isEmpty()) {
+            return rects
+        }
+
+        val material = vulkanGlassAdaptiveMaterial.advance(nextVulkanGlassAdaptiveDt(nowNanos))
+        if (isVulkanChatInputGlassEnabled()) {
+            inputBar.setAdaptiveMaterial(material)
+        }
+        scheduleVulkanGlassAdaptiveRenderIfNeeded()
+
+        val adapted = ArrayList<VulkanChatGlassRect>(rects.size)
+        for (rect in rects) {
+            adapted.add(
+                rect.copy(
+                    adaptiveAppearance = material.appearance,
+                    adaptiveContrast = material.contrast
+                )
+            )
+        }
+        return adapted
+    }
+
+    private fun handleVulkanGlassBackdropStats(stats: VulkanGlassBackdropStats) {
+        if (
+            !isVulkanGlassBackdropEnabled() ||
+            !isAttachedToWindow ||
+            vulkanGlassRects.isEmpty() ||
+            vulkanGlassCaptureBounds.isEmpty
+        ) {
+            return
+        }
+
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val dt = nextVulkanGlassAdaptiveDt(nowNanos)
+        val material = vulkanGlassAdaptiveMaterial.ingest(
+            stats = stats,
+            dt = dt
+        )
+        if (isVulkanChatInputGlassEnabled()) {
+            inputBar.setAdaptiveMaterial(material)
+        }
+        val didRender = renderVulkanGlassMaterial(material)
+        if (!didRender) {
+            scheduleVulkanGlassBackdropCapture(delayMillis = 0L)
+            return
+        }
+        scheduleVulkanGlassAdaptiveRenderIfNeeded()
+    }
+
+    private fun renderVulkanGlassAdaptiveTransitionFrame() {
+        if (
+            !isVulkanGlassBackdropEnabled() ||
+            !isAttachedToWindow ||
+            vulkanGlassRects.isEmpty() ||
+            vulkanGlassCaptureBounds.isEmpty
+        ) {
+            return
+        }
+
+        val nowNanos = SystemClock.elapsedRealtimeNanos()
+        val material = vulkanGlassAdaptiveMaterial.advance(nextVulkanGlassAdaptiveDt(nowNanos))
+        if (isVulkanChatInputGlassEnabled()) {
+            inputBar.setAdaptiveMaterial(material)
+        }
+        val didRender = renderVulkanGlassMaterial(material)
+        if (!didRender) {
+            scheduleVulkanGlassBackdropCapture(delayMillis = 0L)
+            return
+        }
+        scheduleVulkanGlassAdaptiveRenderIfNeeded()
+    }
+
+    private fun nextVulkanGlassAdaptiveDt(nowNanos: Long): Float {
+        val previousNanos = lastVulkanGlassAdaptiveUpdateNanos
+        val dt = if (previousNanos > 0L) {
+            ((nowNanos - previousNanos).coerceAtLeast(0L) / 1_000_000_000f)
+        } else {
+            1f / 120f
+        }
+        lastVulkanGlassAdaptiveUpdateNanos = nowNanos
+        return dt
+    }
+
+    private fun renderVulkanGlassMaterial(material: GlassAdaptiveMaterial): Boolean {
+        val adaptedRects = applyVulkanGlassMaterialToRects(vulkanGlassRects, material)
+        return vulkanOverlay.updateBackdropRects(
+            rects = adaptedRects,
+            textureLeft = vulkanGlassCaptureBounds.left.toFloat(),
+            textureTop = vulkanGlassCaptureBounds.top.toFloat()
+        ).rendered
+    }
+
+    private fun scheduleVulkanGlassAdaptiveRenderIfNeeded() {
+        if (
+            !vulkanGlassAdaptiveMaterial.isAnimating ||
+            vulkanGlassAdaptiveRenderScheduled ||
+            hardwareBackdropCaptureScheduled ||
+            !isVulkanGlassBackdropEnabled() ||
+            vulkanGlassRects.isEmpty() ||
+            vulkanGlassCaptureBounds.isEmpty ||
+            !isAttachedToWindow
+        ) {
+            return
+        }
+        vulkanGlassAdaptiveRenderScheduled = true
+        postOnAnimation(vulkanGlassAdaptiveRenderRunnable)
+    }
+
+    private fun applyVulkanGlassMaterialToRects(
+        rects: List<VulkanChatGlassRect>,
+        material: GlassAdaptiveMaterial
+    ): List<VulkanChatGlassRect> {
+        val adapted = ArrayList<VulkanChatGlassRect>(rects.size)
+        for (rect in rects) {
+            adapted.add(
+                rect.copy(
+                    adaptiveAppearance = material.appearance,
+                    adaptiveContrast = material.contrast
+                )
+            )
+        }
+        return adapted
     }
 
     private fun recordVulkanGlassPerfDrop() {
@@ -923,6 +1073,79 @@ private class LockableLinearLayoutManager(context: Context) : LinearLayoutManage
 
     override fun canScrollVertically(): Boolean {
         return !isScrollLocked && super.canScrollVertically()
+    }
+}
+
+private class VulkanGlassAdaptiveMaterialState {
+    private var initialized = false
+    private var filteredLuma = 0.5f
+    private var targetAppearance = 1f
+    private var targetContrast = 0f
+    private var appearance = 1f
+    private var contrast = 0f
+
+    val isAnimating: Boolean
+        get() = initialized &&
+            (abs(appearance - targetAppearance) > 0.003f ||
+                abs(contrast - targetContrast) > 0.003f)
+
+    fun ingest(stats: VulkanGlassBackdropStats, dt: Float): GlassAdaptiveMaterial {
+        val safeDt = max(dt, 1f / 120f)
+        if (!initialized) {
+            initialized = true
+            filteredLuma = stats.meanLuma
+            targetAppearance = appearanceTarget(filteredLuma)
+            targetContrast = contrastTarget(stats)
+            appearance = targetAppearance
+            contrast = targetContrast
+            return material()
+        }
+
+        val sampleAlpha = alpha(dt = safeDt, tau = 0.12f)
+        filteredLuma += (stats.meanLuma - filteredLuma) * sampleAlpha
+        targetAppearance = appearanceTarget(filteredLuma)
+        targetContrast = contrastTarget(stats)
+        return advance(safeDt)
+    }
+
+    fun advance(dt: Float): GlassAdaptiveMaterial {
+        if (!initialized) {
+            return material()
+        }
+        val safeDt = max(dt, 1f / 120f)
+        val appearanceAlpha = alpha(dt = safeDt, tau = 0.24f)
+        val contrastAlpha = alpha(dt = safeDt, tau = 0.18f)
+        appearance += (targetAppearance - appearance) * appearanceAlpha
+        contrast += (targetContrast - contrast) * contrastAlpha
+        return material()
+    }
+
+    private fun material(): GlassAdaptiveMaterial {
+        return GlassAdaptiveMaterial(
+            appearance = appearance.coerceIn(0f, 1f),
+            contrast = contrast.coerceIn(0f, 1f)
+        )
+    }
+
+    private fun contrastTarget(stats: VulkanGlassBackdropStats): Float {
+        val stdDev = sqrt(max(stats.variance, 0f))
+        val mixedExtremes = min(stats.brightFraction, stats.darkFraction)
+        val dominantExtreme = max(stats.brightFraction, stats.darkFraction)
+        return (stdDev * 2.7f + mixedExtremes * 1.6f + dominantExtreme * 0.2f)
+            .coerceIn(0f, 1f)
+    }
+
+    private fun appearanceTarget(luma: Float): Float {
+        return if (luma >= APPEARANCE_SWITCH_LUMA) 1f else 0f
+    }
+
+    private fun alpha(dt: Float, tau: Float): Float {
+        val safeTau = max(tau, 0.001f)
+        return 1f - exp((-dt / safeTau).toDouble()).toFloat()
+    }
+
+    private companion object {
+        const val APPEARANCE_SWITCH_LUMA = 0.50f
     }
 }
 

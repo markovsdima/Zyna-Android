@@ -1,5 +1,8 @@
 package com.zyna.app.ui.glass
 
+import android.graphics.Color
+import kotlin.math.roundToInt
+
 /** Visual and capture parameters for one glass surface. Size values are pixels. */
 data class GlassStyle(
     val cornerRadiusPx: Float,
@@ -31,6 +34,41 @@ data class GlassPalette(
     val text: Int,
     val hint: Int
 )
+
+/** Foreground colors derived from the same adaptive material uniforms as the glass shader. */
+internal data class GlassAdaptiveMaterial(
+    val appearance: Float,
+    val contrast: Float
+) {
+    val primaryForeground: Int
+        get() = foreground(darkMaterialWhite = 0.96f, lightMaterialWhite = 0.08f, alpha = 1f)
+
+    val secondaryForeground: Int
+        get() = foreground(darkMaterialWhite = 0.74f, lightMaterialWhite = 0.34f, alpha = 0.95f)
+
+    val glyphForeground: Int
+        get() = foreground(darkMaterialWhite = 0.86f, lightMaterialWhite = 0.42f, alpha = 1f)
+
+    private fun foreground(
+        darkMaterialWhite: Float,
+        lightMaterialWhite: Float,
+        alpha: Float
+    ): Int {
+        val t = smoothstep(appearance.coerceIn(0f, 1f))
+        val white = darkMaterialWhite + (lightMaterialWhite - darkMaterialWhite) * t
+        val channel = (white.coerceIn(0f, 1f) * 255f).roundToInt().coerceIn(0, 255)
+        val alphaChannel = (alpha.coerceIn(0f, 1f) * 255f).roundToInt().coerceIn(0, 255)
+        return Color.argb(alphaChannel, channel, channel, channel)
+    }
+
+    private fun smoothstep(value: Float): Float {
+        return value * value * (3f - 2f * value)
+    }
+
+    companion object {
+        val Light = GlassAdaptiveMaterial(appearance = 1f, contrast = 0f)
+    }
+}
 
 internal fun Float.dpToPx(density: Float): Float = this * density
 

@@ -10,6 +10,7 @@ import android.view.Gravity
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import kotlin.math.abs
 import kotlin.math.max
 
 /** Chat input panel composed of separate glass surfaces sharing one controller. */
@@ -54,6 +55,7 @@ class GlassInputBarView @JvmOverloads constructor(
     private var pendingSentText: String? = null
     private var palette: GlassPalette? = null
     private var vulkanGlassBackgroundEnabled = false
+    private var adaptiveMaterial = GlassAdaptiveMaterial.Light
 
     init {
         clipChildren = false
@@ -94,11 +96,8 @@ class GlassInputBarView @JvmOverloads constructor(
         val strokeWidth = 1f.dpToPx(density)
         val materialBlur = 4f.dpToPx(density)
         val materialDownscale = 3
-        editText.setTextColor(palette.text)
-        editText.setHintTextColor(palette.hint)
-        attachButton.setTextColor(palette.text)
-        sendButton.setTextColor(palette.text)
         applyInputFallbackStyle(palette, strokeWidth)
+        applyForegroundColors()
 
         editGlass.glassStyle = GlassStyle(
             cornerRadiusPx = 22f.dpToPx(density),
@@ -145,6 +144,14 @@ class GlassInputBarView @JvmOverloads constructor(
         )
     }
 
+    internal fun setAdaptiveMaterial(material: GlassAdaptiveMaterial) {
+        if (adaptiveMaterial.isVisiblyCloseTo(material)) {
+            return
+        }
+        adaptiveMaterial = material
+        applyForegroundColors()
+    }
+
     fun setVulkanGlassBackgroundEnabled(enabled: Boolean) {
         if (vulkanGlassBackgroundEnabled == enabled) {
             return
@@ -154,6 +161,7 @@ class GlassInputBarView @JvmOverloads constructor(
         palette?.let { currentPalette ->
             applyInputFallbackStyle(currentPalette, 1f.dpToPx(density))
         }
+        applyForegroundColors()
         controller.invalidateRegions()
     }
 
@@ -308,6 +316,21 @@ class GlassInputBarView @JvmOverloads constructor(
         }
     }
 
+    private fun applyForegroundColors() {
+        val currentPalette = palette ?: return
+        if (vulkanGlassBackgroundEnabled) {
+            editText.setTextColor(adaptiveMaterial.primaryForeground)
+            editText.setHintTextColor(adaptiveMaterial.secondaryForeground)
+            attachButton.setTextColor(adaptiveMaterial.glyphForeground)
+            sendButton.setTextColor(adaptiveMaterial.glyphForeground)
+        } else {
+            editText.setTextColor(currentPalette.text)
+            editText.setHintTextColor(currentPalette.hint)
+            attachButton.setTextColor(currentPalette.text)
+            sendButton.setTextColor(currentPalette.text)
+        }
+    }
+
     private fun addChildGlassRect(
         out: MutableList<VulkanChatGlassRect>,
         child: android.view.View,
@@ -334,3 +357,8 @@ class GlassInputBarView @JvmOverloads constructor(
 }
 
 private const val DISABLE_CHAT_INPUT_HWUI_GLASS = false
+
+private fun GlassAdaptiveMaterial.isVisiblyCloseTo(other: GlassAdaptiveMaterial): Boolean {
+    return abs(appearance - other.appearance) <= 0.012f &&
+        abs(contrast - other.contrast) <= 0.03f
+}

@@ -60,6 +60,15 @@ internal object NativeVulkanChat {
         textureTop: Float
     ): Boolean
 
+    external fun nativeUpdateBackdropRects(
+        handle: Long,
+        rectValues: FloatArray,
+        textureLeft: Float,
+        textureTop: Float
+    ): Boolean
+
+    external fun nativePollBackdropStats(handle: Long): FloatArray?
+
     external fun nativeClearBackdropHardwareBuffer(handle: Long)
 
     external fun nativeRenderFrame(handle: Long): Boolean

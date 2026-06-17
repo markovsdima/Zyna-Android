@@ -36,8 +36,9 @@ constexpr uint32_t kVerticesPerParticle = 6;
 constexpr uint32_t kMaxParticleVertices =
     kMaxSplashItems * kMaxParticlesPerSplash * kVerticesPerParticle;
 constexpr uint32_t kMaxBackdropRects = 16;
-constexpr uint32_t kBackdropRectFloatCount = 8;
+constexpr uint32_t kBackdropRectFloatCount = 10;
 constexpr size_t kMaxBackdropImportCacheEntries = 6;
+constexpr VkDeviceSize kBackdropStatsBufferSize = sizeof(float) * 8;
 
 alignas(uint32_t) constexpr uint32_t kPaintSplashVertSpv[] =
 #include "paint_splash_vert_spv.inc"
@@ -71,6 +72,10 @@ alignas(uint32_t) constexpr uint32_t kChatBackdropBlurFragSpv[] =
 #include "chat_backdrop_blur_frag_spv.inc"
 ;
 
+alignas(uint32_t) constexpr uint32_t kChatBackdropStatsCompSpv[] =
+#include "chat_backdrop_stats_comp_spv.inc"
+;
+
 struct ParticleVertex {
     float position[2];
     float local[2];
@@ -98,6 +103,18 @@ struct BlurPushConstants {
     float texelStep[2];
 };
 
+struct BackdropStatsPushConstants {
+    float textureSize[2];
+    float _padding0[2];
+    float rect[4];
+    float textureOrigin[2];
+    float cornerRadius;
+};
+
+static_assert(offsetof(BackdropStatsPushConstants, rect) == 16);
+static_assert(offsetof(BackdropStatsPushConstants, textureOrigin) == 32);
+static_assert(offsetof(BackdropStatsPushConstants, cornerRadius) == 40);
+
 struct BackdropRect {
     float left;
     float top;
@@ -107,6 +124,8 @@ struct BackdropRect {
     float opacity;
     float bezelWidth;
     float glassThickness;
+    float adaptiveAppearance;
+    float adaptiveContrast;
 };
 
 struct BackdropImportEntry {
@@ -117,6 +136,13 @@ struct BackdropImportEntry {
     int width = 0;
     int height = 0;
     VkFormat format = VK_FORMAT_UNDEFINED;
+};
+
+struct BackdropStatsResult {
+    float meanLuma;
+    float variance;
+    float brightFraction;
+    float darkFraction;
 };
 
 struct BitmapColor {
@@ -253,6 +279,37 @@ public:
         return importBackdropHardwareBufferLocked(env, hardwareBuffer);
     }
 
+    bool updateBackdropRects(
+        std::vector<BackdropRect> rects,
+        float textureLeft,
+        float textureTop
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (
+            rects.empty() ||
+            activeBackdropEntry_ == nullptr ||
+            activeBackdropEntry_->image == VK_NULL_HANDLE ||
+            activeBackdropEntry_->imageView == VK_NULL_HANDLE
+        ) {
+            return false;
+        }
+        backdropRects_ = std::move(rects);
+        backdropTextureOrigin_[0] = textureLeft;
+        backdropTextureOrigin_[1] = textureTop;
+        return hasBackdropImageLocked();
+    }
+
+    bool pollBackdropStats(BackdropStatsResult& outStats) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        consumeCompletedBackdropStatsIfReadyLocked();
+        if (!hasUnreadBackdropStats_) {
+            return false;
+        }
+        outStats = latestBackdropStats_;
+        hasUnreadBackdropStats_ = false;
+        return true;
+    }
+
     void clearBackdropHardwareBuffer() {
         std::lock_guard<std::mutex> lock(mutex_);
         clearBackdropLocked();
@@ -345,6 +402,7 @@ public:
             logWarn("vkWaitForFences failed", fenceResult);
             return false;
         }
+        consumeCompletedBackdropStatsLocked();
         vkResetFences(device_, 1, &inFlightFence_);
 
         uint32_t imageIndex = 0;
@@ -389,6 +447,7 @@ public:
 
         if (!isOk(vkQueueSubmit(graphicsQueue_, 1, &submitInfo, inFlightFence_),
                   "vkQueueSubmit failed")) {
+            backdropStatsPending_ = false;
             vkResetFences(device_, 1, &inFlightFence_);
             return false;
         }
@@ -608,7 +667,8 @@ private:
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &queueFamilyCount, queueFamilies.data());
 
         for (uint32_t index = 0; index < queueFamilyCount; ++index) {
-            if ((queueFamilies[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
+            const VkQueueFlags requiredFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+            if ((queueFamilies[index].queueFlags & requiredFlags) != requiredFlags) {
                 continue;
             }
             VkBool32 presentSupported = VK_FALSE;
@@ -697,8 +757,10 @@ private:
             createRenderPassLocked() &&
             createBlobResourcesLocked() &&
             createBackdropDescriptorResourcesLocked() &&
+            createBackdropStatsResourcesLocked() &&
             createBackdropBlurResourcesLocked() &&
             createParticlePipelineLocked() &&
+            createBackdropStatsPipelineLocked() &&
             createBackdropBlurPipelineLocked() &&
             createBackdropPipelineLocked() &&
             createCompositePipelineLocked() &&
@@ -1191,6 +1253,198 @@ private:
         );
     }
 
+    bool createBackdropStatsResourcesLocked() {
+        if (!createBackdropStatsBufferLocked()) {
+            return false;
+        }
+
+        if (backdropStatsDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+            bindings[0].binding = 0;
+            bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[0].descriptorCount = 1;
+            bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            bindings[1].binding = 1;
+            bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[1].descriptorCount = 1;
+            bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &backdropStatsDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout backdrop stats failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (backdropStatsDescriptorPool_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorPoolSize, 2> poolSizes{};
+            poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSizes[0].descriptorCount = 1;
+            poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSizes[1].descriptorCount = 1;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 1;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+            if (!isOk(
+                    vkCreateDescriptorPool(
+                        device_,
+                        &poolInfo,
+                        nullptr,
+                        &backdropStatsDescriptorPool_
+                    ),
+                    "vkCreateDescriptorPool backdrop stats failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (backdropStatsDescriptorSet_ == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateInfo.descriptorPool = backdropStatsDescriptorPool_;
+            allocateInfo.descriptorSetCount = 1;
+            allocateInfo.pSetLayouts = &backdropStatsDescriptorSetLayout_;
+            if (!isOk(
+                    vkAllocateDescriptorSets(
+                        device_,
+                        &allocateInfo,
+                        &backdropStatsDescriptorSet_
+                    ),
+                    "vkAllocateDescriptorSets backdrop stats failed"
+                )) {
+                return false;
+            }
+        }
+
+        updateBackdropStatsDescriptorLocked();
+        return true;
+    }
+
+    bool createBackdropStatsBufferLocked() {
+        if (backdropStatsBuffer_ != VK_NULL_HANDLE &&
+            backdropStatsBufferMemory_ != VK_NULL_HANDLE &&
+            backdropStatsMapped_ != nullptr) {
+            return true;
+        }
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = kBackdropStatsBufferSize;
+        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!isOk(
+                vkCreateBuffer(device_, &bufferInfo, nullptr, &backdropStatsBuffer_),
+                "vkCreateBuffer backdrop stats failed"
+            )) {
+            return false;
+        }
+
+        VkMemoryRequirements memoryRequirements{};
+        vkGetBufferMemoryRequirements(device_, backdropStatsBuffer_, &memoryRequirements);
+
+        uint32_t memoryTypeIndex = 0;
+        if (!findMemoryTypeLocked(
+                memoryRequirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                memoryTypeIndex
+            )) {
+            logWarn("No host coherent memory for backdrop stats buffer");
+            return false;
+        }
+
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.allocationSize = memoryRequirements.size;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (!isOk(
+                vkAllocateMemory(device_, &allocateInfo, nullptr, &backdropStatsBufferMemory_),
+                "vkAllocateMemory backdrop stats failed"
+            )) {
+            return false;
+        }
+        if (!isOk(
+                vkBindBufferMemory(device_, backdropStatsBuffer_, backdropStatsBufferMemory_, 0),
+                "vkBindBufferMemory backdrop stats failed"
+            )) {
+            return false;
+        }
+        if (!isOk(
+                vkMapMemory(
+                    device_,
+                    backdropStatsBufferMemory_,
+                    0,
+                    kBackdropStatsBufferSize,
+                    0,
+                    reinterpret_cast<void**>(&backdropStatsMapped_)
+                ),
+                "vkMapMemory backdrop stats failed"
+            )) {
+            return false;
+        }
+        std::fill(
+            backdropStatsMapped_,
+            backdropStatsMapped_ + kBackdropStatsBufferSize / sizeof(float),
+            0.0f
+        );
+        return true;
+    }
+
+    void updateBackdropStatsDescriptorLocked() {
+        if (backdropStatsDescriptorSet_ == VK_NULL_HANDLE ||
+            backdropSampler_ == VK_NULL_HANDLE ||
+            backdropStatsBuffer_ == VK_NULL_HANDLE ||
+            activeBackdropEntry_ == nullptr ||
+            activeBackdropEntry_->imageView == VK_NULL_HANDLE) {
+            return;
+        }
+
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.sampler = backdropSampler_;
+        imageInfo.imageView = activeBackdropEntry_->imageView;
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkDescriptorBufferInfo bufferInfo{};
+        bufferInfo.buffer = backdropStatsBuffer_;
+        bufferInfo.offset = 0;
+        bufferInfo.range = kBackdropStatsBufferSize;
+
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = backdropStatsDescriptorSet_;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[0].pImageInfo = &imageInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = backdropStatsDescriptorSet_;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[1].pBufferInfo = &bufferInfo;
+
+        vkUpdateDescriptorSets(
+            device_,
+            static_cast<uint32_t>(writes.size()),
+            writes.data(),
+            0,
+            nullptr
+        );
+    }
+
     bool createBackdropBlurResourcesLocked() {
         return createBackdropBlurDescriptorResourcesLocked() &&
             createBackdropBlurRenderPassLocked();
@@ -1598,6 +1852,7 @@ private:
             const int64_t descriptorStartNs = nowNanos();
             updateBackdropBlurSourceDescriptorLocked();
             updateBackdropDescriptorLocked();
+            updateBackdropStatsDescriptorLocked();
             const int64_t descriptorNs = nowNanos() - descriptorStartNs;
             const int64_t cacheNs = nowNanos() - cacheStartNs;
             const int64_t importTotalNs = nowNanos() - importStartNs;
@@ -1801,6 +2056,7 @@ private:
         const int64_t descriptorStartNs = nowNanos();
         updateBackdropBlurSourceDescriptorLocked();
         updateBackdropDescriptorLocked();
+        updateBackdropStatsDescriptorLocked();
         const int64_t descriptorNs = nowNanos() - descriptorStartNs;
         const int64_t importTotalNs = nowNanos() - importStartNs;
         if (kLogBackdropImportTiming) {
@@ -1875,8 +2131,51 @@ private:
 
     void waitForFrameFenceLocked() {
         if (device_ != VK_NULL_HANDLE && inFlightFence_ != VK_NULL_HANDLE) {
-            vkWaitForFences(device_, 1, &inFlightFence_, VK_TRUE, 100000000);
+            if (vkWaitForFences(device_, 1, &inFlightFence_, VK_TRUE, 100000000) == VK_SUCCESS) {
+                consumeCompletedBackdropStatsLocked();
+            }
         }
+    }
+
+    void consumeCompletedBackdropStatsIfReadyLocked() {
+        if (!backdropStatsPending_ ||
+            device_ == VK_NULL_HANDLE ||
+            inFlightFence_ == VK_NULL_HANDLE) {
+            return;
+        }
+        const VkResult fenceStatus = vkGetFenceStatus(device_, inFlightFence_);
+        if (fenceStatus == VK_SUCCESS) {
+            consumeCompletedBackdropStatsLocked();
+        }
+    }
+
+    void consumeCompletedBackdropStatsLocked() {
+        if (!backdropStatsPending_) {
+            return;
+        }
+        backdropStatsPending_ = false;
+        if (backdropStatsMapped_ == nullptr) {
+            return;
+        }
+
+        const float sum = backdropStatsMapped_[0];
+        const float sumSq = backdropStatsMapped_[1];
+        const float bright = backdropStatsMapped_[2];
+        const float dark = backdropStatsMapped_[3];
+        const float count = backdropStatsMapped_[4];
+        if (count <= 0.5f) {
+            return;
+        }
+
+        const float mean = sum / count;
+        const float variance = std::max(0.0f, sumSq / count - mean * mean);
+        latestBackdropStats_ = BackdropStatsResult{
+            mean,
+            variance,
+            bright / count,
+            dark / count
+        };
+        hasUnreadBackdropStats_ = true;
     }
 
     void clearBackdropLocked() {
@@ -1886,6 +2185,8 @@ private:
         backdropWidth_ = 0;
         backdropHeight_ = 0;
         backdropNeedsTransition_ = false;
+        backdropStatsPending_ = false;
+        hasUnreadBackdropStats_ = false;
         destroyBackdropImportCacheLocked();
     }
 
@@ -1934,6 +2235,52 @@ private:
         backdropBlurHeight_ = 0;
         backdropBlurTempLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         backdropBlurLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
+    void destroyBackdropStatsResourcesLocked() {
+        backdropStatsPending_ = false;
+        hasUnreadBackdropStats_ = false;
+        if (device_ == VK_NULL_HANDLE) {
+            backdropStatsPipeline_ = VK_NULL_HANDLE;
+            backdropStatsPipelineLayout_ = VK_NULL_HANDLE;
+            backdropStatsDescriptorPool_ = VK_NULL_HANDLE;
+            backdropStatsDescriptorSet_ = VK_NULL_HANDLE;
+            backdropStatsDescriptorSetLayout_ = VK_NULL_HANDLE;
+            backdropStatsBuffer_ = VK_NULL_HANDLE;
+            backdropStatsBufferMemory_ = VK_NULL_HANDLE;
+            backdropStatsMapped_ = nullptr;
+            return;
+        }
+
+        if (backdropStatsPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, backdropStatsPipeline_, nullptr);
+            backdropStatsPipeline_ = VK_NULL_HANDLE;
+        }
+        if (backdropStatsPipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, backdropStatsPipelineLayout_, nullptr);
+            backdropStatsPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (backdropStatsDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, backdropStatsDescriptorPool_, nullptr);
+            backdropStatsDescriptorPool_ = VK_NULL_HANDLE;
+            backdropStatsDescriptorSet_ = VK_NULL_HANDLE;
+        }
+        if (backdropStatsDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, backdropStatsDescriptorSetLayout_, nullptr);
+            backdropStatsDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (backdropStatsMapped_ != nullptr) {
+            vkUnmapMemory(device_, backdropStatsBufferMemory_);
+            backdropStatsMapped_ = nullptr;
+        }
+        if (backdropStatsBuffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, backdropStatsBuffer_, nullptr);
+            backdropStatsBuffer_ = VK_NULL_HANDLE;
+        }
+        if (backdropStatsBufferMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, backdropStatsBufferMemory_, nullptr);
+            backdropStatsBufferMemory_ = VK_NULL_HANDLE;
+        }
     }
 
     void destroyBackdropImportEntryLocked(BackdropImportEntry& entry) {
@@ -2010,7 +2357,7 @@ private:
         vkCmdPipelineBarrier(
             commandBuffer,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             0,
             0,
             nullptr,
@@ -2020,6 +2367,95 @@ private:
             &barrier
         );
         backdropNeedsTransition_ = false;
+    }
+
+    bool hasBackdropStatsResourcesLocked() const {
+        return backdropStatsPipeline_ != VK_NULL_HANDLE &&
+            backdropStatsPipelineLayout_ != VK_NULL_HANDLE &&
+            backdropStatsDescriptorSet_ != VK_NULL_HANDLE &&
+            backdropStatsBuffer_ != VK_NULL_HANDLE &&
+            backdropStatsMapped_ != nullptr;
+    }
+
+    const BackdropRect* primaryBackdropRectLocked() const {
+        const BackdropRect* primaryRect = nullptr;
+        float primaryArea = 0.0f;
+        for (const BackdropRect& rect : backdropRects_) {
+            const float area = std::max(0.0f, rect.right - rect.left) *
+                std::max(0.0f, rect.bottom - rect.top);
+            if (area > primaryArea) {
+                primaryArea = area;
+                primaryRect = &rect;
+            }
+        }
+        return primaryRect;
+    }
+
+    void recordBackdropStatsLocked(VkCommandBuffer commandBuffer) {
+        if (!hasBackdropImageLocked() || !hasBackdropStatsResourcesLocked()) {
+            return;
+        }
+        const BackdropRect* rect = primaryBackdropRectLocked();
+        if (rect == nullptr) {
+            return;
+        }
+
+        BackdropStatsPushConstants pushConstants{};
+        pushConstants.textureSize[0] = static_cast<float>(backdropWidth_);
+        pushConstants.textureSize[1] = static_cast<float>(backdropHeight_);
+        pushConstants.rect[0] = rect->left;
+        pushConstants.rect[1] = rect->top;
+        pushConstants.rect[2] = rect->right;
+        pushConstants.rect[3] = rect->bottom;
+        pushConstants.textureOrigin[0] = backdropTextureOrigin_[0];
+        pushConstants.textureOrigin[1] = backdropTextureOrigin_[1];
+        pushConstants.cornerRadius = rect->cornerRadius;
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, backdropStatsPipeline_);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            backdropStatsPipelineLayout_,
+            0,
+            1,
+            &backdropStatsDescriptorSet_,
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            backdropStatsPipelineLayout_,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(BackdropStatsPushConstants),
+            &pushConstants
+        );
+        hasUnreadBackdropStats_ = false;
+        vkCmdDispatch(commandBuffer, 1, 1, 1);
+
+        VkBufferMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = backdropStatsBuffer_;
+        barrier.offset = 0;
+        barrier.size = kBackdropStatsBufferSize;
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            0,
+            nullptr,
+            1,
+            &barrier,
+            0,
+            nullptr
+        );
+
+        backdropStatsPending_ = true;
     }
 
     bool createParticlePipelineLocked() {
@@ -2197,6 +2633,66 @@ private:
             return VK_NULL_HANDLE;
         }
         return shaderModule;
+    }
+
+    bool createBackdropStatsPipelineLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(BackdropStatsPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &backdropStatsDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &backdropStatsPipelineLayout_),
+                "vkCreatePipelineLayout backdrop stats failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule computeShader = createShaderModuleLocked(
+            kChatBackdropStatsCompSpv,
+            sizeof(kChatBackdropStatsCompSpv)
+        );
+        if (computeShader == VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, backdropStatsPipelineLayout_, nullptr);
+            backdropStatsPipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo computeStage{};
+        computeStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        computeStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        computeStage.module = computeShader;
+        computeStage.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = computeStage;
+        pipelineInfo.layout = backdropStatsPipelineLayout_;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateComputePipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &backdropStatsPipeline_
+            ),
+            "vkCreateComputePipelines backdrop stats failed"
+        );
+
+        vkDestroyShaderModule(device_, computeShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, backdropStatsPipelineLayout_, nullptr);
+            backdropStatsPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
     }
 
     bool createBackdropBlurPipelineLocked() {
@@ -2834,6 +3330,7 @@ private:
             recordBlobPassLocked(commandBuffer, vertexCount);
         }
         transitionBackdropImageForSamplingLocked(commandBuffer);
+        recordBackdropStatsLocked(commandBuffer);
         recordBackdropBlurPassesLocked(commandBuffer);
         recordCompositePassLocked(commandBuffer, imageIndex, vertexCount > 0);
         isOk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer failed");
@@ -3182,8 +3679,8 @@ private:
             pushConstants.textureOrigin[1] = backdropTextureOrigin_[1];
             pushConstants.bezelWidth = rect.bezelWidth;
             pushConstants.glassThickness = rect.glassThickness;
-            pushConstants.adaptiveAppearance = 1.0f;
-            pushConstants.adaptiveContrast = 0.0f;
+            pushConstants.adaptiveAppearance = rect.adaptiveAppearance;
+            pushConstants.adaptiveContrast = rect.adaptiveContrast;
 
             vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
             vkCmdPushConstants(
@@ -3429,6 +3926,7 @@ private:
             vkDestroyPipelineLayout(device_, backdropBlurPipelineLayout_, nullptr);
             backdropBlurPipelineLayout_ = VK_NULL_HANDLE;
         }
+        destroyBackdropStatsResourcesLocked();
 
         destroyBackdropBlurSizeResourcesLocked();
         if (backdropBlurRenderPass_ != VK_NULL_HANDLE) {
@@ -3601,6 +4099,17 @@ private:
     VkDescriptorSetLayout backdropDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool backdropDescriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet backdropDescriptorSet_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout backdropStatsDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool backdropStatsDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet backdropStatsDescriptorSet_ = VK_NULL_HANDLE;
+    VkPipelineLayout backdropStatsPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline backdropStatsPipeline_ = VK_NULL_HANDLE;
+    VkBuffer backdropStatsBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory backdropStatsBufferMemory_ = VK_NULL_HANDLE;
+    float* backdropStatsMapped_ = nullptr;
+    bool backdropStatsPending_ = false;
+    bool hasUnreadBackdropStats_ = false;
+    BackdropStatsResult latestBackdropStats_{};
     VkDescriptorSetLayout backdropBlurDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool backdropBlurDescriptorPool_ = VK_NULL_HANDLE;
     VkDescriptorSet backdropBlurSourceDescriptorSet_ = VK_NULL_HANDLE;
@@ -3779,6 +4288,59 @@ Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeProbeHardwareBuffer(
     return JNI_TRUE;
 }
 
+static bool parseBackdropRects(
+    JNIEnv* env,
+    jfloatArray rectValues,
+    std::vector<BackdropRect>& rects
+) {
+    if (rectValues == nullptr) {
+        return false;
+    }
+
+    const jsize valueCount = env->GetArrayLength(rectValues);
+    if (valueCount < static_cast<jsize>(kBackdropRectFloatCount)) {
+        return false;
+    }
+
+    jboolean didCopy = JNI_FALSE;
+    jfloat* values = env->GetFloatArrayElements(rectValues, &didCopy);
+    if (values == nullptr) {
+        return false;
+    }
+
+    const uint32_t rectCount = std::min(
+        kMaxBackdropRects,
+        static_cast<uint32_t>(valueCount / static_cast<jsize>(kBackdropRectFloatCount))
+    );
+    rects.clear();
+    rects.reserve(rectCount);
+    for (uint32_t rectIndex = 0; rectIndex < rectCount; ++rectIndex) {
+        const uint32_t base = rectIndex * kBackdropRectFloatCount;
+        BackdropRect rect{};
+        rect.left = values[base];
+        rect.top = values[base + 1];
+        rect.right = values[base + 2];
+        rect.bottom = values[base + 3];
+        rect.cornerRadius = std::max(0.0f, values[base + 4]);
+        rect.opacity = std::clamp(values[base + 5], 0.0f, 1.0f);
+        rect.bezelWidth = std::max(0.0f, values[base + 6]);
+        rect.glassThickness = std::max(0.0f, values[base + 7]);
+        rect.adaptiveAppearance = std::clamp(values[base + 8], 0.0f, 1.0f);
+        rect.adaptiveContrast = std::clamp(values[base + 9], 0.0f, 1.0f);
+        if (
+            rect.right > rect.left &&
+            rect.bottom > rect.top &&
+            rect.opacity > 0.0f &&
+            rect.bezelWidth > 0.0f &&
+            rect.glassThickness > 0.0f
+        ) {
+            rects.push_back(rect);
+        }
+    }
+    env->ReleaseFloatArrayElements(rectValues, values, JNI_ABORT);
+    return !rects.empty();
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeSetBackdropHardwareBuffer(
     JNIEnv* env,
@@ -3793,47 +4355,8 @@ Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeSetBackdropHardwareBuffer(
     if (renderer == nullptr || hardwareBuffer == nullptr || rectValues == nullptr) {
         return JNI_FALSE;
     }
-    const jsize valueCount = env->GetArrayLength(rectValues);
-    if (valueCount < static_cast<jsize>(kBackdropRectFloatCount)) {
-        return JNI_FALSE;
-    }
-
-    jboolean didCopy = JNI_FALSE;
-    jfloat* values = env->GetFloatArrayElements(rectValues, &didCopy);
-    if (values == nullptr) {
-        return JNI_FALSE;
-    }
-
-    const uint32_t rectCount = std::min(
-        kMaxBackdropRects,
-        static_cast<uint32_t>(valueCount / static_cast<jsize>(kBackdropRectFloatCount))
-    );
     std::vector<BackdropRect> rects;
-    rects.reserve(rectCount);
-    for (uint32_t rectIndex = 0; rectIndex < rectCount; ++rectIndex) {
-        const uint32_t base = rectIndex * kBackdropRectFloatCount;
-        BackdropRect rect{};
-        rect.left = values[base];
-        rect.top = values[base + 1];
-        rect.right = values[base + 2];
-        rect.bottom = values[base + 3];
-        rect.cornerRadius = std::max(0.0f, values[base + 4]);
-        rect.opacity = std::clamp(values[base + 5], 0.0f, 1.0f);
-        rect.bezelWidth = std::max(0.0f, values[base + 6]);
-        rect.glassThickness = std::max(0.0f, values[base + 7]);
-        if (
-            rect.right > rect.left &&
-            rect.bottom > rect.top &&
-            rect.opacity > 0.0f &&
-            rect.bezelWidth > 0.0f &&
-            rect.glassThickness > 0.0f
-        ) {
-            rects.push_back(rect);
-        }
-    }
-    env->ReleaseFloatArrayElements(rectValues, values, JNI_ABORT);
-
-    if (rects.empty()) {
+    if (!parseBackdropRects(env, rectValues, rects)) {
         return JNI_FALSE;
     }
     return renderer->setBackdropHardwareBuffer(
@@ -3845,6 +4368,64 @@ Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeSetBackdropHardwareBuffer(
     )
         ? JNI_TRUE
         : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeUpdateBackdropRects(
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jfloatArray rectValues,
+    jfloat textureLeft,
+    jfloat textureTop
+) {
+    VulkanChatRenderer* renderer = rendererFromHandle(handle);
+    if (renderer == nullptr || rectValues == nullptr) {
+        return JNI_FALSE;
+    }
+
+    std::vector<BackdropRect> rects;
+    if (!parseBackdropRects(env, rectValues, rects)) {
+        return JNI_FALSE;
+    }
+
+    return renderer->updateBackdropRects(
+        std::move(rects),
+        textureLeft,
+        textureTop
+    )
+        ? JNI_TRUE
+        : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jfloatArray JNICALL
+Java_com_zyna_app_ui_glass_NativeVulkanChat_nativePollBackdropStats(
+    JNIEnv* env,
+    jobject,
+    jlong handle
+) {
+    VulkanChatRenderer* renderer = rendererFromHandle(handle);
+    if (renderer == nullptr) {
+        return nullptr;
+    }
+
+    BackdropStatsResult stats{};
+    if (!renderer->pollBackdropStats(stats)) {
+        return nullptr;
+    }
+
+    std::array<jfloat, 4> values = {
+        stats.meanLuma,
+        stats.variance,
+        stats.brightFraction,
+        stats.darkFraction
+    };
+    jfloatArray result = env->NewFloatArray(static_cast<jsize>(values.size()));
+    if (result == nullptr) {
+        return nullptr;
+    }
+    env->SetFloatArrayRegion(result, 0, static_cast<jsize>(values.size()), values.data());
+    return result;
 }
 
 extern "C" JNIEXPORT void JNICALL

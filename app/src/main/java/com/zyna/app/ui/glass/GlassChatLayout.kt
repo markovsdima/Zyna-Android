@@ -22,6 +22,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
+import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import kotlin.math.abs
 import kotlin.math.exp
@@ -41,6 +42,7 @@ class GlassChatLayout @JvmOverloads constructor(
     var onLoadOlderMessages: () -> Unit = {}
     var onRetryOutgoingEnvelope: (String) -> Unit = {}
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
+    internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
     var onRedactMessage: (String) -> Unit = {}
     var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
     var onEvaluateVisibleReadReceiptCandidate: () -> Unit = {}
@@ -278,7 +280,6 @@ class GlassChatLayout @JvmOverloads constructor(
     fun setPaginationState(isLoadingOlder: Boolean, canLoadOlder: Boolean) {
         isLoadingOlderMessages = isLoadingOlder
         canLoadOlderMessages = canLoadOlder
-        prefetchOlderMessagesIfNeeded()
     }
 
     fun setComposerState(isSending: Boolean, errorMessage: String?, errorColor: Int) {
@@ -976,6 +977,10 @@ class GlassChatLayout @JvmOverloads constructor(
         action: MessageContextMenuAction
     ): Boolean {
         return when (action) {
+            MessageContextMenuAction.REPLY -> {
+                message.toReplyPreviewOrNull()?.let(onReplyToMessage)
+                true
+            }
             MessageContextMenuAction.COPY -> {
                 copyMessageText(message)
                 true
@@ -1023,6 +1028,23 @@ class GlassChatLayout @JvmOverloads constructor(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    private fun MessageRenderModel.toReplyPreviewOrNull(): MessageReplyPreview? {
+        val eventId = eventId?.takeIf { it.isNotBlank() } ?: return null
+        if (content is MessageContent.Redacted || outgoingEnvelopeId != null) {
+            return null
+        }
+        val body = when (val currentContent = content) {
+            is MessageContent.Text -> currentContent.body
+            MessageContent.Redacted -> return null
+        }.takeIf { it.isNotBlank() } ?: return null
+        return MessageReplyPreview(
+            eventId = eventId,
+            senderId = senderId,
+            senderText = senderText,
+            body = body
+        )
     }
 
     private fun setContextScrollLocked(locked: Boolean) {

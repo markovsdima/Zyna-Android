@@ -7,12 +7,16 @@ import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.LocalCacheRepository
+import com.zyna.app.data.local.TimelineFlushSummary
+import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixMessageContentType
+import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.outgoing.OutgoingOutboxService
+import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -42,12 +46,15 @@ data class AppUiState(
     val isRecovering: Boolean = false,
     val recoveryErrorMessage: String? = null,
     val chatMessages: List<MatrixChatMessage> = emptyList(),
+    val chatWindowChangeOrigin: TimelineWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
+    val chatTimelineFlushSummary: TimelineFlushSummary? = null,
     val isLoadingChat: Boolean = false,
     val isLoadingOlderChatMessages: Boolean = false,
     val canLoadOlderChatMessages: Boolean = true,
     val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
-    val chatSendErrorMessage: String? = null
+    val chatSendErrorMessage: String? = null,
+    val chatReplyTarget: MatrixReplyInfo? = null
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -84,6 +91,8 @@ class AppViewModel(
     private var chatTimelineJob: Job? = null
     private var chatPaginationJob: Job? = null
     private var chatCacheJob: Job? = null
+    private var openRoomJob: Job? = null
+    private var chatTimelineWindowStore: RoomTimelineWindowStore? = null
     private var roomCacheJob: Job? = null
     private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
@@ -131,6 +140,16 @@ class AppViewModel(
                             current.rooms
                         },
                         chatMessages = if (shouldClearChat) emptyList() else current.chatMessages,
+                        chatWindowChangeOrigin = if (shouldClearChat) {
+                            TimelineWindowChangeOrigin.INITIAL_LOAD
+                        } else {
+                            current.chatWindowChangeOrigin
+                        },
+                        chatTimelineFlushSummary = if (shouldClearChat) {
+                            null
+                        } else {
+                            current.chatTimelineFlushSummary
+                        },
                         isLoadingChat = if (shouldClearChat) false else current.isLoadingChat,
                         isLoadingOlderChatMessages = if (shouldClearChat) {
                             false
@@ -144,7 +163,8 @@ class AppViewModel(
                         },
                         chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
-                        chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage
+                        chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
+                        chatReplyTarget = if (shouldClearChat) null else current.chatReplyTarget
                     )
                 }
 
@@ -245,23 +265,59 @@ class AppViewModel(
 
     fun openRoom(room: MatrixRoomSummary) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-        resetReadReceiptTracking()
-        _uiState.update {
-            it.copy(
-                route = AppRoute.Chat(
+        stopChatTimeline()
+
+        val timelineStore = RoomTimelineWindowStore(
+            userId = userId,
+            roomId = room.id,
+            localCacheRepository = localCacheRepository
+        )
+        openRoomJob = viewModelScope.launch {
+            val initialMessages = try {
+                timelineStore.initialMessagesSnapshot()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to load initial chat window from cache", error)
+                emptyList()
+            }
+
+            _uiState.update {
+                if (it.matrixState.userIdOrNull() != userId) {
+                    it
+                } else it.copy(
+                    route = AppRoute.Chat(
+                        roomId = room.id,
+                        displayName = room.displayName
+                    ),
+                    chatMessages = initialMessages,
+                    chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
+                    chatTimelineFlushSummary = null,
+                    isLoadingChat = initialMessages.isEmpty(),
+                    isLoadingOlderChatMessages = false,
+                    canLoadOlderChatMessages = true,
+                    chatErrorMessage = null,
+                    isSendingChatMessage = false,
+                    chatSendErrorMessage = null,
+                    chatReplyTarget = null
+                )
+            }
+
+            if (_uiState.value.isRouteForRoom(userId, room.id)) {
+                startChatTimeline(
+                    userId = userId,
                     roomId = room.id,
-                    displayName = room.displayName
-                ),
-                chatMessages = emptyList(),
-                isLoadingChat = true,
-                isLoadingOlderChatMessages = false,
-                canLoadOlderChatMessages = true,
-                chatErrorMessage = null,
-                isSendingChatMessage = false,
-                chatSendErrorMessage = null
-            )
+                    resetMessages = false,
+                    timelineStore = timelineStore
+                )
+            }
+        }.also { job ->
+            job.invokeOnCompletion {
+                if (openRoomJob == job) {
+                    openRoomJob = null
+                }
+            }
         }
-        startChatTimeline(userId, room.id, resetMessages = true)
     }
 
     fun closeChat() {
@@ -270,12 +326,15 @@ class AppViewModel(
             it.copy(
                 route = AppRoute.Rooms,
                 chatMessages = emptyList(),
+                chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
+                chatTimelineFlushSummary = null,
                 isLoadingChat = false,
                 isLoadingOlderChatMessages = false,
                 canLoadOlderChatMessages = true,
                 chatErrorMessage = null,
                 isSendingChatMessage = false,
-                chatSendErrorMessage = null
+                chatSendErrorMessage = null,
+                chatReplyTarget = null
             )
         }
     }
@@ -293,6 +352,7 @@ class AppViewModel(
         if (text.isEmpty() || _uiState.value.isSendingChatMessage) {
             return false
         }
+        val replyInfo = _uiState.value.chatReplyTarget
         val envelopeId = "text:${UUID.randomUUID()}"
         val transactionId = matrixClientService.prepareTransactionId()
 
@@ -312,7 +372,8 @@ class AppViewModel(
                     roomId = route.roomId,
                     envelopeId = envelopeId,
                     transactionId = transactionId,
-                    body = text
+                    body = text,
+                    replyInfo = replyInfo
                 )
                 outgoingOutboxService.kick(
                     reason = "new-envelope",
@@ -323,7 +384,8 @@ class AppViewModel(
                         it
                     } else it.copy(
                         isSendingChatMessage = false,
-                        chatSendErrorMessage = null
+                        chatSendErrorMessage = null,
+                        chatReplyTarget = null
                     )
                 }
             } catch (error: CancellationException) {
@@ -341,6 +403,30 @@ class AppViewModel(
         }
 
         return true
+    }
+
+    fun setChatReplyTarget(replyInfo: MatrixReplyInfo) {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        if (replyInfo.eventId.isBlank()) {
+            return
+        }
+        _uiState.update {
+            if (!it.isRouteForRoom(route.roomId)) {
+                it
+            } else {
+                it.copy(chatReplyTarget = replyInfo)
+            }
+        }
+    }
+
+    fun clearChatReplyTarget() {
+        _uiState.update {
+            if (it.chatReplyTarget == null) {
+                it
+            } else {
+                it.copy(chatReplyTarget = null)
+            }
+        }
     }
 
     fun retryOutgoingEnvelope(envelopeId: String) {
@@ -487,6 +573,7 @@ class AppViewModel(
     fun loadOlderChatMessages() {
         val route = _uiState.value.route as? AppRoute.Chat ?: return
         val state = _uiState.value
+        val userId = state.matrixState.userIdOrNull() ?: return
         if (
             state.isLoadingChat ||
             state.isLoadingOlderChatMessages ||
@@ -497,27 +584,44 @@ class AppViewModel(
         }
 
         _uiState.update {
-            if (!it.isRouteForRoom(route.roomId)) {
+            if (!it.isRouteForRoom(userId, route.roomId)) {
                 it
             } else it.copy(isLoadingOlderChatMessages = true)
         }
 
         chatPaginationJob = viewModelScope.launch {
             try {
+                val timelineStore = chatTimelineWindowStore
+                    ?.takeIf { it.matches(userId, route.roomId) }
+                val didLoadFromCache = timelineStore?.expandOlderFromCache() == true
+                if (didLoadFromCache) {
+                    _uiState.update {
+                        if (!it.isRouteForRoom(userId, route.roomId)) {
+                            it
+                        } else it.copy(
+                            isLoadingOlderChatMessages = false,
+                            canLoadOlderChatMessages = true
+                        )
+                    }
+                    return@launch
+                }
+
                 val hasReachedStart = matrixClientService.paginateRoomTimelineBackwards(route.roomId)
+                val didLoadFromFreshCache =
+                    timelineStore?.expandOlderFromCacheAfterMaterialization() == true
                 _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
                         it
                     } else it.copy(
                         isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = !hasReachedStart
+                        canLoadOlderChatMessages = !hasReachedStart || didLoadFromFreshCache
                     )
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
                         it
                     } else it.copy(isLoadingOlderChatMessages = false)
                 }
@@ -621,35 +725,62 @@ class AppViewModel(
         }
     }
 
-    private fun startChatTimeline(userId: String, roomId: String, resetMessages: Boolean) {
+    private fun startChatTimeline(
+        userId: String,
+        roomId: String,
+        resetMessages: Boolean,
+        timelineStore: RoomTimelineWindowStore = RoomTimelineWindowStore(
+            userId = userId,
+            roomId = roomId,
+            localCacheRepository = localCacheRepository
+        )
+    ) {
         chatTimelineJob?.cancel()
         chatPaginationJob?.cancel()
         chatPaginationJob = null
         chatCacheJob?.cancel()
         chatCacheJob = null
+        chatTimelineWindowStore = timelineStore
         _uiState.update {
+            val nextMessages = if (resetMessages) emptyList() else it.chatMessages
             it.copy(
-                chatMessages = if (resetMessages) emptyList() else it.chatMessages,
-                isLoadingChat = true,
+                chatMessages = nextMessages,
+                chatWindowChangeOrigin = if (resetMessages) {
+                    TimelineWindowChangeOrigin.INITIAL_LOAD
+                } else {
+                    it.chatWindowChangeOrigin
+                },
+                chatTimelineFlushSummary = if (resetMessages) null else it.chatTimelineFlushSummary,
+                isLoadingChat = nextMessages.isEmpty(),
                 isLoadingOlderChatMessages = false,
                 canLoadOlderChatMessages = true,
                 chatErrorMessage = null
             )
         }
         chatCacheJob = viewModelScope.launch {
-            localCacheRepository.observeRoomTimeline(userId, roomId).collect { messages ->
+            timelineStore.messages.collect { update ->
                 _uiState.update {
                     if (!it.isRouteForRoom(userId, roomId)) {
                         it
-                    } else it.copy(chatMessages = messages)
+                    } else it.copy(
+                        chatMessages = update.messages,
+                        chatWindowChangeOrigin = update.origin,
+                        chatTimelineFlushSummary = update.flushSummary,
+                        isLoadingChat = if (update.messages.isNotEmpty()) false else it.isLoadingChat
+                    )
                 }
             }
         }
         chatTimelineJob = viewModelScope.launch {
             try {
-                matrixClientService.roomTimelineMessages(roomId).collect { messages ->
+                matrixClientService.roomTimelineMessageUpserts(roomId).collect { timelineUpdate ->
+                    val messages = timelineUpdate.messages
                     if (messages.isNotEmpty()) {
+                        timelineStore.recordTimelineFlush(timelineUpdate.flushSummary)
                         localCacheRepository.cacheRoomTimelineMessages(userId, roomId, messages)
+                        timelineStore.refreshInitialWindowFromCacheIfNeeded(
+                            timelineUpdate.flushSummary
+                        )
                     }
                     _uiState.update {
                         if (!it.isRouteForRoom(userId, roomId)) {
@@ -678,10 +809,13 @@ class AppViewModel(
     }
 
     private fun stopChatTimeline() {
+        openRoomJob?.cancel()
+        openRoomJob = null
         chatTimelineJob?.cancel()
         chatTimelineJob = null
         chatCacheJob?.cancel()
         chatCacheJob = null
+        chatTimelineWindowStore = null
         chatPaginationJob?.cancel()
         chatPaginationJob = null
         resetReadReceiptTracking()

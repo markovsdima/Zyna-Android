@@ -210,7 +210,8 @@ class OutgoingOutboxService(
             val eventId = matrixClientService.sendTextMessage(
                 roomId = candidate.roomId,
                 body = candidate.body,
-                transactionId = candidate.transactionId
+                transactionId = candidate.transactionId,
+                replyInfo = candidate.replyInfo
             )
             retryBackoff.clear(candidate.id)
             localCacheRepository.markOutgoingDispatchAccepted(

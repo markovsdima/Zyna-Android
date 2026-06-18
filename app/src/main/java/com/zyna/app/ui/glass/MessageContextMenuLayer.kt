@@ -374,6 +374,13 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private fun buildMenu(message: MessageRenderModel) {
         menuContainer.removeAllViews()
         val actions = buildList {
+            if (
+                message.eventId != null &&
+                message.content !is MessageContent.Redacted &&
+                message.outgoingEnvelopeId == null
+            ) {
+                add(MessageContextMenuAction.REPLY)
+            }
             if (message.copyableText() != null) {
                 add(MessageContextMenuAction.COPY)
             }
@@ -698,6 +705,7 @@ internal enum class MessageContextMenuAction(
     val title: String,
     val isDestructive: Boolean = false
 ) {
+    REPLY("Reply"),
     COPY("Copy"),
     DELETE("Delete", true),
     RETRY_SEND("Retry Send"),

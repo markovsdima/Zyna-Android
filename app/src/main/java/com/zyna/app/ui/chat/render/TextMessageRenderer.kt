@@ -2,6 +2,7 @@ package com.zyna.app.ui.chat.render
 
 import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -16,15 +17,26 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
     private val senderPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val bodyPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val timePaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
+    private val replySenderPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
+    private val replyBodyPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
+    private val replyBarPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val timeSpacing = 6.dpToPx(density)
     private val senderBottomSpacing = 3.dpToPx(density)
     private val timeLineSpacing = 2.dpToPx(density)
+    private val replyBarWidth = 2.dpToPx(density)
+    private val replyHorizontalSpacing = 6.dpToPx(density)
+    private val replyLineSpacing = 1.dpToPx(density)
+    private val replyBottomInset = 4.dpToPx(density)
+    private val replyBottomSpacing = 6.dpToPx(density)
 
     init {
         senderPaint.textSize = 12.spToPx(context)
         senderPaint.isFakeBoldText = true
         bodyPaint.textSize = 16.spToPx(context)
         timePaint.textSize = 11.spToPx(context)
+        replySenderPaint.textSize = 12.spToPx(context)
+        replySenderPaint.isFakeBoldText = true
+        replyBodyPaint.textSize = 12.spToPx(context)
     }
 
     override fun supports(content: MessageContent): Boolean {
@@ -42,6 +54,13 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
         bodyPaint.color = if (isRedacted) theme.metadataColor(message) else theme.textColor(message)
         bodyPaint.textSkewX = if (isRedacted) REDACTED_TEXT_SKEW_X else 0f
         timePaint.color = theme.metadataColor(message)
+        replySenderPaint.color = theme.metadataColor(message)
+        replyBodyPaint.color = theme.metadataColor(message)
+        replyBarPaint.color = theme.metadataColor(message)
+
+        val replyLayout = makeReplyHeaderLayout(message.replyInfo, widthLimit)
+        val replyHeight = if (replyLayout == null) 0 else replyLayout.height + replyBottomSpacing
+        val replyWidth = replyLayout?.width ?: 0
 
         val senderLayout = makeSenderLayout(message, widthLimit)
         val senderHeight = if (senderLayout == null) 0 else senderLayout.height + senderBottomSpacing
@@ -70,9 +89,10 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             max(max(senderWidth, bodyWidth), inlineWidth)
         } else {
             max(max(senderWidth, bodyWidth), timeWidth)
-        }.coerceIn(1, widthLimit)
+        }.coerceAtLeast(replyWidth).coerceIn(1, widthLimit)
 
-        val bodyY = senderHeight
+        val senderY = replyHeight
+        val bodyY = replyHeight + senderHeight
         val timeX = contentWidth - timeWidth
         val timeY = if (fitsInline) {
             bodyY + bodyLayout.height - timeRowHeight
@@ -80,16 +100,18 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             bodyY + bodyLayout.height + timeLineSpacing
         }
         val contentHeight = if (fitsInline) {
-            senderHeight + bodyLayout.height
+            replyHeight + senderHeight + bodyLayout.height
         } else {
-            senderHeight + bodyLayout.height + timeLineSpacing + timeRowHeight
+            replyHeight + senderHeight + bodyLayout.height + timeLineSpacing + timeRowHeight
         }
 
         return TextMessageLayout(
             width = contentWidth,
             height = contentHeight,
+            replyHeaderLayout = replyLayout,
+            replyY = 0,
             senderLayout = senderLayout,
-            senderY = 0,
+            senderY = senderY,
             bodyLayout = bodyLayout,
             bodyY = bodyY,
             timeLayout = timeLayout,
@@ -100,6 +122,13 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
 
     override fun draw(canvas: Canvas, layout: MessageContentLayout) {
         layout as TextMessageLayout
+
+        layout.replyHeaderLayout?.let { reply ->
+            val save = canvas.save()
+            canvas.translate(0f, layout.replyY.toFloat())
+            drawReplyHeader(canvas, reply)
+            canvas.restoreToCount(save)
+        }
 
         layout.senderLayout?.let { sender ->
             val save = canvas.save()
@@ -117,6 +146,62 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
         canvas.translate(layout.timeX.toFloat(), layout.timeY.toFloat())
         layout.timeLayout.draw(canvas)
         canvas.restoreToCount(timeSave)
+    }
+
+    private fun makeReplyHeaderLayout(
+        replyInfo: MessageReplyPreview?,
+        maxWidth: Int
+    ): ReplyHeaderLayout? {
+        replyInfo ?: return null
+        val textWidth = (maxWidth - replyBarWidth - replyHorizontalSpacing)
+            .coerceAtLeast(1)
+        val senderLayout = makeSingleLineLayout(
+            text = replyInfo.senderText.ifBlank { "Unknown" },
+            paint = replySenderPaint,
+            maxWidth = textWidth
+        )
+        val bodyLayout = makeSingleLineLayout(
+            text = replyInfo.body.ifBlank { "Message" },
+            paint = replyBodyPaint,
+            maxWidth = textWidth
+        )
+        val width = replyBarWidth +
+            replyHorizontalSpacing +
+            max(senderLayout.measuredLineWidth(), bodyLayout.measuredLineWidth())
+        val height = senderLayout.height + replyLineSpacing + bodyLayout.height + replyBottomInset
+        return ReplyHeaderLayout(
+            width = width.coerceIn(1, maxWidth),
+            height = height,
+            senderLayout = senderLayout,
+            senderY = 0,
+            bodyLayout = bodyLayout,
+            bodyY = senderLayout.height + replyLineSpacing
+        )
+    }
+
+    private fun drawReplyHeader(canvas: Canvas, layout: ReplyHeaderLayout) {
+        val contentHeight = (layout.height - replyBottomInset).coerceAtLeast(1)
+        val radius = replyBarWidth / 2f
+        canvas.drawRoundRect(
+            0f,
+            0f,
+            replyBarWidth.toFloat(),
+            contentHeight.toFloat(),
+            radius,
+            radius,
+            replyBarPaint
+        )
+
+        val textX = replyBarWidth + replyHorizontalSpacing
+        val senderSave = canvas.save()
+        canvas.translate(textX.toFloat(), layout.senderY.toFloat())
+        layout.senderLayout.draw(canvas)
+        canvas.restoreToCount(senderSave)
+
+        val bodySave = canvas.save()
+        canvas.translate(textX.toFloat(), layout.bodyY.toFloat())
+        layout.bodyLayout.draw(canvas)
+        canvas.restoreToCount(bodySave)
     }
 
     private fun makeSenderLayout(message: MessageRenderModel, maxWidth: Int): StaticLayout? {
@@ -154,11 +239,36 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             .setEllipsize(ellipsize)
             .build()
     }
+
+    private fun makeSingleLineLayout(
+        text: CharSequence,
+        paint: TextPaint,
+        maxWidth: Int
+    ): StaticLayout {
+        val ellipsized = TextUtils.ellipsize(
+            text,
+            paint,
+            maxWidth.toFloat(),
+            TextUtils.TruncateAt.END
+        )
+        val width = ceil(paint.measureText(ellipsized, 0, ellipsized.length).toDouble())
+            .toInt()
+            .coerceIn(1, maxWidth)
+        return makeLayout(
+            text = ellipsized,
+            paint = paint,
+            width = width,
+            maxLines = 1,
+            ellipsize = TextUtils.TruncateAt.END
+        )
+    }
 }
 
 internal data class TextMessageLayout(
     override val width: Int,
     override val height: Int,
+    val replyHeaderLayout: ReplyHeaderLayout?,
+    val replyY: Int,
     val senderLayout: StaticLayout?,
     val senderY: Int,
     val bodyLayout: StaticLayout,
@@ -167,6 +277,15 @@ internal data class TextMessageLayout(
     val timeX: Int,
     val timeY: Int
 ) : MessageContentLayout
+
+internal data class ReplyHeaderLayout(
+    val width: Int,
+    val height: Int,
+    val senderLayout: StaticLayout,
+    val senderY: Int,
+    val bodyLayout: StaticLayout,
+    val bodyY: Int
+)
 
 private fun MessageRenderModel.metadataText(): String {
     return when (deliveryState) {

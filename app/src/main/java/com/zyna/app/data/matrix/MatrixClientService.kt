@@ -2,6 +2,7 @@ package com.zyna.app.data.matrix
 
 import android.content.Context
 import android.util.Log
+import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
@@ -12,7 +13,6 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -29,11 +29,13 @@ import org.matrix.rustcomponents.sdk.DateDividerMode
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
 import org.matrix.rustcomponents.sdk.ClientSessionDelegate
+import org.matrix.rustcomponents.sdk.EmbeddedEventDetails
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.EventTimelineItem
 import org.matrix.rustcomponents.sdk.LatestEventValue
 import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageType
+import org.matrix.rustcomponents.sdk.MsgLikeContent
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ProfileDetails
 import org.matrix.rustcomponents.sdk.ReceiptType
@@ -114,6 +116,13 @@ enum class MatrixMessageContentType {
     UNSUPPORTED
 }
 
+data class MatrixReplyInfo(
+    val eventId: String,
+    val senderId: String,
+    val senderDisplayName: String?,
+    val body: String
+)
+
 data class MatrixChatMessage(
     /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
@@ -125,6 +134,7 @@ data class MatrixChatMessage(
     val isOwn: Boolean,
     val contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
+    val replyInfo: MatrixReplyInfo? = null,
     val outgoingEnvelopeId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false
@@ -305,36 +315,26 @@ class MatrixClientService(
     }.buffer(Channel.CONFLATED)
         .flowOn(Dispatchers.IO)
 
-    fun roomTimelineMessages(roomId: String): Flow<List<MatrixChatMessage>> = callbackFlow {
+    fun roomTimelineMessageUpserts(roomId: String): Flow<MatrixTimelineUpdate> = callbackFlow {
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         var timeline: Timeline? = null
         var listenerHandle: TaskHandle? = null
-        var pendingMessagesSendJob: Job? = null
-        val entries = mutableListOf<MatrixChatMessage?>()
         val hasEmittedInitialState = AtomicBoolean(false)
         val hasCleanedUp = AtomicBoolean(false)
-
-        fun currentMessages(): List<MatrixChatMessage> = synchronized(entries) {
-            entries.loadedChatMessages()
-        }
-
-        fun emitCurrentMessages() {
-            hasEmittedInitialState.set(true)
-            trySendBlocking(currentMessages())
-        }
-
-        fun scheduleCurrentMessages() {
-            pendingMessagesSendJob?.cancel()
-            pendingMessagesSendJob = launch {
-                delay(TIMELINE_EMIT_COALESCE_MS)
-                emitCurrentMessages()
+        val diffBatcher = MatrixTimelineDiffBatcher(
+            scope = this,
+            debounceMillis = TIMELINE_EMIT_COALESCE_MS,
+            mapTimelineItem = { item -> item.toChatMessageOrNull() },
+            onFlush = { update ->
+                hasEmittedInitialState.set(true)
+                trySendBlocking(update)
             }
-        }
+        )
 
         fun cleanup() {
             if (hasCleanedUp.compareAndSet(false, true)) {
-                pendingMessagesSendJob?.cancel()
+                diffBatcher.cancel()
                 listenerHandle?.cancelAndDestroy()
                 synchronized(activeTimelineLock) {
                     if (activeRoomTimelines[roomId] === timeline) {
@@ -358,10 +358,7 @@ class MatrixClientService(
             listenerHandle = openedTimeline.addListener(
                 object : TimelineListener {
                     override fun onUpdate(diff: List<TimelineDiff>) {
-                        synchronized(entries) {
-                            diff.forEach { entries.applyTimelineDiff(it) }
-                        }
-                        scheduleCurrentMessages()
+                        diffBatcher.receive(diff)
                     }
                 }
             )
@@ -369,7 +366,12 @@ class MatrixClientService(
             val initialLoadingFallbackJob = launch {
                 delay(TIMELINE_UPDATE_TIMEOUT_MS)
                 if (hasEmittedInitialState.compareAndSet(false, true)) {
-                    trySend(currentMessages())
+                    trySend(
+                        MatrixTimelineUpdate(
+                            messages = emptyList(),
+                            flushSummary = TimelineFlushSummary()
+                        )
+                    )
                 }
             }
 
@@ -428,21 +430,38 @@ class MatrixClientService(
     suspend fun sendTextMessage(
         roomId: String,
         body: String,
-        transactionId: String
+        transactionId: String,
+        replyInfo: MatrixReplyInfo? = null
     ): String = withContext(Dispatchers.IO) {
         val text = body.trim()
         require(text.isNotEmpty()) { "Message is empty" }
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val reply = replyInfo?.takeIf { it.eventId.isNotBlank() }
         val content = JSONObject()
             .put("msgtype", "m.text")
-            .put("body", text)
+            .put("body", if (reply == null) text else plainReplyBody(text, reply))
             .put(TRANSACTION_ID_CONTENT_KEY, transactionId)
+        if (reply != null) {
+            content.put(
+                "m.relates_to",
+                JSONObject().put(
+                    "m.in_reply_to",
+                    JSONObject().put("event_id", reply.eventId)
+                )
+            )
+            content.put("format", "org.matrix.custom.html")
+            content.put(
+                "formatted_body",
+                htmlReplyFallback(roomId = roomId, replyInfo = reply) + text.escapeHtml().htmlLineBreaks()
+            )
+        }
+        val contentJson = content
             .toString()
 
         room.sendRawWithTransactionIdReturningEventId(
             eventType = "m.room.message",
-            content = content,
+            content = contentJson,
             transactionId = transactionId
         )
     }
@@ -501,60 +520,16 @@ class MatrixClientService(
         }
     }
 
-    private fun MutableList<MatrixChatMessage?>.applyTimelineDiff(diff: TimelineDiff) {
-        when (diff) {
-            is TimelineDiff.Append -> {
-                diff.values.forEach { add(it.toChatMessageOrNull()) }
-            }
-            TimelineDiff.Clear -> clear()
-            is TimelineDiff.PushFront -> add(0, diff.value.toChatMessageOrNull())
-            is TimelineDiff.PushBack -> add(diff.value.toChatMessageOrNull())
-            TimelineDiff.PopFront -> removeFirstOrNull()
-            TimelineDiff.PopBack -> removeLastOrNull()
-            is TimelineDiff.Insert -> {
-                add(diff.index.toInt().coerceIn(0, size), diff.value.toChatMessageOrNull())
-            }
-            is TimelineDiff.Set -> {
-                val index = diff.index.toInt()
-                val value = diff.value.toChatMessageOrNull()
-                if (index in indices) {
-                    set(index, value)
-                } else if (index == size) {
-                    add(value)
-                }
-            }
-            is TimelineDiff.Remove -> {
-                val index = diff.index.toInt()
-                if (index in indices) {
-                    removeAt(index)
-                }
-            }
-            is TimelineDiff.Truncate -> {
-                val length = diff.length.toInt().coerceAtLeast(0)
-                if (length < size) {
-                    subList(length, size).clear()
-                }
-            }
-            is TimelineDiff.Reset -> {
-                clear()
-                diff.values.forEach { add(it.toChatMessageOrNull()) }
-            }
-        }
-    }
-
-    private fun List<MatrixChatMessage?>.loadedChatMessages(): List<MatrixChatMessage> {
-        return filterNotNull()
-    }
-
     private fun TimelineItem.toChatMessageOrNull(): MatrixChatMessage? = use { item ->
         val event = item.asEvent() ?: return@use null
         event.toChatMessageOrNull()
     }
 
     private fun EventTimelineItem.toChatMessageOrNull(): MatrixChatMessage? {
-        val content = (content as? TimelineItemContent.MsgLike)?.content
+        val msgLike = (content as? TimelineItemContent.MsgLike)?.content
             ?: return null
-        val messageBody = when (val kind = content.kind) {
+        val replyInfo = msgLike.replyInfoOrNull()
+        val messageBody = when (val kind = msgLike.kind) {
             is MsgLikeKind.Message -> MatrixMessageBody(
                 body = kind.content.displayBody(),
                 contentType = kind.content.contentType()
@@ -569,6 +544,11 @@ class MatrixClientService(
             )
             else -> return null
         }
+        val body = if (replyInfo == null) {
+            messageBody.body
+        } else {
+            messageBody.body.stripMatrixReplyFallback()
+        }
         val eventId = eventOrTransactionId.eventIdOrNull()
         val transactionId = eventOrTransactionId.transactionIdOrNull()
 
@@ -577,11 +557,46 @@ class MatrixClientService(
             eventId = eventId,
             transactionId = transactionId,
             sender = sender,
-            body = messageBody.body,
+            body = body,
             timestampMillis = timestamp.toLong(),
             isOwn = isOwn,
-            contentType = messageBody.contentType
+            contentType = messageBody.contentType,
+            replyInfo = replyInfo
         )
+    }
+
+    private fun MsgLikeContent.replyInfoOrNull(): MatrixReplyInfo? {
+        val replyDetails = inReplyTo ?: return null
+        val eventId = runCatching { replyDetails.eventId() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val embeddedEvent = runCatching { replyDetails.event() }.getOrNull()
+        return try {
+            val readyEvent = embeddedEvent as? EmbeddedEventDetails.Ready
+            val embeddedContent = readyEvent?.content as? TimelineItemContent.MsgLike
+            val embeddedMessageBody = embeddedContent?.content?.replyPreviewBodyOrNull()
+
+            MatrixReplyInfo(
+                eventId = eventId,
+                senderId = readyEvent?.sender.orEmpty(),
+                senderDisplayName = (readyEvent?.senderProfile as? ProfileDetails.Ready)
+                    ?.displayName
+                    ?.takeIf { it.isNotBlank() },
+                body = embeddedMessageBody?.stripMatrixReplyFallback().orEmpty()
+            )
+        } finally {
+            embeddedEvent?.destroy()
+        }
+    }
+
+    private fun MsgLikeContent.replyPreviewBodyOrNull(): String? {
+        return when (val kind = kind) {
+            is MsgLikeKind.Message -> kind.content.displayBody()
+            MsgLikeKind.Redacted -> "Deleted message"
+            is MsgLikeKind.UnableToDecrypt -> "Unable to decrypt message"
+            else -> null
+        }
     }
 
     private fun EventOrTransactionId.stableId(): String {
@@ -627,6 +642,64 @@ class MatrixClientService(
             is MessageType.Location -> MatrixMessageContentType.LOCATION
             is MessageType.Other -> MatrixMessageContentType.UNSUPPORTED
         }
+    }
+
+    private fun plainReplyBody(body: String, replyInfo: MatrixReplyInfo): String {
+        val quotedLines = replyInfo.body
+            .lineSequence()
+            .mapIndexed { index, line ->
+                if (index == 0) {
+                    "> <${replyInfo.senderId}> $line"
+                } else {
+                    "> $line"
+                }
+            }
+            .toList()
+            .ifEmpty { listOf("> <${replyInfo.senderId}>") }
+        return quotedLines.joinToString(separator = "\n") + "\n\n" + body
+    }
+
+    private fun htmlReplyFallback(roomId: String, replyInfo: MatrixReplyInfo): String {
+        val roomEventLink = "https://matrix.to/#/$roomId/${replyInfo.eventId}".escapeHtmlAttribute()
+        val senderLink = "https://matrix.to/#/${replyInfo.senderId}".escapeHtmlAttribute()
+        val senderName = (replyInfo.senderDisplayName ?: replyInfo.senderId).escapeHtmlAttribute()
+        val quotedBody = replyInfo.body.escapeHtmlAttribute().htmlLineBreaks()
+
+        return "<mx-reply><blockquote><a href=\"$roomEventLink\">In reply to</a> " +
+            "<a href=\"$senderLink\">$senderName</a><br>$quotedBody</blockquote></mx-reply>"
+    }
+
+    private fun String.stripMatrixReplyFallback(): String {
+        val normalized = replace("\r\n", "\n").replace('\r', '\n')
+        val separatorIndex = normalized.indexOf("\n\n")
+        if (separatorIndex <= 0) {
+            return this
+        }
+
+        val quotedPart = normalized.substring(0, separatorIndex)
+        val isReplyFallback = quotedPart
+            .lineSequence()
+            .filter { it.isNotBlank() }
+            .all { it.startsWith(">") }
+        return if (isReplyFallback) normalized.substring(separatorIndex + 2) else this
+    }
+
+    private fun String.escapeHtml(): String {
+        return replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    }
+
+    private fun String.escapeHtmlAttribute(): String {
+        return escapeHtml()
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
+    }
+
+    private fun String.htmlLineBreaks(): String {
+        return replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .replace("\n", "<br>")
     }
 
     private suspend fun Room.toRoomSummary(): MatrixRoomSummary {

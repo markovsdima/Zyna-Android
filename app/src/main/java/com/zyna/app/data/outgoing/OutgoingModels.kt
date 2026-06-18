@@ -1,5 +1,7 @@
 package com.zyna.app.data.outgoing
 
+import com.zyna.app.data.matrix.MatrixReplyInfo
+
 enum class OutgoingEnvelopeKind {
     TEXT,
     REDACTION
@@ -22,6 +24,7 @@ data class OutgoingTextEnvelope(
     val transactionId: String,
     val eventId: String?,
     val body: String,
+    val replyInfo: MatrixReplyInfo?,
     val createdAtMillis: Long,
     val failureMessage: String?
 )

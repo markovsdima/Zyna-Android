@@ -1,6 +1,7 @@
 package com.zyna.app.ui.app
 
 import androidx.compose.runtime.Composable
+import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.ui.auth.LoginScreen
 import com.zyna.app.ui.chat.ChatScreen
@@ -18,6 +19,8 @@ fun ZynaApp(
     onCloseChat: () -> Unit,
     onLoadOlderChatMessages: () -> Unit,
     onSendChatMessage: (String) -> Boolean,
+    onReplyToMessage: (MatrixReplyInfo) -> Unit,
+    onCancelReply: () -> Unit,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
@@ -52,16 +55,20 @@ fun ZynaApp(
             roomName = route.displayName,
             roomId = route.roomId,
             messages = state.chatMessages,
+            windowChangeOrigin = state.chatWindowChangeOrigin,
             isLoading = state.isLoadingChat,
             isLoadingOlder = state.isLoadingOlderChatMessages,
             canLoadOlder = state.canLoadOlderChatMessages,
             errorMessage = state.chatErrorMessage,
             isSendingMessage = state.isSendingChatMessage,
             sendErrorMessage = state.chatSendErrorMessage,
+            replyTarget = state.chatReplyTarget,
             onRefresh = onRefreshChat,
             onBack = onCloseChat,
             onLoadOlder = onLoadOlderChatMessages,
             onSendMessage = onSendChatMessage,
+            onReplyToMessage = onReplyToMessage,
+            onCancelReply = onCancelReply,
             onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
             onRedactMessage = onRedactMessage,

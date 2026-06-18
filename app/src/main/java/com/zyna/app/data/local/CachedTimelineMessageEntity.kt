@@ -28,5 +28,9 @@ data class CachedTimelineMessageEntity(
     @ColumnInfo(defaultValue = "TEXT")
     val contentType: String,
     val deliveryState: String,
+    val replyEventId: String?,
+    val replySenderId: String?,
+    val replySenderDisplayName: String?,
+    val replyBody: String?,
     val updatedAtMillis: Long
 )

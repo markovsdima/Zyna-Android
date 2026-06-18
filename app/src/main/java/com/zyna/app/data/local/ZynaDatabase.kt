@@ -16,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -51,7 +51,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_2_3,
                     MIGRATION_3_4,
                     MIGRATION_4_5,
-                    MIGRATION_5_6
+                    MIGRATION_5_6,
+                    MIGRATION_6_7
                 )
                 .build()
         }
@@ -187,6 +188,19 @@ abstract class ZynaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN targetTransactionId TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN targetBody TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN targetContentType TEXT")
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN replyEventId TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN replySenderId TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN replySenderDisplayName TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN replyBody TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replyEventId TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replySenderId TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replySenderDisplayName TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replyBody TEXT")
             }
         }
     }

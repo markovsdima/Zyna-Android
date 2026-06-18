@@ -2,17 +2,27 @@ package com.zyna.app.ui.chat.render
 
 internal data class MessageRenderModel(
     val id: String,
+    val eventId: String? = null,
+    val senderId: String = "",
     val senderText: String,
     val content: MessageContent,
     val timestampText: String,
     val isOutgoing: Boolean,
     val deliveryState: RenderDeliveryState,
+    val replyInfo: MessageReplyPreview? = null,
     val outgoingEnvelopeId: String? = null,
     val redactionTargetMessageId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
     val attributes: MessageRenderAttributes = MessageRenderAttributes(),
     val cluster: MessageCluster = MessageCluster()
+)
+
+internal data class MessageReplyPreview(
+    val eventId: String,
+    val senderId: String,
+    val senderText: String,
+    val body: String
 )
 
 internal sealed interface MessageContent {
@@ -75,13 +85,14 @@ internal fun MessageRenderModel.accessibilityText(): String {
         is MessageContent.Text -> content.body
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
+    val reply = replyInfo?.let { ", in reply to ${it.senderText}: ${it.body}" }.orEmpty()
     val state = when (deliveryState) {
         RenderDeliveryState.SENT -> ""
         RenderDeliveryState.SENDING -> ", sending"
         RenderDeliveryState.FAILED -> ", failed"
     }
     val sender = senderText.takeIf { it.isNotBlank() } ?: if (isOutgoing) "You" else "Unknown sender"
-    return "$sender, $body, $timestampText$state"
+    return "$sender$reply, $body, $timestampText$state"
 }
 
 internal val MessageRenderModel.isRedacted: Boolean

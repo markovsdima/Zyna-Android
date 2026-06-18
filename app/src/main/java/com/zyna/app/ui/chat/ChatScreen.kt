@@ -22,20 +22,25 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
+import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
+import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.glass.GlassComposerPreview
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -45,16 +50,20 @@ fun ChatScreen(
     roomName: String,
     roomId: String,
     messages: List<MatrixChatMessage>,
+    windowChangeOrigin: TimelineWindowChangeOrigin,
     isLoading: Boolean,
     isLoadingOlder: Boolean,
     canLoadOlder: Boolean,
     errorMessage: String?,
     isSendingMessage: Boolean = false,
     sendErrorMessage: String? = null,
+    replyTarget: MatrixReplyInfo? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean = { false },
+    onReplyToMessage: (MatrixReplyInfo) -> Unit = {},
+    onCancelReply: () -> Unit = {},
     onRetryOutgoingEnvelope: (String) -> Unit = {},
     onDiscardOutgoingEnvelope: (String) -> Unit = {},
     onRedactMessage: (String) -> Unit = {},
@@ -118,15 +127,19 @@ fun ChatScreen(
             else -> ChatMessageList(
                 messages = messages,
                 roomId = roomId,
+                windowChangeOrigin = windowChangeOrigin,
                 isLoading = isLoading,
                 isLoadingOlder = isLoadingOlder,
                 canLoadOlder = canLoadOlder,
                 isSendingMessage = isSendingMessage,
                 sendErrorMessage = sendErrorMessage,
                 sendErrorColor = sendErrorColor,
+                replyTarget = replyTarget,
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
                 onSendMessage = onSendMessage,
+                onReplyToMessage = onReplyToMessage,
+                onCancelReply = onCancelReply,
                 onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
                 onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
                 onRedactMessage = onRedactMessage,
@@ -144,15 +157,19 @@ fun ChatScreen(
 private fun ChatMessageList(
     messages: List<MatrixChatMessage>,
     roomId: String,
+    windowChangeOrigin: TimelineWindowChangeOrigin,
     isLoading: Boolean,
     isLoadingOlder: Boolean,
     canLoadOlder: Boolean,
     isSendingMessage: Boolean,
     sendErrorMessage: String?,
     sendErrorColor: Int,
+    replyTarget: MatrixReplyInfo?,
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean,
+    onReplyToMessage: (MatrixReplyInfo) -> Unit,
+    onCancelReply: () -> Unit,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
@@ -184,6 +201,9 @@ private fun ChatMessageList(
                 onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
             )
             chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.onReplyToMessage = { target ->
+                onReplyToMessage(target.toMatrixReplyInfo())
+            }
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
@@ -194,6 +214,8 @@ private fun ChatMessageList(
                 }
             }
             chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.inputBar.onPreviewCancelled = onCancelReply
+            chatLayout.inputBar.setPreview(replyTarget?.toComposerPreview())
             chatLayout.setPalette(palette)
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
@@ -210,6 +232,9 @@ private fun ChatMessageList(
         update = { chatLayout ->
             chatLayout.setPalette(palette)
             chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.onReplyToMessage = { target ->
+                onReplyToMessage(target.toMatrixReplyInfo())
+            }
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
@@ -220,6 +245,8 @@ private fun ChatMessageList(
                 }
             }
             chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.inputBar.onPreviewCancelled = onCancelReply
+            chatLayout.inputBar.setPreview(replyTarget?.toComposerPreview())
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
                 canLoadOlder = canLoadOlder && !isLoading
@@ -247,13 +274,36 @@ private fun ChatMessageList(
                 ?: RecyclerView.NO_POSITION
             val wasAtBottom = firstVisiblePosition != RecyclerView.NO_POSITION &&
                 firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
+            val viewportAnchor = if (
+                !wasAtBottom &&
+                layoutManager != null &&
+                recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE &&
+                windowChangeOrigin == TimelineWindowChangeOrigin.DATABASE_PAGINATION
+            ) {
+                recyclerView.findViewportAnchor(adapter)
+            } else null
             val wasEmpty = adapter.itemCount == 0
             val themeChanged = adapter.messageTheme != messageTheme
             adapter.messageTheme = messageTheme
             adapter.submitList(displayedMessages) {
                 if (displayedMessages.isNotEmpty()) {
-                    if (wasEmpty || (wasAtBottom && hasNewerMessage)) {
+                    if (
+                        wasEmpty ||
+                        (
+                            wasAtBottom &&
+                                hasNewerMessage &&
+                                windowChangeOrigin != TimelineWindowChangeOrigin.DATABASE_PAGINATION
+                            )
+                    ) {
                         chatLayout.scrollToBottom(animated = false)
+                    } else if (viewportAnchor != null) {
+                        val anchorPosition = displayedMessages.indexOfFirst { it.id == viewportAnchor.messageId }
+                        if (anchorPosition != -1) {
+                            layoutManager?.scrollToPositionWithOffset(
+                                anchorPosition,
+                                viewportAnchor.top
+                            )
+                        }
                     }
                 }
                 chatLayout.invalidateGlassContent()
@@ -328,6 +378,44 @@ private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
     )
 }
 
+private data class ViewportAnchor(
+    val messageId: String,
+    val top: Int
+)
+
+private fun RecyclerView.findViewportAnchor(adapter: ChatMessageAdapter): ViewportAnchor? {
+    val layoutManager = layoutManager ?: return null
+    val viewportTop = paddingTop
+    var bestPosition = RecyclerView.NO_POSITION
+    var bestTop = Int.MAX_VALUE
+    var bestDistance = Int.MAX_VALUE
+
+    for (index in 0 until childCount) {
+        val child = getChildAt(index) ?: continue
+        val position = layoutManager.getPosition(child)
+        if (position == RecyclerView.NO_POSITION) {
+            continue
+        }
+        val visibleTop = max(child.top, viewportTop)
+        val distance = abs(visibleTop - viewportTop)
+        if (distance < bestDistance || (distance == bestDistance && visibleTop < bestTop)) {
+            bestDistance = distance
+            bestPosition = position
+            bestTop = child.top
+        }
+    }
+
+    if (bestPosition == RecyclerView.NO_POSITION) {
+        return null
+    }
+
+    val messageId = adapter.currentList.getOrNull(bestPosition)?.id ?: return null
+    return ViewportAnchor(
+        messageId = messageId,
+        top = bestTop
+    )
+}
+
 @Composable
 private fun chatGlassPalette(): GlassPalette {
     val scheme = MaterialTheme.colorScheme
@@ -347,8 +435,16 @@ private class ChatMessageAdapter(
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
+    init {
+        setHasStableIds(true)
+    }
+
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
         return ChatMessageViewHolder(parent)
+    }
+
+    override fun getItemId(position: Int): Long {
+        return getItem(position).id.stableItemId()
     }
 
     override fun onBindViewHolder(holder: ChatMessageViewHolder, position: Int) {
@@ -389,6 +485,8 @@ private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder
 private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
     return MessageRenderModel(
         id = id,
+        eventId = eventId,
+        senderId = sender,
         senderText = if (isOwn) "You" else sender,
         content = when (contentType) {
             MatrixMessageContentType.REDACTED -> MessageContent.Redacted
@@ -397,10 +495,44 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         timestampText = timestampMillis.formatMessageTime(),
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
+        replyInfo = replyInfo?.toRenderReplyPreview(),
         outgoingEnvelopeId = outgoingEnvelopeId,
         redactionTargetMessageId = redactionTargetMessageId(),
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
         canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
+    )
+}
+
+private fun MatrixReplyInfo.toRenderReplyPreview(): MessageReplyPreview {
+    val displaySender = senderDisplayName
+        ?.takeIf { it.isNotBlank() }
+        ?: senderId.takeIf { it.isNotBlank() }
+        ?: "Unknown"
+    return MessageReplyPreview(
+        eventId = eventId,
+        senderId = senderId,
+        senderText = displaySender,
+        body = body.ifBlank { "Message" }
+    )
+}
+
+private fun MessageReplyPreview.toMatrixReplyInfo(): MatrixReplyInfo {
+    return MatrixReplyInfo(
+        eventId = eventId,
+        senderId = senderId,
+        senderDisplayName = senderText.takeIf { it.isNotBlank() && it != senderId },
+        body = body
+    )
+}
+
+private fun MatrixReplyInfo.toComposerPreview(): GlassComposerPreview {
+    val sender = senderDisplayName
+        ?.takeIf { it.isNotBlank() }
+        ?: senderId.takeIf { it.isNotBlank() }
+        ?: "Unknown"
+    return GlassComposerPreview(
+        title = sender,
+        body = body.ifBlank { "Message" }
     )
 }
 
@@ -437,9 +569,20 @@ private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPatt
 private const val NEWEST_EDGE_THRESHOLD = 1
 private const val READ_RECEIPT_VISIBILITY_THRESHOLD = 0.6f
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
+private const val FNV_64_OFFSET_BASIS = -3750763034362895579L
+private const val FNV_64_PRIME = 1099511628211L
 
 private fun MatrixChatMessage.isReadReceiptCandidate(): Boolean {
     return !isOwn && eventId != null && contentType != MatrixMessageContentType.REDACTED
+}
+
+private fun String.stableItemId(): Long {
+    var hash = FNV_64_OFFSET_BASIS
+    forEach { char ->
+        hash = hash xor char.code.toLong()
+        hash *= FNV_64_PRIME
+    }
+    return hash
 }
 
 private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {

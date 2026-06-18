@@ -10,12 +10,22 @@ internal data class MessageRenderModel(
     val isOutgoing: Boolean,
     val deliveryState: RenderDeliveryState,
     val replyInfo: MessageReplyPreview? = null,
+    val editInfo: MessageEditPreview? = null,
+    val isEdited: Boolean = false,
+    val isEditPending: Boolean = false,
+    val isEditFailed: Boolean = false,
     val outgoingEnvelopeId: String? = null,
     val redactionTargetMessageId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
     val attributes: MessageRenderAttributes = MessageRenderAttributes(),
     val cluster: MessageCluster = MessageCluster()
+)
+
+internal data class MessageEditPreview(
+    val messageId: String,
+    val eventId: String,
+    val body: String
 )
 
 internal data class MessageReplyPreview(
@@ -87,7 +97,12 @@ internal fun MessageRenderModel.accessibilityText(): String {
     }
     val reply = replyInfo?.let { ", in reply to ${it.senderText}: ${it.body}" }.orEmpty()
     val state = when (deliveryState) {
-        RenderDeliveryState.SENT -> ""
+        RenderDeliveryState.SENT -> when {
+            isEditPending -> ", editing"
+            isEditFailed -> ", edit failed"
+            isEdited -> ", edited"
+            else -> ""
+        }
         RenderDeliveryState.SENDING -> ", sending"
         RenderDeliveryState.FAILED -> ", failed"
     }

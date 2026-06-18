@@ -8,6 +8,7 @@ import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
+import com.zyna.app.data.outgoing.OutgoingEditEnvelope
 import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingTextEnvelope
 import com.zyna.app.data.outgoing.OutgoingTransportState
@@ -350,6 +351,42 @@ class LocalCacheRepository(
         return true
     }
 
+    suspend fun prepareOutgoingTextEdit(
+        userId: String,
+        roomId: String,
+        targetMessage: MatrixChatMessage,
+        body: String,
+        transactionId: String
+    ): Boolean {
+        val eventId = targetMessage.eventId ?: return false
+        val trimmedBody = body.trim()
+        if (
+            trimmedBody.isEmpty() ||
+            trimmedBody == targetMessage.body.trim() ||
+            targetMessage.contentType != MatrixMessageContentType.TEXT ||
+            !targetMessage.isOwn ||
+            targetMessage.isEditPending
+        ) {
+            return false
+        }
+
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val didPrepare = messageDao.preparePendingTextEdit(
+                userId = userId,
+                roomId = roomId,
+                eventId = eventId,
+                editTransactionId = transactionId,
+                pendingEditBody = trimmedBody,
+                updatedAtMillis = now
+            ) > 0
+            if (didPrepare) {
+                updateRoomPreview(userId, roomId, now)
+            }
+            didPrepare
+        }
+    }
+
     suspend fun markOutgoingDispatchStarted(userId: String, roomId: String, envelopeId: String) {
         val now = System.currentTimeMillis()
         database.withTransaction {
@@ -515,6 +552,11 @@ class LocalCacheRepository(
         return entities.mapNotNull { it.toOutgoingRedactionEnvelopeOrNull() }
     }
 
+    suspend fun outgoingEditDispatchCandidates(userId: String): List<OutgoingEditEnvelope> {
+        return messageDao.pendingTextEdits(userId)
+            .mapNotNull { it.toOutgoingEditEnvelopeOrNull() }
+    }
+
     suspend fun markOutgoingRedactionDispatchAccepted(
         userId: String,
         roomId: String,
@@ -583,6 +625,48 @@ class LocalCacheRepository(
         }
     }
 
+    suspend fun markOutgoingEditDispatchAccepted(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        transactionId: String,
+        editEventId: String,
+        body: String
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            messageDao.markPendingTextEditAccepted(
+                userId = userId,
+                roomId = roomId,
+                eventId = eventId,
+                editTransactionId = transactionId,
+                latestEditEventId = editEventId,
+                body = body,
+                updatedAtMillis = now
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
+    suspend fun markOutgoingEditDispatchTerminalFailure(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        transactionId: String
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            messageDao.markPendingTextEditFailed(
+                userId = userId,
+                roomId = roomId,
+                eventId = eventId,
+                editTransactionId = transactionId,
+                updatedAtMillis = now
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
     suspend fun clearAll() {
         database.withTransaction {
             messageDao.clearAllMessages()
@@ -607,17 +691,26 @@ class LocalCacheRepository(
     }
 
     private fun CachedTimelineMessageEntity.toChatMessage(): MatrixChatMessage {
+        val displayBody = pendingEditBody
+            ?.takeIf { isEditPending && it.isNotBlank() }
+            ?: body
         return MatrixChatMessage(
             id = id,
             eventId = eventId,
             transactionId = transactionId,
             sender = sender,
-            body = body,
+            body = displayBody,
             timestampMillis = timestampMillis,
             isOwn = isOwn,
             contentType = contentType.toMatrixContentType(),
             deliveryState = deliveryState.toMatrixDeliveryState(),
-            replyInfo = replyInfoOrNull()
+            replyInfo = replyInfoOrNull(),
+            isEdited = isEdited,
+            isEditPending = isEditPending,
+            isEditFailed = isEditFailed,
+            latestEditEventId = latestEditEventId,
+            editTransactionId = editTransactionId,
+            pendingEditBody = pendingEditBody
         )
     }
 
@@ -654,6 +747,12 @@ class LocalCacheRepository(
             replySenderId = replyInfo?.senderId,
             replySenderDisplayName = replyInfo?.senderDisplayName,
             replyBody = replyInfo?.body,
+            isEdited = isEdited,
+            isEditPending = isEditPending,
+            isEditFailed = isEditFailed,
+            latestEditEventId = latestEditEventId,
+            editTransactionId = editTransactionId,
+            pendingEditBody = pendingEditBody,
             updatedAtMillis = updatedAtMillis
         )
     }
@@ -861,6 +960,24 @@ class LocalCacheRepository(
         )
     }
 
+    private fun CachedTimelineMessageEntity.toOutgoingEditEnvelopeOrNull(): OutgoingEditEnvelope? {
+        val eventId = eventId?.takeIf { it.isNotBlank() } ?: return null
+        val editTransactionId = editTransactionId?.takeIf { it.isNotBlank() } ?: return null
+        val pendingBody = pendingEditBody?.takeIf { it.isNotBlank() } ?: return null
+        if (!isEditPending || contentType != MatrixMessageContentType.TEXT.name) {
+            return null
+        }
+
+        return OutgoingEditEnvelope(
+            userId = userId,
+            roomId = roomId,
+            eventId = eventId,
+            transactionId = editTransactionId,
+            body = pendingBody,
+            createdAtMillis = updatedAtMillis
+        )
+    }
+
     private fun String.toMatrixDeliveryState(): MatrixMessageDeliveryState {
         return runCatching { MatrixMessageDeliveryState.valueOf(this) }
             .getOrDefault(MatrixMessageDeliveryState.SENT)
@@ -1028,13 +1145,20 @@ class LocalCacheRepository(
                 .firstNotNullOfOrNull { identity -> existingMessagesByIdentity[identity] }
                 ?: return@map incoming
             incoming.copy(
+                body = if (existing.isEdited && !incoming.isEdited) existing.body else incoming.body,
                 eventId = incoming.eventId ?: existing.eventId,
                 transactionId = incoming.transactionId ?: existing.transactionId,
                 replyEventId = incoming.replyEventId ?: existing.replyEventId,
                 replySenderId = incoming.replySenderId ?: existing.replySenderId,
                 replySenderDisplayName = incoming.replySenderDisplayName
                     ?: existing.replySenderDisplayName,
-                replyBody = incoming.replyBody ?: existing.replyBody
+                replyBody = incoming.replyBody ?: existing.replyBody,
+                isEdited = incoming.isEdited || existing.isEdited,
+                isEditPending = if (incoming.isEdited) false else existing.isEditPending,
+                isEditFailed = if (incoming.isEdited) false else existing.isEditFailed,
+                latestEditEventId = incoming.latestEditEventId ?: existing.latestEditEventId,
+                editTransactionId = if (incoming.isEdited) null else existing.editTransactionId,
+                pendingEditBody = if (incoming.isEdited) null else existing.pendingEditBody
             )
         }
     }

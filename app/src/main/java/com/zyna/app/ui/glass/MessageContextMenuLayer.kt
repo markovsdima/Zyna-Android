@@ -381,6 +381,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             ) {
                 add(MessageContextMenuAction.REPLY)
             }
+            if (message.editInfo != null) {
+                add(MessageContextMenuAction.EDIT)
+            }
             if (message.copyableText() != null) {
                 add(MessageContextMenuAction.COPY)
             }
@@ -706,6 +709,7 @@ internal enum class MessageContextMenuAction(
     val isDestructive: Boolean = false
 ) {
     REPLY("Reply"),
+    EDIT("Edit"),
     COPY("Copy"),
     DELETE("Delete", true),
     RETRY_SEND("Retry Send"),

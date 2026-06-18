@@ -123,6 +123,12 @@ data class MatrixReplyInfo(
     val body: String
 )
 
+data class MatrixEditTarget(
+    val messageId: String,
+    val eventId: String,
+    val body: String
+)
+
 data class MatrixChatMessage(
     /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
@@ -135,6 +141,12 @@ data class MatrixChatMessage(
     val contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
     val replyInfo: MatrixReplyInfo? = null,
+    val isEdited: Boolean = false,
+    val isEditPending: Boolean = false,
+    val isEditFailed: Boolean = false,
+    val latestEditEventId: String? = null,
+    val editTransactionId: String? = null,
+    val pendingEditBody: String? = null,
     val outgoingEnvelopeId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false
@@ -466,6 +478,39 @@ class MatrixClientService(
         )
     }
 
+    suspend fun sendTextEdit(
+        roomId: String,
+        eventId: String,
+        body: String,
+        transactionId: String
+    ): String = withContext(Dispatchers.IO) {
+        val text = body.trim()
+        require(eventId.isNotBlank()) { "Edited message event id is empty" }
+        require(text.isNotEmpty()) { "Edited message is empty" }
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val newContent = JSONObject()
+            .put("msgtype", "m.text")
+            .put("body", text)
+        val content = JSONObject()
+            .put("msgtype", "m.text")
+            .put("body", "* $text")
+            .put("m.new_content", newContent)
+            .put(
+                "m.relates_to",
+                JSONObject()
+                    .put("rel_type", "m.replace")
+                    .put("event_id", eventId)
+            )
+            .put(TRANSACTION_ID_CONTENT_KEY, transactionId)
+
+        room.sendRawWithTransactionIdReturningEventId(
+            eventType = "m.room.message",
+            content = content.toString(),
+            transactionId = transactionId
+        )
+    }
+
     suspend fun redactMessage(
         roomId: String,
         eventId: String,
@@ -551,6 +596,7 @@ class MatrixClientService(
         }
         val eventId = eventOrTransactionId.eventIdOrNull()
         val transactionId = eventOrTransactionId.transactionIdOrNull()
+        val isEdited = (msgLike.kind as? MsgLikeKind.Message)?.content?.isEdited ?: false
 
         return MatrixChatMessage(
             id = eventOrTransactionId.stableId(),
@@ -561,7 +607,8 @@ class MatrixClientService(
             timestampMillis = timestamp.toLong(),
             isOwn = isOwn,
             contentType = messageBody.contentType,
-            replyInfo = replyInfo
+            replyInfo = replyInfo,
+            isEdited = isEdited
         )
     }
 

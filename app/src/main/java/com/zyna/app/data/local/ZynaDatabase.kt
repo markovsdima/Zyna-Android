@@ -16,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -52,7 +52,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_3_4,
                     MIGRATION_4_5,
                     MIGRATION_5_6,
-                    MIGRATION_6_7
+                    MIGRATION_6_7,
+                    MIGRATION_7_8
                 )
                 .build()
         }
@@ -201,6 +202,17 @@ abstract class ZynaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replySenderId TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replySenderDisplayName TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN replyBody TEXT")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN isEdited INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN isEditPending INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN isEditFailed INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN latestEditEventId TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN editTransactionId TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN pendingEditBody TEXT")
             }
         }
     }

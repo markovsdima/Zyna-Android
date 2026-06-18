@@ -289,7 +289,12 @@ internal data class ReplyHeaderLayout(
 
 private fun MessageRenderModel.metadataText(): String {
     return when (deliveryState) {
-        RenderDeliveryState.SENT -> timestampText
+        RenderDeliveryState.SENT -> when {
+            isEditPending -> "$timestampText - editing"
+            isEditFailed -> "$timestampText - edit failed"
+            isEdited -> "$timestampText - edited"
+            else -> timestampText
+        }
         RenderDeliveryState.SENDING -> "$timestampText - sending"
         RenderDeliveryState.FAILED -> "$timestampText - failed"
     }

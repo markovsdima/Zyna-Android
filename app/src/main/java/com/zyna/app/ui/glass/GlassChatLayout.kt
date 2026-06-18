@@ -22,6 +22,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
+import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import kotlin.math.abs
@@ -43,6 +44,7 @@ class GlassChatLayout @JvmOverloads constructor(
     var onRetryOutgoingEnvelope: (String) -> Unit = {}
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
     internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
+    internal var onEditMessage: (MessageEditPreview) -> Unit = {}
     var onRedactMessage: (String) -> Unit = {}
     var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
     var onEvaluateVisibleReadReceiptCandidate: () -> Unit = {}
@@ -979,6 +981,10 @@ class GlassChatLayout @JvmOverloads constructor(
         return when (action) {
             MessageContextMenuAction.REPLY -> {
                 message.toReplyPreviewOrNull()?.let(onReplyToMessage)
+                true
+            }
+            MessageContextMenuAction.EDIT -> {
+                message.editInfo?.let(onEditMessage)
                 true
             }
             MessageContextMenuAction.COPY -> {

@@ -32,5 +32,14 @@ data class CachedTimelineMessageEntity(
     val replySenderId: String?,
     val replySenderDisplayName: String?,
     val replyBody: String?,
+    @ColumnInfo(defaultValue = "0")
+    val isEdited: Boolean,
+    @ColumnInfo(defaultValue = "0")
+    val isEditPending: Boolean,
+    @ColumnInfo(defaultValue = "0")
+    val isEditFailed: Boolean,
+    val latestEditEventId: String?,
+    val editTransactionId: String?,
+    val pendingEditBody: String?,
     val updatedAtMillis: Long
 )

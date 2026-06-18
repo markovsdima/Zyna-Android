@@ -223,6 +223,95 @@ interface CachedTimelineMessageDao {
 
     @Query(
         """
+        UPDATE timeline_messages
+        SET isEditPending = 1,
+            isEditFailed = 0,
+            editTransactionId = :editTransactionId,
+            pendingEditBody = :pendingEditBody,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND eventId = :eventId
+            AND isOwn = 1
+            AND contentType = 'TEXT'
+        """
+    )
+    suspend fun preparePendingTextEdit(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        editTransactionId: String,
+        pendingEditBody: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND isEditPending = 1
+            AND editTransactionId IS NOT NULL
+            AND editTransactionId != ''
+            AND pendingEditBody IS NOT NULL
+            AND eventId IS NOT NULL
+            AND eventId != ''
+        ORDER BY timestampMillis ASC, id ASC
+        """
+    )
+    suspend fun pendingTextEdits(userId: String): List<CachedTimelineMessageEntity>
+
+    @Query(
+        """
+        UPDATE timeline_messages
+        SET body = :body,
+            isEdited = 1,
+            isEditPending = 0,
+            isEditFailed = 0,
+            latestEditEventId = :latestEditEventId,
+            editTransactionId = NULL,
+            pendingEditBody = NULL,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND eventId = :eventId
+            AND editTransactionId = :editTransactionId
+            AND contentType = 'TEXT'
+        """
+    )
+    suspend fun markPendingTextEditAccepted(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        editTransactionId: String,
+        latestEditEventId: String,
+        body: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE timeline_messages
+        SET isEditPending = 0,
+            isEditFailed = 1,
+            editTransactionId = NULL,
+            pendingEditBody = NULL,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND eventId = :eventId
+            AND editTransactionId = :editTransactionId
+        """
+    )
+    suspend fun markPendingTextEditFailed(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        editTransactionId: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
         SELECT EXISTS(
             SELECT 1 FROM timeline_messages
             WHERE userId = :userId

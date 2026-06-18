@@ -4,7 +4,8 @@ import com.zyna.app.data.matrix.MatrixReplyInfo
 
 enum class OutgoingEnvelopeKind {
     TEXT,
-    REDACTION
+    REDACTION,
+    EDIT
 }
 
 enum class OutgoingTransportState {
@@ -43,3 +44,15 @@ data class OutgoingRedactionEnvelope(
     val createdAtMillis: Long,
     val failureMessage: String?
 )
+
+data class OutgoingEditEnvelope(
+    val userId: String,
+    val roomId: String,
+    val eventId: String,
+    val transactionId: String,
+    val body: String,
+    val createdAtMillis: Long
+) {
+    val id: String
+        get() = "edit:$roomId:$eventId"
+}

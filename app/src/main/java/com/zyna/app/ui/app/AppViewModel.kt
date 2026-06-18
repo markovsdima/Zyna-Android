@@ -12,6 +12,7 @@ import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
+import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
@@ -54,7 +55,8 @@ data class AppUiState(
     val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
     val chatSendErrorMessage: String? = null,
-    val chatReplyTarget: MatrixReplyInfo? = null
+    val chatReplyTarget: MatrixReplyInfo? = null,
+    val chatEditTarget: MatrixEditTarget? = null
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -164,7 +166,8 @@ class AppViewModel(
                         chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
-                        chatReplyTarget = if (shouldClearChat) null else current.chatReplyTarget
+                        chatReplyTarget = if (shouldClearChat) null else current.chatReplyTarget,
+                        chatEditTarget = if (shouldClearChat) null else current.chatEditTarget
                     )
                 }
 
@@ -299,7 +302,8 @@ class AppViewModel(
                     chatErrorMessage = null,
                     isSendingChatMessage = false,
                     chatSendErrorMessage = null,
-                    chatReplyTarget = null
+                    chatReplyTarget = null,
+                    chatEditTarget = null
                 )
             }
 
@@ -334,7 +338,8 @@ class AppViewModel(
                 chatErrorMessage = null,
                 isSendingChatMessage = false,
                 chatSendErrorMessage = null,
-                chatReplyTarget = null
+                chatReplyTarget = null,
+                chatEditTarget = null
             )
         }
     }
@@ -353,6 +358,7 @@ class AppViewModel(
             return false
         }
         val replyInfo = _uiState.value.chatReplyTarget
+        val editTarget = _uiState.value.chatEditTarget
         val envelopeId = "text:${UUID.randomUUID()}"
         val transactionId = matrixClientService.prepareTransactionId()
 
@@ -367,25 +373,46 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                localCacheRepository.createOutgoingTextEnvelope(
-                    userId = userId,
-                    roomId = route.roomId,
-                    envelopeId = envelopeId,
-                    transactionId = transactionId,
-                    body = text,
-                    replyInfo = replyInfo
-                )
-                outgoingOutboxService.kick(
-                    reason = "new-envelope",
-                    envelopeId = envelopeId
-                )
+                if (editTarget != null) {
+                    val didPrepare = localCacheRepository.prepareOutgoingTextEdit(
+                        userId = userId,
+                        roomId = route.roomId,
+                        targetMessage = MatrixChatMessage(
+                            id = editTarget.messageId,
+                            eventId = editTarget.eventId,
+                            sender = userId,
+                            body = editTarget.body,
+                            timestampMillis = 0L,
+                            isOwn = true
+                        ),
+                        body = text,
+                        transactionId = transactionId
+                    )
+                    if (didPrepare) {
+                        outgoingOutboxService.kick(reason = "new-edit")
+                    }
+                } else {
+                    localCacheRepository.createOutgoingTextEnvelope(
+                        userId = userId,
+                        roomId = route.roomId,
+                        envelopeId = envelopeId,
+                        transactionId = transactionId,
+                        body = text,
+                        replyInfo = replyInfo
+                    )
+                    outgoingOutboxService.kick(
+                        reason = "new-envelope",
+                        envelopeId = envelopeId
+                    )
+                }
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it
                     } else it.copy(
                         isSendingChatMessage = false,
                         chatSendErrorMessage = null,
-                        chatReplyTarget = null
+                        chatReplyTarget = null,
+                        chatEditTarget = null
                     )
                 }
             } catch (error: CancellationException) {
@@ -414,7 +441,27 @@ class AppViewModel(
             if (!it.isRouteForRoom(route.roomId)) {
                 it
             } else {
-                it.copy(chatReplyTarget = replyInfo)
+                it.copy(
+                    chatReplyTarget = replyInfo,
+                    chatEditTarget = null
+                )
+            }
+        }
+    }
+
+    fun setChatEditTarget(editTarget: MatrixEditTarget) {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        if (editTarget.eventId.isBlank() || editTarget.body.isBlank()) {
+            return
+        }
+        _uiState.update {
+            if (!it.isRouteForRoom(route.roomId)) {
+                it
+            } else {
+                it.copy(
+                    chatReplyTarget = null,
+                    chatEditTarget = editTarget
+                )
             }
         }
     }
@@ -425,6 +472,16 @@ class AppViewModel(
                 it
             } else {
                 it.copy(chatReplyTarget = null)
+            }
+        }
+    }
+
+    fun clearChatEditTarget() {
+        _uiState.update {
+            if (it.chatEditTarget == null) {
+                it
+            } else {
+                it.copy(chatEditTarget = null)
             }
         }
     }

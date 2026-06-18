@@ -24,12 +24,14 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
+import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
@@ -58,12 +60,15 @@ fun ChatScreen(
     isSendingMessage: Boolean = false,
     sendErrorMessage: String? = null,
     replyTarget: MatrixReplyInfo? = null,
+    editTarget: MatrixEditTarget? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean = { false },
     onReplyToMessage: (MatrixReplyInfo) -> Unit = {},
     onCancelReply: () -> Unit = {},
+    onEditMessage: (MatrixEditTarget) -> Unit = {},
+    onCancelEdit: () -> Unit = {},
     onRetryOutgoingEnvelope: (String) -> Unit = {},
     onDiscardOutgoingEnvelope: (String) -> Unit = {},
     onRedactMessage: (String) -> Unit = {},
@@ -135,11 +140,14 @@ fun ChatScreen(
                 sendErrorMessage = sendErrorMessage,
                 sendErrorColor = sendErrorColor,
                 replyTarget = replyTarget,
+                editTarget = editTarget,
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
                 onSendMessage = onSendMessage,
                 onReplyToMessage = onReplyToMessage,
                 onCancelReply = onCancelReply,
+                onEditMessage = onEditMessage,
+                onCancelEdit = onCancelEdit,
                 onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
                 onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
                 onRedactMessage = onRedactMessage,
@@ -165,11 +173,14 @@ private fun ChatMessageList(
     sendErrorMessage: String?,
     sendErrorColor: Int,
     replyTarget: MatrixReplyInfo?,
+    editTarget: MatrixEditTarget?,
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
     onSendMessage: (String) -> Boolean,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
     onCancelReply: () -> Unit,
+    onEditMessage: (MatrixEditTarget) -> Unit,
+    onCancelEdit: () -> Unit,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
@@ -204,6 +215,9 @@ private fun ChatMessageList(
             chatLayout.onReplyToMessage = { target ->
                 onReplyToMessage(target.toMatrixReplyInfo())
             }
+            chatLayout.onEditMessage = { target ->
+                onEditMessage(target.toMatrixEditTarget())
+            }
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
@@ -216,6 +230,9 @@ private fun ChatMessageList(
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.inputBar.onPreviewCancelled = onCancelReply
             chatLayout.inputBar.setPreview(replyTarget?.toComposerPreview())
+            chatLayout.inputBar.onEditCancelled = onCancelEdit
+            chatLayout.inputBar.setEditDraft(editTarget?.eventId, editTarget?.body)
+            chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
             chatLayout.setPalette(palette)
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
@@ -235,6 +252,9 @@ private fun ChatMessageList(
             chatLayout.onReplyToMessage = { target ->
                 onReplyToMessage(target.toMatrixReplyInfo())
             }
+            chatLayout.onEditMessage = { target ->
+                onEditMessage(target.toMatrixEditTarget())
+            }
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
@@ -247,6 +267,9 @@ private fun ChatMessageList(
             chatLayout.inputBar.onSendMessage = onSendMessage
             chatLayout.inputBar.onPreviewCancelled = onCancelReply
             chatLayout.inputBar.setPreview(replyTarget?.toComposerPreview())
+            chatLayout.inputBar.onEditCancelled = onCancelEdit
+            chatLayout.inputBar.setEditDraft(editTarget?.eventId, editTarget?.body)
+            chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
                 canLoadOlder = canLoadOlder && !isLoading
@@ -496,10 +519,41 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
         replyInfo = replyInfo?.toRenderReplyPreview(),
+        editInfo = editPreviewOrNull(),
+        isEdited = isEdited,
+        isEditPending = isEditPending,
+        isEditFailed = isEditFailed,
         outgoingEnvelopeId = outgoingEnvelopeId,
         redactionTargetMessageId = redactionTargetMessageId(),
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
         canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
+    )
+}
+
+private fun MatrixChatMessage.editPreviewOrNull(): MessageEditPreview? {
+    val eventId = eventId?.takeIf { it.isNotBlank() } ?: return null
+    if (
+        !isOwn ||
+        outgoingEnvelopeId != null ||
+        contentType != MatrixMessageContentType.TEXT ||
+        deliveryState != MatrixMessageDeliveryState.SENT ||
+        isEditPending
+    ) {
+        return null
+    }
+    val body = body.takeIf { it.isNotBlank() } ?: return null
+    return MessageEditPreview(
+        messageId = id,
+        eventId = eventId,
+        body = body
+    )
+}
+
+private fun MessageEditPreview.toMatrixEditTarget(): MatrixEditTarget {
+    return MatrixEditTarget(
+        messageId = messageId,
+        eventId = eventId,
+        body = body
     )
 }
 
@@ -532,6 +586,13 @@ private fun MatrixReplyInfo.toComposerPreview(): GlassComposerPreview {
         ?: "Unknown"
     return GlassComposerPreview(
         title = sender,
+        body = body.ifBlank { "Message" }
+    )
+}
+
+private fun MatrixEditTarget.toComposerPreview(): GlassComposerPreview {
+    return GlassComposerPreview(
+        title = "Edit message",
         body = body.ifBlank { "Message" }
     )
 }

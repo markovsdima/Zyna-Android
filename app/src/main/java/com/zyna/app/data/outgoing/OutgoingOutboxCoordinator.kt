@@ -156,7 +156,10 @@ class OutgoingOutboxService(
             userId = userId,
             envelopeIds = envelopeIds
         )
-        if (textCandidates.isEmpty() && redactionCandidates.isEmpty()) {
+        val editCandidates = localCacheRepository.outgoingEditDispatchCandidates(
+            userId = userId
+        )
+        if (textCandidates.isEmpty() && redactionCandidates.isEmpty() && editCandidates.isEmpty()) {
             Log.d(TAG, "outbox scan reason=$reason count=0")
             return
         }
@@ -164,7 +167,7 @@ class OutgoingOutboxService(
         Log.d(
             TAG,
             "outbox scan reason=$reason text=${textCandidates.size} " +
-                "redactions=${redactionCandidates.size}"
+                "redactions=${redactionCandidates.size} edits=${editCandidates.size}"
         )
         for (candidate in textCandidates) {
             currentCoroutineContext().ensureActive()
@@ -179,6 +182,13 @@ class OutgoingOutboxService(
                 return
             }
             sendRedactionIfEligible(candidate, reason)
+        }
+        for (candidate in editCandidates) {
+            currentCoroutineContext().ensureActive()
+            if (!canScan()) {
+                return
+            }
+            sendEditIfEligible(candidate, reason)
         }
     }
 
@@ -284,6 +294,55 @@ class OutgoingOutboxService(
         }
     }
 
+    private suspend fun sendEditIfEligible(candidate: OutgoingEditEnvelope, reason: String) {
+        if (!inFlight.begin(candidate.id)) {
+            return
+        }
+
+        try {
+            when (val decision = attemptDecision(OutgoingTransportState.RETRYING, candidate.id)) {
+                AttemptDecision.Send -> Unit
+                is AttemptDecision.Wait -> {
+                    Log.d(
+                        TAG,
+                        "outbox edit wait reason=$reason edit=${candidate.id} " +
+                            "delayMillis=${decision.delayMillis}"
+                    )
+                    scheduleWake(decision.delayMillis, reason = "delayed-$reason")
+                    return
+                }
+                AttemptDecision.Skip -> return
+            }
+
+            val editEventId = matrixClientService.sendTextEdit(
+                roomId = candidate.roomId,
+                eventId = candidate.eventId,
+                body = candidate.body,
+                transactionId = candidate.transactionId
+            )
+            retryBackoff.clear(candidate.id)
+            localCacheRepository.markOutgoingEditDispatchAccepted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                eventId = candidate.eventId,
+                transactionId = candidate.transactionId,
+                editEventId = editEventId,
+                body = candidate.body
+            )
+            Log.d(
+                TAG,
+                "outbox edited edit=${candidate.id} target=${candidate.eventId} " +
+                    "event=$editEventId"
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            completeEditFailure(candidate, error)
+        } finally {
+            inFlight.end(candidate.id)
+        }
+    }
+
     private suspend fun completeFailure(candidate: OutgoingTextEnvelope, error: Throwable) {
         val failureMessage = error.message ?: error.javaClass.simpleName
         if (error.isRetryableTransportError()) {
@@ -361,6 +420,31 @@ class OutgoingOutboxService(
             )
         )
         Log.w(TAG, "outbox redaction failed envelope=${candidate.id}", error)
+    }
+
+    private suspend fun completeEditFailure(candidate: OutgoingEditEnvelope, error: Throwable) {
+        val failureMessage = error.message ?: error.javaClass.simpleName
+        if (error.isRetryableTransportError()) {
+            val delayMillis = retryBackoff.scheduleRetry(candidate.id)
+            scheduleWake(delayMillis, reason = "retryable-edit-failure")
+            Log.d(TAG, "outbox edit retrying edit=${candidate.id} delayMillis=$delayMillis")
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        localCacheRepository.markOutgoingEditDispatchTerminalFailure(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            eventId = candidate.eventId,
+            transactionId = candidate.transactionId
+        )
+        _sendFailures.tryEmit(
+            OutgoingOutboxFailure(
+                roomId = candidate.roomId,
+                message = failureMessage
+            )
+        )
+        Log.w(TAG, "outbox edit failed edit=${candidate.id}", error)
     }
 
     private fun attemptDecision(envelope: OutgoingTextEnvelope): AttemptDecision {

@@ -1,6 +1,7 @@
 package com.zyna.app.ui.app
 
 import androidx.compose.runtime.Composable
+import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.ui.auth.LoginScreen
@@ -21,6 +22,8 @@ fun ZynaApp(
     onSendChatMessage: (String) -> Boolean,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
     onCancelReply: () -> Unit,
+    onEditMessage: (MatrixEditTarget) -> Unit,
+    onCancelEdit: () -> Unit,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
@@ -63,12 +66,15 @@ fun ZynaApp(
             isSendingMessage = state.isSendingChatMessage,
             sendErrorMessage = state.chatSendErrorMessage,
             replyTarget = state.chatReplyTarget,
+            editTarget = state.chatEditTarget,
             onRefresh = onRefreshChat,
             onBack = onCloseChat,
             onLoadOlder = onLoadOlderChatMessages,
             onSendMessage = onSendChatMessage,
             onReplyToMessage = onReplyToMessage,
             onCancelReply = onCancelReply,
+            onEditMessage = onEditMessage,
+            onCancelEdit = onCancelEdit,
             onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
             onRedactMessage = onRedactMessage,

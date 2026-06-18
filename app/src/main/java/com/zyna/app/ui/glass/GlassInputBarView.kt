@@ -93,9 +93,12 @@ class GlassInputBarView @JvmOverloads constructor(
 
     var onSendMessage: (String) -> Boolean = { false }
     var onPreviewCancelled: () -> Unit = {}
+    var onEditCancelled: () -> Unit = {}
     private var isSending = false
     private var pendingSentText: String? = null
     private var preview: GlassComposerPreview? = null
+    private var editPreview: GlassComposerPreview? = null
+    private var editDraftKey: String? = null
     private var palette: GlassPalette? = null
     private var vulkanGlassBackgroundEnabled = false
     private var adaptiveMaterial = GlassAdaptiveMaterial.Light
@@ -132,7 +135,13 @@ class GlassInputBarView @JvmOverloads constructor(
             }
         }
         sendButton.setOnClickListener { sendDraft() }
-        previewCancel.setOnClickListener { onPreviewCancelled() }
+        previewCancel.setOnClickListener {
+            if (editPreview != null) {
+                onEditCancelled()
+            } else {
+                onPreviewCancelled()
+            }
+        }
     }
 
     fun setPalette(palette: GlassPalette) {
@@ -245,15 +254,48 @@ class GlassInputBarView @JvmOverloads constructor(
             return
         }
         this.preview = preview
-        val isVisible = preview != null
-        previewTitle.text = preview?.title.orEmpty()
-        previewBody.text = preview?.body.orEmpty()
+        updatePreviewViews()
+    }
+
+    fun setEditPreview(preview: GlassComposerPreview?) {
+        if (editPreview == preview) {
+            return
+        }
+        editPreview = preview
+        updatePreviewViews()
+    }
+
+    fun setEditDraft(key: String?, body: String?) {
+        if (editDraftKey == key) {
+            return
+        }
+        val hadEditDraft = editDraftKey != null
+        editDraftKey = key
+        if (key != null) {
+            val draft = body.orEmpty()
+            editText.setText(draft)
+            editText.setSelection(draft.length)
+            editText.requestFocus()
+        } else if (hadEditDraft && pendingSentText == null) {
+            editText.text?.clear()
+        }
+    }
+
+    private fun updatePreviewViews() {
+        val activePreview = activePreview()
+        val isVisible = activePreview != null
+        previewTitle.text = activePreview?.title.orEmpty()
+        previewBody.text = activePreview?.body.orEmpty()
         previewTitle.visibility = if (isVisible) VISIBLE else GONE
         previewBody.visibility = if (isVisible) VISIBLE else GONE
         previewCancel.visibility = if (isVisible) VISIBLE else GONE
         applyInputGlassState()
         requestLayout()
         controller.invalidateRegions()
+    }
+
+    private fun activePreview(): GlassComposerPreview? {
+        return editPreview ?: preview
     }
 
     internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
@@ -266,7 +308,7 @@ class GlassInputBarView @JvmOverloads constructor(
             return
         }
 
-        if (preview != null && previewGlass.width > 0 && previewGlass.height > 0) {
+        if (activePreview() != null && previewGlass.width > 0 && previewGlass.height > 0) {
             out.add(
                 VulkanChatGlassRect(
                     left = (left + previewGlass.left).toFloat(),
@@ -310,7 +352,7 @@ class GlassInputBarView @JvmOverloads constructor(
 
     private fun applyInputGlassState() {
         val glassEnabled = !vulkanGlassBackgroundEnabled && !DISABLE_CHAT_INPUT_HWUI_GLASS
-        previewGlass.visibility = if (glassEnabled && preview != null) VISIBLE else GONE
+        previewGlass.visibility = if (glassEnabled && activePreview() != null) VISIBLE else GONE
         editGlass.visibility = if (glassEnabled) VISIBLE else GONE
         attachButton.setGlassEnabled(glassEnabled)
         sendButton.setGlassEnabled(glassEnabled)
@@ -344,7 +386,7 @@ class GlassInputBarView @JvmOverloads constructor(
                 buttonSize * 2 -
                 gap * 2
             ).coerceAtLeast(80.dpToPx(density))
-        val hasPreview = preview != null
+        val hasPreview = activePreview() != null
 
         editText.measure(
             MeasureSpec.makeMeasureSpec(availableEditWidth, MeasureSpec.EXACTLY),
@@ -397,7 +439,7 @@ class GlassInputBarView @JvmOverloads constructor(
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         val height = bottom - top
         val editHeight = editGlass.measuredHeight
-        val hasPreview = preview != null
+        val hasPreview = activePreview() != null
         val rowTop = verticalPadding + if (hasPreview) previewHeight + gap else 0
         val rowHeight = max(buttonSize, editHeight)
         val centerY = rowTop + rowHeight / 2

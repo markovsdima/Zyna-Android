@@ -38,6 +38,7 @@ constexpr uint32_t kMaxFrameTraceQueries = 32;
 constexpr float kFrameTraceSlowThresholdMs = 8.33f;
 constexpr float kPaintSplashBlobSurfaceScale = 0.5f;
 constexpr float kPaintSplashGlassSurfaceScale = 0.5f;
+constexpr float kPaintSplashGlassSphSurfaceScale = 1.0f;
 constexpr uint32_t kMaxPaintSplashGlassHitTargets = 16;
 constexpr uint32_t kMaxPaintSplashGlassDroplets = 160;
 constexpr uint32_t kPaintSplashGlassCellCols = 12;
@@ -46,9 +47,15 @@ constexpr uint32_t kPaintSplashGlassCellsPerTarget =
     kPaintSplashGlassCellCols * kPaintSplashGlassCellRows;
 constexpr uint32_t kPaintSplashGlassCellCount =
     kMaxPaintSplashGlassHitTargets * kPaintSplashGlassCellsPerTarget;
+constexpr uint32_t kPaintSplashGlassNozzleSlotsPerTarget = 8;
+constexpr uint32_t kPaintSplashGlassSphParticlesPerNozzle = 4;
+constexpr uint32_t kPaintSplashGlassSphParticlesPerTarget =
+    kPaintSplashGlassNozzleSlotsPerTarget * kPaintSplashGlassSphParticlesPerNozzle;
+constexpr uint32_t kMaxPaintSplashGlassSphParticles =
+    kMaxPaintSplashGlassHitTargets * kPaintSplashGlassSphParticlesPerTarget;
 constexpr int64_t kPaintSplashGlassDripDurationNs = 3200000000LL;
 constexpr uint32_t kMaxBackdropRects = 16;
-constexpr uint32_t kBackdropRectFloatCount = 10;
+constexpr uint32_t kBackdropRectFloatCount = 11;
 constexpr size_t kMaxBackdropImportCacheEntries = 6;
 constexpr VkDeviceSize kBackdropStatsBufferSize = sizeof(float) * 8;
 
@@ -78,6 +85,22 @@ alignas(uint32_t) constexpr uint32_t kPaintSplashGlassImpactFragSpv[] =
 
 alignas(uint32_t) constexpr uint32_t kPaintSplashGlassSurfaceCompSpv[] =
 #include "paint_splash_glass_surface_comp_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kPaintSplashGlassSphUpdateCompSpv[] =
+#include "paint_splash_glass_sph_update_comp_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kPaintSplashGlassSphVertSpv[] =
+#include "paint_splash_glass_sph_vert_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kPaintSplashGlassSphFragSpv[] =
+#include "paint_splash_glass_sph_frag_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kPaintSplashGlassSphCompositeFragSpv[] =
+#include "paint_splash_glass_sph_composite_frag_spv.inc"
 ;
 
 alignas(uint32_t) constexpr uint32_t kPaintSplashCompositeVertSpv[] =
@@ -182,6 +205,30 @@ struct GlassSurfacePushConstants {
     int32_t dispatchOrigin[2];
 };
 
+struct GpuGlassSphParticle {
+    float positionVelocity[4];
+    float color[4];
+    float radiusMassDensityPressure[4];
+    float ageLifetimeSeedActive[4];
+    float anchorStrengthAnchorState[4];
+    float normalCurvatureProfilePad[4];
+};
+
+struct GlassSphUpdatePushConstants {
+    float timeStep;
+    uint32_t hitTargetCount;
+    uint32_t particleCapacity;
+    uint32_t _padding0;
+    float viewportSize[2];
+    float _padding1[2];
+};
+
+struct GlassSphRenderPushConstants {
+    float viewportSize[2];
+    float visibleFade;
+    float _padding0;
+};
+
 static_assert(sizeof(GpuDroplet) == sizeof(float) * 16);
 static_assert(offsetof(GpuDroplet, position) == 0);
 static_assert(offsetof(GpuDroplet, velocity) == 8);
@@ -191,9 +238,13 @@ static_assert(offsetof(GpuDroplet, baseSize) == 40);
 static_assert(offsetof(GpuDroplet, phase) == 60);
 static_assert(sizeof(GpuGlassHitTarget) == sizeof(float) * 8);
 static_assert(sizeof(GpuGlassDroplet) == sizeof(float) * 16);
+static_assert(sizeof(GpuGlassSphParticle) == sizeof(float) * 24);
 static_assert(offsetof(SplashUpdatePushConstants, itemOrigin) == 16);
 static_assert(offsetof(GlassSurfacePushConstants, dispatchOrigin) == 16);
 static_assert(sizeof(GlassSurfacePushConstants) == 24);
+static_assert(offsetof(GlassSphUpdatePushConstants, viewportSize) == 16);
+static_assert(sizeof(GlassSphUpdatePushConstants) == 32);
+static_assert(sizeof(GlassSphRenderPushConstants) == 16);
 
 struct BackdropPushConstants {
     float viewportSize[2];
@@ -245,6 +296,7 @@ struct BackdropRect {
     float glassThickness;
     float adaptiveAppearance;
     float adaptiveContrast;
+    float shapeKind;
 };
 
 struct BackdropImportEntry {
@@ -1131,6 +1183,9 @@ private:
             createParticlePipelineLocked() &&
             createPaintSplashGlassImpactPipelineLocked() &&
             createPaintSplashGlassSurfacePipelineLocked() &&
+            createPaintSplashGlassSphUpdatePipelineLocked() &&
+            createPaintSplashGlassSphFieldPipelineLocked() &&
+            createPaintSplashGlassSphCompositePipelineLocked() &&
             createBackdropStatsPipelineLocked() &&
             createBackdropOverlayPipelineLocked() &&
             createBackdropBlurPipelineLocked() &&
@@ -1301,7 +1356,8 @@ private:
             !createBlobDescriptorResourcesLocked() ||
             !createPaintSplashGlassRenderPassLocked() ||
             !createPaintSplashGlassImagesLocked() ||
-            !createPaintSplashGlassImpactFramebufferLocked()) {
+            !createPaintSplashGlassImpactFramebufferLocked() ||
+            !createPaintSplashGlassSphFramebufferLocked()) {
             return false;
         }
         return true;
@@ -1584,12 +1640,12 @@ private:
         );
     }
 
-    bool createPaintSplashGlassImageLocked(
+    bool createPaintSplashGlassImageWithExtentLocked(
+        const VkExtent2D& imageExtent,
         VkImage& image,
         VkDeviceMemory& memory,
         VkImageView& imageView
     ) {
-        const VkExtent2D imageExtent = paintSplashGlassSurfaceExtentLocked();
         if (imageExtent.width == 0 || imageExtent.height == 0) {
             return false;
         }
@@ -1662,6 +1718,19 @@ private:
         );
     }
 
+    bool createPaintSplashGlassImageLocked(
+        VkImage& image,
+        VkDeviceMemory& memory,
+        VkImageView& imageView
+    ) {
+        return createPaintSplashGlassImageWithExtentLocked(
+            paintSplashGlassSurfaceExtentLocked(),
+            image,
+            memory,
+            imageView
+        );
+    }
+
     void destroyPaintSplashGlassImageLocked(
         VkImage& image,
         VkDeviceMemory& memory,
@@ -1690,9 +1759,14 @@ private:
     void destroyPaintSplashGlassImagesLocked() {
         if (device_ == VK_NULL_HANDLE) {
             paintSplashGlassImpactFramebuffer_ = VK_NULL_HANDLE;
+            paintSplashGlassSphFramebuffer_ = VK_NULL_HANDLE;
         } else if (paintSplashGlassImpactFramebuffer_ != VK_NULL_HANDLE) {
             vkDestroyFramebuffer(device_, paintSplashGlassImpactFramebuffer_, nullptr);
             paintSplashGlassImpactFramebuffer_ = VK_NULL_HANDLE;
+        }
+        if (device_ != VK_NULL_HANDLE && paintSplashGlassSphFramebuffer_ != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, paintSplashGlassSphFramebuffer_, nullptr);
+            paintSplashGlassSphFramebuffer_ = VK_NULL_HANDLE;
         }
 
         destroyPaintSplashGlassImageLocked(
@@ -1725,6 +1799,11 @@ private:
             paintSplashGlassImpactVelocityMemory_,
             paintSplashGlassImpactVelocityImageView_
         );
+        destroyPaintSplashGlassImageLocked(
+            paintSplashGlassSphImage_,
+            paintSplashGlassSphMemory_,
+            paintSplashGlassSphImageView_
+        );
 
         paintSplashGlassSurfaceLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassSurfaceWorkLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1732,9 +1811,11 @@ private:
         paintSplashGlassVelocityWorkLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassImpactLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassImpactVelocityLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        paintSplashGlassSphLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassNeedsReset_ = true;
         paintSplashGlassDripEndNs_ = 0;
         paintSplashGlassLastSurfaceUpdateNs_ = 0;
+        paintSplashGlassLastSphUpdateNs_ = 0;
         paintSplashGlassSurfaceAge_ = 0.0f;
     }
 
@@ -1744,7 +1825,8 @@ private:
             paintSplashGlassVelocityImageView_ != VK_NULL_HANDLE &&
             paintSplashGlassVelocityWorkImageView_ != VK_NULL_HANDLE &&
             paintSplashGlassImpactImageView_ != VK_NULL_HANDLE &&
-            paintSplashGlassImpactVelocityImageView_ != VK_NULL_HANDLE) {
+            paintSplashGlassImpactVelocityImageView_ != VK_NULL_HANDLE &&
+            paintSplashGlassSphImageView_ != VK_NULL_HANDLE) {
             return true;
         }
 
@@ -1779,6 +1861,12 @@ private:
                 paintSplashGlassImpactVelocityImage_,
                 paintSplashGlassImpactVelocityMemory_,
                 paintSplashGlassImpactVelocityImageView_
+            ) &&
+            createPaintSplashGlassImageWithExtentLocked(
+                paintSplashGlassSphExtentLocked(),
+                paintSplashGlassSphImage_,
+                paintSplashGlassSphMemory_,
+                paintSplashGlassSphImageView_
             );
         if (!ok) {
             destroyPaintSplashGlassImagesLocked();
@@ -1791,6 +1879,7 @@ private:
         paintSplashGlassVelocityWorkLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassImpactLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassImpactVelocityLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+        paintSplashGlassSphLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
         paintSplashGlassNeedsReset_ = true;
         return true;
     }
@@ -1833,9 +1922,43 @@ private:
         );
     }
 
+    bool createPaintSplashGlassSphFramebufferLocked() {
+        if (paintSplashGlassSphFramebuffer_ != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (blobRenderPass_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphImageView_ == VK_NULL_HANDLE) {
+            return false;
+        }
+
+        const VkExtent2D imageExtent = paintSplashGlassSphExtentLocked();
+        if (imageExtent.width == 0 || imageExtent.height == 0) {
+            return false;
+        }
+
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = blobRenderPass_;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = &paintSplashGlassSphImageView_;
+        framebufferInfo.width = imageExtent.width;
+        framebufferInfo.height = imageExtent.height;
+        framebufferInfo.layers = 1;
+        return isOk(
+            vkCreateFramebuffer(
+                device_,
+                &framebufferInfo,
+                nullptr,
+                &paintSplashGlassSphFramebuffer_
+            ),
+            "vkCreateFramebuffer paint splash glass sph failed"
+        );
+    }
+
     bool createSplashDescriptorResourcesLocked() {
         if (!ensurePaintSplashGlassTargetBufferLocked() ||
-            !ensurePaintSplashGlassEventBuffersLocked()) {
+            !ensurePaintSplashGlassEventBuffersLocked() ||
+            !ensurePaintSplashGlassSphBuffersLocked()) {
             return false;
         }
 
@@ -1904,7 +2027,10 @@ private:
             }
         }
         return createPaintSplashGlassImpactDescriptorResourcesLocked() &&
-            createPaintSplashGlassSurfaceDescriptorResourcesLocked();
+            createPaintSplashGlassSurfaceDescriptorResourcesLocked() &&
+            createPaintSplashGlassSphUpdateDescriptorResourcesLocked() &&
+            createPaintSplashGlassSphFieldDescriptorResourcesLocked() &&
+            createPaintSplashGlassSphCompositeDescriptorResourcesLocked();
     }
 
     bool createPaintSplashGlassImpactDescriptorResourcesLocked() {
@@ -2147,6 +2273,324 @@ private:
         );
     }
 
+    bool createPaintSplashGlassSphUpdateDescriptorResourcesLocked() {
+        if (paintSplashGlassSphUpdateDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorSetLayoutBinding, 5> bindings{};
+            for (uint32_t index = 0; index < 3; ++index) {
+                bindings[index].binding = index;
+                bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                bindings[index].descriptorCount = 1;
+                bindings[index].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            }
+            for (uint32_t index = 3; index < 5; ++index) {
+                bindings[index].binding = index;
+                bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                bindings[index].descriptorCount = 1;
+                bindings[index].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            }
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &paintSplashGlassSphUpdateDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout paint splash glass sph update failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (paintSplashGlassSphUpdateDescriptorPool_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorPoolSize, 2> poolSizes{};
+            poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSizes[0].descriptorCount = 3;
+            poolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSizes[1].descriptorCount = 2;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 1;
+            poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+            poolInfo.pPoolSizes = poolSizes.data();
+            if (!isOk(
+                    vkCreateDescriptorPool(
+                        device_,
+                        &poolInfo,
+                        nullptr,
+                        &paintSplashGlassSphUpdateDescriptorPool_
+                    ),
+                    "vkCreateDescriptorPool paint splash glass sph update failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (paintSplashGlassSphUpdateDescriptorSet_ == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateInfo.descriptorPool = paintSplashGlassSphUpdateDescriptorPool_;
+            allocateInfo.descriptorSetCount = 1;
+            allocateInfo.pSetLayouts = &paintSplashGlassSphUpdateDescriptorSetLayout_;
+            if (!isOk(
+                    vkAllocateDescriptorSets(
+                        device_,
+                        &allocateInfo,
+                        &paintSplashGlassSphUpdateDescriptorSet_
+                    ),
+                    "vkAllocateDescriptorSets paint splash glass sph update failed"
+                )) {
+                return false;
+            }
+        }
+
+        updatePaintSplashGlassSphUpdateDescriptorLocked();
+        return true;
+    }
+
+    void updatePaintSplashGlassSphUpdateDescriptorLocked() {
+        if (paintSplashGlassSphUpdateDescriptorSet_ == VK_NULL_HANDLE ||
+            blobSampler_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphParticleBuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphParticleWorkBuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassTargetBuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSurfaceImageView_ == VK_NULL_HANDLE ||
+            paintSplashGlassVelocityImageView_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        std::array<VkDescriptorBufferInfo, 3> buffers{};
+        buffers[0].buffer = paintSplashGlassSphParticleBuffer_;
+        buffers[0].range = sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
+        buffers[1].buffer = paintSplashGlassSphParticleWorkBuffer_;
+        buffers[1].range = sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
+        buffers[2].buffer = paintSplashGlassTargetBuffer_;
+        buffers[2].range = sizeof(GpuGlassHitTarget) * kMaxPaintSplashGlassHitTargets;
+
+        std::array<VkDescriptorImageInfo, 2> images{};
+        images[0].sampler = blobSampler_;
+        images[0].imageView = paintSplashGlassSurfaceImageView_;
+        images[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        images[1].sampler = blobSampler_;
+        images[1].imageView = paintSplashGlassVelocityImageView_;
+        images[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        std::array<VkWriteDescriptorSet, 5> writes{};
+        for (uint32_t index = 0; index < 3; ++index) {
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = paintSplashGlassSphUpdateDescriptorSet_;
+            writes[index].dstBinding = index;
+            writes[index].descriptorCount = 1;
+            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[index].pBufferInfo = &buffers[index];
+        }
+        for (uint32_t index = 0; index < 2; ++index) {
+            const uint32_t writeIndex = index + 3;
+            writes[writeIndex].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[writeIndex].dstSet = paintSplashGlassSphUpdateDescriptorSet_;
+            writes[writeIndex].dstBinding = writeIndex;
+            writes[writeIndex].descriptorCount = 1;
+            writes[writeIndex].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[writeIndex].pImageInfo = &images[index];
+        }
+
+        vkUpdateDescriptorSets(
+            device_,
+            static_cast<uint32_t>(writes.size()),
+            writes.data(),
+            0,
+            nullptr
+        );
+    }
+
+    bool createPaintSplashGlassSphFieldDescriptorResourcesLocked() {
+        if (paintSplashGlassSphFieldDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = 0;
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            binding.descriptorCount = 1;
+            binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = 1;
+            layoutInfo.pBindings = &binding;
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &paintSplashGlassSphFieldDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout paint splash glass sph field failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (paintSplashGlassSphFieldDescriptorPool_ == VK_NULL_HANDLE) {
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            poolSize.descriptorCount = 1;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 1;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = &poolSize;
+            if (!isOk(
+                    vkCreateDescriptorPool(
+                        device_,
+                        &poolInfo,
+                        nullptr,
+                        &paintSplashGlassSphFieldDescriptorPool_
+                    ),
+                    "vkCreateDescriptorPool paint splash glass sph field failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (paintSplashGlassSphFieldDescriptorSet_ == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateInfo.descriptorPool = paintSplashGlassSphFieldDescriptorPool_;
+            allocateInfo.descriptorSetCount = 1;
+            allocateInfo.pSetLayouts = &paintSplashGlassSphFieldDescriptorSetLayout_;
+            if (!isOk(
+                    vkAllocateDescriptorSets(
+                        device_,
+                        &allocateInfo,
+                        &paintSplashGlassSphFieldDescriptorSet_
+                    ),
+                    "vkAllocateDescriptorSets paint splash glass sph field failed"
+                )) {
+                return false;
+            }
+        }
+
+        updatePaintSplashGlassSphFieldDescriptorLocked();
+        return true;
+    }
+
+    void updatePaintSplashGlassSphFieldDescriptorLocked() {
+        if (paintSplashGlassSphFieldDescriptorSet_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphParticleBuffer_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        VkDescriptorBufferInfo buffer{};
+        buffer.buffer = paintSplashGlassSphParticleBuffer_;
+        buffer.offset = 0;
+        buffer.range = sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = paintSplashGlassSphFieldDescriptorSet_;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &buffer;
+        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    }
+
+    bool createPaintSplashGlassSphCompositeDescriptorResourcesLocked() {
+        if (paintSplashGlassSphCompositeDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = 0;
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            binding.descriptorCount = 1;
+            binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = 1;
+            layoutInfo.pBindings = &binding;
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &paintSplashGlassSphCompositeDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout paint splash glass sph composite failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (paintSplashGlassSphCompositeDescriptorPool_ == VK_NULL_HANDLE) {
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSize.descriptorCount = 1;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 1;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = &poolSize;
+            if (!isOk(
+                    vkCreateDescriptorPool(
+                        device_,
+                        &poolInfo,
+                        nullptr,
+                        &paintSplashGlassSphCompositeDescriptorPool_
+                    ),
+                    "vkCreateDescriptorPool paint splash glass sph composite failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (paintSplashGlassSphCompositeDescriptorSet_ == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateInfo.descriptorPool = paintSplashGlassSphCompositeDescriptorPool_;
+            allocateInfo.descriptorSetCount = 1;
+            allocateInfo.pSetLayouts = &paintSplashGlassSphCompositeDescriptorSetLayout_;
+            if (!isOk(
+                    vkAllocateDescriptorSets(
+                        device_,
+                        &allocateInfo,
+                        &paintSplashGlassSphCompositeDescriptorSet_
+                    ),
+                    "vkAllocateDescriptorSets paint splash glass sph composite failed"
+                )) {
+                return false;
+            }
+        }
+
+        updatePaintSplashGlassSphCompositeDescriptorLocked();
+        return true;
+    }
+
+    void updatePaintSplashGlassSphCompositeDescriptorLocked() {
+        if (paintSplashGlassSphCompositeDescriptorSet_ == VK_NULL_HANDLE ||
+            blobSampler_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphImageView_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        VkDescriptorImageInfo image{};
+        image.sampler = blobSampler_;
+        image.imageView = paintSplashGlassSphImageView_;
+        image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = paintSplashGlassSphCompositeDescriptorSet_;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &image;
+        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+    }
+
     bool ensurePaintSplashGlassEventBuffersLocked() {
         if (paintSplashGlassEventBuffer_ != VK_NULL_HANDLE &&
             paintSplashGlassEventMemory_ != VK_NULL_HANDLE &&
@@ -2181,6 +2625,38 @@ private:
                 paintSplashGlassCellMemory_
             )) {
             destroyPaintSplashGlassEventBuffersLocked();
+            return false;
+        }
+        paintSplashGlassNeedsReset_ = true;
+        return true;
+    }
+
+    bool ensurePaintSplashGlassSphBuffersLocked() {
+        if (paintSplashGlassSphParticleBuffer_ != VK_NULL_HANDLE &&
+            paintSplashGlassSphParticleMemory_ != VK_NULL_HANDLE &&
+            paintSplashGlassSphParticleWorkBuffer_ != VK_NULL_HANDLE &&
+            paintSplashGlassSphParticleWorkMemory_ != VK_NULL_HANDLE) {
+            return true;
+        }
+
+        destroyPaintSplashGlassSphBuffersLocked();
+        const VkDeviceSize bufferSize =
+            sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
+        if (!createBufferLocked(
+                bufferSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                paintSplashGlassSphParticleBuffer_,
+                paintSplashGlassSphParticleMemory_
+            ) ||
+            !createBufferLocked(
+                bufferSize,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                paintSplashGlassSphParticleWorkBuffer_,
+                paintSplashGlassSphParticleWorkMemory_
+            )) {
+            destroyPaintSplashGlassSphBuffersLocked();
             return false;
         }
         paintSplashGlassNeedsReset_ = true;
@@ -2238,7 +2714,7 @@ private:
         for (uint32_t index = 0;
              index < static_cast<uint32_t>(backdropRects_.size()) &&
                  paintSplashGlassTargetCount_ < kMaxPaintSplashGlassHitTargets;
-             ++index) {
+            ++index) {
             const BackdropRect& rect = backdropRects_[index];
             const float width = rect.right - rect.left;
             const float height = rect.bottom - rect.top;
@@ -2254,7 +2730,7 @@ private:
             target.rect[3] = height;
             target.params[0] = std::max(0.0f, rect.cornerRadius);
             target.params[1] = 0.16f * std::clamp(rect.opacity, 0.0f, 1.0f);
-            target.params[2] = 0.0f;
+            target.params[2] = rect.shapeKind;
             target.params[3] =
                 static_cast<float>(paintSplashGlassTargetCount_) * 0.91f +
                 rect.left * 0.017f +
@@ -2318,6 +2794,32 @@ private:
         if (paintSplashGlassCellMemory_ != VK_NULL_HANDLE) {
             vkFreeMemory(device_, paintSplashGlassCellMemory_, nullptr);
             paintSplashGlassCellMemory_ = VK_NULL_HANDLE;
+        }
+    }
+
+    void destroyPaintSplashGlassSphBuffersLocked() {
+        if (device_ == VK_NULL_HANDLE) {
+            paintSplashGlassSphParticleBuffer_ = VK_NULL_HANDLE;
+            paintSplashGlassSphParticleMemory_ = VK_NULL_HANDLE;
+            paintSplashGlassSphParticleWorkBuffer_ = VK_NULL_HANDLE;
+            paintSplashGlassSphParticleWorkMemory_ = VK_NULL_HANDLE;
+            return;
+        }
+        if (paintSplashGlassSphParticleBuffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, paintSplashGlassSphParticleBuffer_, nullptr);
+            paintSplashGlassSphParticleBuffer_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphParticleMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, paintSplashGlassSphParticleMemory_, nullptr);
+            paintSplashGlassSphParticleMemory_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphParticleWorkBuffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, paintSplashGlassSphParticleWorkBuffer_, nullptr);
+            paintSplashGlassSphParticleWorkBuffer_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphParticleWorkMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, paintSplashGlassSphParticleWorkMemory_, nullptr);
+            paintSplashGlassSphParticleWorkMemory_ = VK_NULL_HANDLE;
         }
     }
 
@@ -4405,6 +4907,360 @@ private:
         return didCreatePipeline;
     }
 
+    bool createPaintSplashGlassSphUpdatePipelineLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(GlassSphUpdatePushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &paintSplashGlassSphUpdateDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(
+                    device_,
+                    &layoutInfo,
+                    nullptr,
+                    &paintSplashGlassSphUpdatePipelineLayout_
+                ),
+                "vkCreatePipelineLayout paint splash glass sph update failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule computeShader = createShaderModuleLocked(
+            kPaintSplashGlassSphUpdateCompSpv,
+            sizeof(kPaintSplashGlassSphUpdateCompSpv)
+        );
+        if (computeShader == VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphUpdatePipelineLayout_, nullptr);
+            paintSplashGlassSphUpdatePipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo computeStage{};
+        computeStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        computeStage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        computeStage.module = computeShader;
+        computeStage.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = computeStage;
+        pipelineInfo.layout = paintSplashGlassSphUpdatePipelineLayout_;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateComputePipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &paintSplashGlassSphUpdatePipeline_
+            ),
+            "vkCreateComputePipelines paint splash glass sph update failed"
+        );
+
+        vkDestroyShaderModule(device_, computeShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphUpdatePipelineLayout_, nullptr);
+            paintSplashGlassSphUpdatePipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
+    }
+
+    bool createPaintSplashGlassSphFieldPipelineLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(GlassSphRenderPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &paintSplashGlassSphFieldDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(
+                    device_,
+                    &layoutInfo,
+                    nullptr,
+                    &paintSplashGlassSphFieldPipelineLayout_
+                ),
+                "vkCreatePipelineLayout paint splash glass sph field failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule vertexShader = createShaderModuleLocked(
+            kPaintSplashGlassSphVertSpv,
+            sizeof(kPaintSplashGlassSphVertSpv)
+        );
+        VkShaderModule fragmentShader = createShaderModuleLocked(
+            kPaintSplashGlassSphFragSpv,
+            sizeof(kPaintSplashGlassSphFragSpv)
+        );
+        if (vertexShader == VK_NULL_HANDLE || fragmentShader == VK_NULL_HANDLE) {
+            if (vertexShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, vertexShader, nullptr);
+            }
+            if (fragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, fragmentShader, nullptr);
+            }
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphFieldPipelineLayout_, nullptr);
+            paintSplashGlassSphFieldPipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo vertexStage{};
+        vertexStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertexStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertexStage.module = vertexShader;
+        vertexStage.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragmentStage{};
+        fragmentStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragmentStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragmentStage.module = fragmentShader;
+        fragmentStage.pName = "main";
+
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+            vertexStage,
+            fragmentStage
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        blendAttachment.blendEnable = VK_TRUE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &blendAttachment;
+
+        const std::array<VkDynamicState, 2> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        pipelineInfo.pStages = shaderStages.data();
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = paintSplashGlassSphFieldPipelineLayout_;
+        pipelineInfo.renderPass = blobRenderPass_;
+        pipelineInfo.subpass = 0;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateGraphicsPipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &paintSplashGlassSphFieldPipeline_
+            ),
+            "vkCreateGraphicsPipelines paint splash glass sph field failed"
+        );
+
+        vkDestroyShaderModule(device_, fragmentShader, nullptr);
+        vkDestroyShaderModule(device_, vertexShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphFieldPipelineLayout_, nullptr);
+            paintSplashGlassSphFieldPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
+    }
+
+    bool createPaintSplashGlassSphCompositePipelineLocked() {
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &paintSplashGlassSphCompositeDescriptorSetLayout_;
+        if (!isOk(
+                vkCreatePipelineLayout(
+                    device_,
+                    &layoutInfo,
+                    nullptr,
+                    &paintSplashGlassSphCompositePipelineLayout_
+                ),
+                "vkCreatePipelineLayout paint splash glass sph composite failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule vertexShader = createShaderModuleLocked(
+            kPaintSplashCompositeVertSpv,
+            sizeof(kPaintSplashCompositeVertSpv)
+        );
+        VkShaderModule fragmentShader = createShaderModuleLocked(
+            kPaintSplashGlassSphCompositeFragSpv,
+            sizeof(kPaintSplashGlassSphCompositeFragSpv)
+        );
+        if (vertexShader == VK_NULL_HANDLE || fragmentShader == VK_NULL_HANDLE) {
+            if (vertexShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, vertexShader, nullptr);
+            }
+            if (fragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, fragmentShader, nullptr);
+            }
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphCompositePipelineLayout_, nullptr);
+            paintSplashGlassSphCompositePipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkPipelineShaderStageCreateInfo vertexStage{};
+        vertexStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertexStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertexStage.module = vertexShader;
+        vertexStage.pName = "main";
+
+        VkPipelineShaderStageCreateInfo fragmentStage{};
+        fragmentStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragmentStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragmentStage.module = fragmentShader;
+        fragmentStage.pName = "main";
+
+        const std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
+            vertexStage,
+            fragmentStage
+        };
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        blendAttachment.blendEnable = VK_TRUE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &blendAttachment;
+
+        const std::array<VkDynamicState, 2> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        pipelineInfo.pStages = shaderStages.data();
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = paintSplashGlassSphCompositePipelineLayout_;
+        pipelineInfo.renderPass = renderPass_;
+        pipelineInfo.subpass = 0;
+
+        const bool didCreatePipeline = isOk(
+            vkCreateGraphicsPipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &paintSplashGlassSphCompositePipeline_
+            ),
+            "vkCreateGraphicsPipelines paint splash glass sph composite failed"
+        );
+
+        vkDestroyShaderModule(device_, fragmentShader, nullptr);
+        vkDestroyShaderModule(device_, vertexShader, nullptr);
+        if (!didCreatePipeline) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphCompositePipelineLayout_, nullptr);
+            paintSplashGlassSphCompositePipelineLayout_ = VK_NULL_HANDLE;
+        }
+        return didCreatePipeline;
+    }
+
     VkShaderModule createShaderModuleLocked(const uint32_t* code, size_t byteSize) const {
         VkShaderModuleCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -5345,7 +6201,14 @@ private:
         writeFrameTraceTimestampLocked(commandBuffer, "stats");
         recordBackdropBlurPassesLocked(commandBuffer);
         writeFrameTraceTimestampLocked(commandBuffer, "blur");
-        recordCompositePassLocked(commandBuffer, imageIndex, hasPaintSplashes, paintSplashWorkRect);
+        recordCompositePassLocked(
+            commandBuffer,
+            imageIndex,
+            hasPaintSplashes,
+            hasPaintSplashGlassSurface,
+            frameTimeNs,
+            paintSplashWorkRect
+        );
         writeFrameTraceTimestampLocked(commandBuffer, "frameEnd");
         isOk(vkEndCommandBuffer(commandBuffer), "vkEndCommandBuffer failed");
     }
@@ -5781,7 +6644,17 @@ private:
             paintSplashGlassVelocityWorkImage_ == VK_NULL_HANDLE ||
             paintSplashGlassEventBuffer_ == VK_NULL_HANDLE ||
             paintSplashGlassCursorBuffer_ == VK_NULL_HANDLE ||
-            paintSplashGlassCellBuffer_ == VK_NULL_HANDLE) {
+            paintSplashGlassCellBuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphParticleBuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphParticleWorkBuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphUpdatePipeline_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphUpdatePipelineLayout_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphUpdateDescriptorSet_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFieldPipeline_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFieldPipelineLayout_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFieldDescriptorSet_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFramebuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphImage_ == VK_NULL_HANDLE) {
             return;
         }
 
@@ -5803,6 +6676,7 @@ private:
             recordResetPaintSplashGlassSurfaceLocked(commandBuffer);
             writeFrameTraceTimestampLocked(commandBuffer, "wetReset");
             paintSplashGlassLastSurfaceUpdateNs_ = frameTimeNs;
+            paintSplashGlassLastSphUpdateNs_ = frameTimeNs;
             paintSplashGlassSurfaceAge_ = 0.0f;
             paintSplashGlassNeedsReset_ = false;
         }
@@ -5813,6 +6687,10 @@ private:
         writeFrameTraceTimestampLocked(commandBuffer, "wetEventClear");
         recordPaintSplashGlassSurfaceComputeLocked(commandBuffer, frameTimeNs, surfaceWorkRect);
         writeFrameTraceTimestampLocked(commandBuffer, "wetCompute");
+        recordPaintSplashGlassSphUpdateLocked(commandBuffer, frameTimeNs);
+        writeFrameTraceTimestampLocked(commandBuffer, "sphCompute");
+        recordPaintSplashGlassSphFieldPassLocked(commandBuffer, frameTimeNs);
+        writeFrameTraceTimestampLocked(commandBuffer, "sphField");
     }
 
     VkExtent2D paintSplashGlassSurfaceExtentLocked() const {
@@ -5832,6 +6710,28 @@ private:
             static_cast<uint32_t>(
                 std::ceil(static_cast<float>(swapchainExtent_.height) *
                     kPaintSplashGlassSurfaceScale)
+            )
+        );
+        return extent;
+    }
+
+    VkExtent2D paintSplashGlassSphExtentLocked() const {
+        if (swapchainExtent_.width == 0 || swapchainExtent_.height == 0) {
+            return VkExtent2D{};
+        }
+        VkExtent2D extent{};
+        extent.width = std::max(
+            1u,
+            static_cast<uint32_t>(
+                std::ceil(static_cast<float>(swapchainExtent_.width) *
+                    kPaintSplashGlassSphSurfaceScale)
+            )
+        );
+        extent.height = std::max(
+            1u,
+            static_cast<uint32_t>(
+                std::ceil(static_cast<float>(swapchainExtent_.height) *
+                    kPaintSplashGlassSphSurfaceScale)
             )
         );
         return extent;
@@ -5934,6 +6834,125 @@ private:
         return rect;
     }
 
+    VkRect2D paintSplashGlassSphWorkRectLocked(const VkRect2D& screenRect) const {
+        if (screenRect.extent.width == 0 ||
+            screenRect.extent.height == 0 ||
+            swapchainExtent_.width == 0 ||
+            swapchainExtent_.height == 0) {
+            return VkRect2D{};
+        }
+
+        const VkExtent2D sphExtent = paintSplashGlassSphExtentLocked();
+        if (sphExtent.width == 0 || sphExtent.height == 0) {
+            return VkRect2D{};
+        }
+
+        const float scaleX =
+            static_cast<float>(sphExtent.width) /
+            static_cast<float>(swapchainExtent_.width);
+        const float scaleY =
+            static_cast<float>(sphExtent.height) /
+            static_cast<float>(swapchainExtent_.height);
+        const float screenLeft = static_cast<float>(screenRect.offset.x);
+        const float screenTop = static_cast<float>(screenRect.offset.y);
+        const float screenRight =
+            static_cast<float>(screenRect.offset.x) +
+            static_cast<float>(screenRect.extent.width);
+        const float screenBottom =
+            static_cast<float>(screenRect.offset.y) +
+            static_cast<float>(screenRect.extent.height);
+
+        const int32_t x0 = static_cast<int32_t>(
+            std::max(0.0f, std::floor(screenLeft * scaleX))
+        );
+        const int32_t y0 = static_cast<int32_t>(
+            std::max(0.0f, std::floor(screenTop * scaleY))
+        );
+        const uint32_t x1 = std::min(
+            sphExtent.width,
+            static_cast<uint32_t>(std::ceil(screenRight * scaleX))
+        );
+        const uint32_t y1 = std::min(
+            sphExtent.height,
+            static_cast<uint32_t>(std::ceil(screenBottom * scaleY))
+        );
+        if (x1 <= static_cast<uint32_t>(x0) || y1 <= static_cast<uint32_t>(y0)) {
+            return VkRect2D{};
+        }
+
+        VkRect2D rect{};
+        rect.offset = {x0, y0};
+        rect.extent = {x1 - static_cast<uint32_t>(x0), y1 - static_cast<uint32_t>(y0)};
+        return rect;
+    }
+
+    VkRect2D paintSplashGlassSphScreenWorkRectLocked() const {
+        if (swapchainExtent_.width == 0 || swapchainExtent_.height == 0 || backdropRects_.empty()) {
+            return VkRect2D{};
+        }
+
+        float left = static_cast<float>(swapchainExtent_.width);
+        float top = static_cast<float>(swapchainExtent_.height);
+        float right = 0.0f;
+        float bottom = 0.0f;
+        bool hasRect = false;
+        for (const BackdropRect& rect : backdropRects_) {
+            if (rect.right <= rect.left || rect.bottom <= rect.top || rect.opacity <= 0.0f) {
+                continue;
+            }
+            const float height = rect.bottom - rect.top;
+            const float sideMargin = std::max(72.0f, rect.glassThickness * 0.90f);
+            const float topMargin = std::max(32.0f, rect.glassThickness * 0.35f);
+            const float bottomMargin = std::max(220.0f, height * 2.20f);
+            left = std::min(left, rect.left - sideMargin);
+            top = std::min(top, rect.top - topMargin);
+            right = std::max(right, rect.right + sideMargin);
+            bottom = std::max(bottom, rect.bottom + bottomMargin);
+            hasRect = true;
+        }
+        if (!hasRect) {
+            return VkRect2D{};
+        }
+
+        const int32_t x0 = static_cast<int32_t>(std::max(0.0f, std::floor(left)));
+        const int32_t y0 = static_cast<int32_t>(std::max(0.0f, std::floor(top)));
+        const uint32_t x1 = std::min(
+            swapchainExtent_.width,
+            static_cast<uint32_t>(std::ceil(std::max(left, right)))
+        );
+        const uint32_t y1 = std::min(
+            swapchainExtent_.height,
+            static_cast<uint32_t>(std::ceil(std::max(top, bottom)))
+        );
+        if (x1 <= static_cast<uint32_t>(x0) || y1 <= static_cast<uint32_t>(y0)) {
+            return VkRect2D{};
+        }
+
+        VkRect2D rect{};
+        rect.offset = {x0, y0};
+        rect.extent = {x1 - static_cast<uint32_t>(x0), y1 - static_cast<uint32_t>(y0)};
+        return rect;
+    }
+
+    uint32_t paintSplashGlassSphParticleCapacityLocked() const {
+        return std::min(
+            kMaxPaintSplashGlassSphParticles,
+            paintSplashGlassTargetCount_ * kPaintSplashGlassSphParticlesPerTarget
+        );
+    }
+
+    float paintSplashGlassSphVisibleFadeLocked(int64_t nowNs) const {
+        if (!splashItems_.empty()) {
+            return 1.0f;
+        }
+        if (paintSplashGlassDripEndNs_ <= nowNs) {
+            return 0.0f;
+        }
+        const float remainingSeconds =
+            static_cast<float>(paintSplashGlassDripEndNs_ - nowNs) / 1000000000.0f;
+        return std::clamp(remainingSeconds / 1.15f, 0.0f, 1.0f);
+    }
+
     void recordResetPaintSplashGlassSurfaceLocked(VkCommandBuffer commandBuffer) {
         VkClearColorValue clearColor{};
         clearColor.float32[0] = 0.0f;
@@ -5977,6 +6996,12 @@ private:
             paintSplashGlassImpactVelocityLayout_,
             clearColor
         );
+        clearPaintSplashGlassImageLocked(
+            commandBuffer,
+            paintSplashGlassSphImage_,
+            paintSplashGlassSphLayout_,
+            clearColor
+        );
 
         vkCmdFillBuffer(
             commandBuffer,
@@ -5993,14 +7018,32 @@ private:
             sizeof(uint32_t) * kPaintSplashGlassCellCount,
             0
         );
+        vkCmdFillBuffer(
+            commandBuffer,
+            paintSplashGlassSphParticleBuffer_,
+            0,
+            sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles,
+            0
+        );
+        vkCmdFillBuffer(
+            commandBuffer,
+            paintSplashGlassSphParticleWorkBuffer_,
+            0,
+            sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles,
+            0
+        );
 
-        std::array<VkBufferMemoryBarrier, 3> barriers{};
+        std::array<VkBufferMemoryBarrier, 5> barriers{};
         barriers[0].buffer = paintSplashGlassEventBuffer_;
         barriers[0].size = sizeof(GpuGlassDroplet) * kMaxPaintSplashGlassDroplets;
         barriers[1].buffer = paintSplashGlassCursorBuffer_;
         barriers[1].size = sizeof(uint32_t);
         barriers[2].buffer = paintSplashGlassCellBuffer_;
         barriers[2].size = sizeof(uint32_t) * kPaintSplashGlassCellCount;
+        barriers[3].buffer = paintSplashGlassSphParticleBuffer_;
+        barriers[3].size = sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
+        barriers[4].buffer = paintSplashGlassSphParticleWorkBuffer_;
+        barriers[4].size = sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
         for (VkBufferMemoryBarrier& barrier : barriers) {
             barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
             barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -6024,6 +7067,9 @@ private:
         );
 
         updatePaintSplashGlassSurfaceDescriptorLocked();
+        updatePaintSplashGlassSphUpdateDescriptorLocked();
+        updatePaintSplashGlassSphFieldDescriptorLocked();
+        updatePaintSplashGlassSphCompositeDescriptorLocked();
         updateBackdropDescriptorLocked();
     }
 
@@ -6281,6 +7327,170 @@ private:
 
         updatePaintSplashGlassSurfaceDescriptorLocked();
         updateBackdropDescriptorLocked();
+    }
+
+    void recordPaintSplashGlassSphUpdateLocked(
+        VkCommandBuffer commandBuffer,
+        int64_t frameTimeNs
+    ) {
+        const uint32_t particleCapacity = paintSplashGlassSphParticleCapacityLocked();
+        if (particleCapacity == 0 ||
+            paintSplashGlassSphUpdatePipeline_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphUpdatePipelineLayout_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphUpdateDescriptorSet_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        updatePaintSplashGlassSphUpdateDescriptorLocked();
+
+        const float dt = paintSplashGlassLastSphUpdateNs_ > 0
+            ? std::clamp(
+                static_cast<float>(frameTimeNs - paintSplashGlassLastSphUpdateNs_) /
+                    1000000000.0f,
+                0.001f,
+                0.05f
+            )
+            : 0.016f;
+        paintSplashGlassLastSphUpdateNs_ = frameTimeNs;
+
+        GlassSphUpdatePushConstants pushConstants{};
+        pushConstants.timeStep = dt;
+        pushConstants.hitTargetCount = paintSplashGlassTargetCount_;
+        pushConstants.particleCapacity = particleCapacity;
+        pushConstants.viewportSize[0] = static_cast<float>(swapchainExtent_.width);
+        pushConstants.viewportSize[1] = static_cast<float>(swapchainExtent_.height);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, paintSplashGlassSphUpdatePipeline_);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            paintSplashGlassSphUpdatePipelineLayout_,
+            0,
+            1,
+            &paintSplashGlassSphUpdateDescriptorSet_,
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            paintSplashGlassSphUpdatePipelineLayout_,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(GlassSphUpdatePushConstants),
+            &pushConstants
+        );
+        vkCmdDispatch(commandBuffer, (particleCapacity + 63u) / 64u, 1, 1);
+
+        VkBufferMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = paintSplashGlassSphParticleWorkBuffer_;
+        barrier.offset = 0;
+        barrier.size = sizeof(GpuGlassSphParticle) * kMaxPaintSplashGlassSphParticles;
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            0,
+            0,
+            nullptr,
+            1,
+            &barrier,
+            0,
+            nullptr
+        );
+
+        std::swap(paintSplashGlassSphParticleBuffer_, paintSplashGlassSphParticleWorkBuffer_);
+        std::swap(paintSplashGlassSphParticleMemory_, paintSplashGlassSphParticleWorkMemory_);
+        updatePaintSplashGlassSphFieldDescriptorLocked();
+    }
+
+    void recordPaintSplashGlassSphFieldPassLocked(
+        VkCommandBuffer commandBuffer,
+        int64_t frameTimeNs
+    ) {
+        const uint32_t particleCapacity = paintSplashGlassSphParticleCapacityLocked();
+        const float visibleFade = paintSplashGlassSphVisibleFadeLocked(frameTimeNs);
+        if (particleCapacity == 0 ||
+            visibleFade <= 0.010f ||
+            blobRenderPass_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFramebuffer_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFieldPipeline_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFieldPipelineLayout_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphFieldDescriptorSet_ == VK_NULL_HANDLE) {
+            return;
+        }
+
+        const VkRect2D screenWorkRect = paintSplashGlassSphScreenWorkRectLocked();
+        const VkRect2D sphWorkRect = paintSplashGlassSphWorkRectLocked(screenWorkRect);
+        const VkExtent2D sphExtent = paintSplashGlassSphExtentLocked();
+        if (screenWorkRect.extent.width == 0 ||
+            screenWorkRect.extent.height == 0 ||
+            sphWorkRect.extent.width == 0 ||
+            sphWorkRect.extent.height == 0 ||
+            sphExtent.width == 0 ||
+            sphExtent.height == 0) {
+            return;
+        }
+
+        VkClearValue clearValue{};
+        clearValue.color.float32[0] = 0.0f;
+        clearValue.color.float32[1] = 0.0f;
+        clearValue.color.float32[2] = 0.0f;
+        clearValue.color.float32[3] = 0.0f;
+
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = blobRenderPass_;
+        renderPassInfo.framebuffer = paintSplashGlassSphFramebuffer_;
+        renderPassInfo.renderArea = sphWorkRect;
+        renderPassInfo.clearValueCount = 1;
+        renderPassInfo.pClearValues = &clearValue;
+
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(sphExtent.width);
+        viewport.height = static_cast<float>(sphExtent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        GlassSphRenderPushConstants pushConstants{};
+        pushConstants.viewportSize[0] = static_cast<float>(swapchainExtent_.width);
+        pushConstants.viewportSize[1] = static_cast<float>(swapchainExtent_.height);
+        pushConstants.visibleFade = visibleFade;
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, paintSplashGlassSphFieldPipeline_);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &sphWorkRect);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            paintSplashGlassSphFieldPipelineLayout_,
+            0,
+            1,
+            &paintSplashGlassSphFieldDescriptorSet_,
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            paintSplashGlassSphFieldPipelineLayout_,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(GlassSphRenderPushConstants),
+            &pushConstants
+        );
+        vkCmdDraw(commandBuffer, 6, particleCapacity, 0, 0);
+        vkCmdEndRenderPass(commandBuffer);
+
+        paintSplashGlassSphLayout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        updatePaintSplashGlassSphCompositeDescriptorLocked();
     }
 
     bool recordBackdropOverlayCompositeLocked(
@@ -6637,6 +7847,8 @@ private:
         VkCommandBuffer commandBuffer,
         uint32_t imageIndex,
         bool shouldComposite,
+        bool shouldCompositeSph,
+        int64_t frameTimeNs,
         const VkRect2D& paintSplashWorkRect
     ) {
         if (imageIndex >= framebuffers_.size()) {
@@ -6704,8 +7916,53 @@ private:
         if (hasBackdropImageLocked()) {
             recordBackdropCompositeLocked(commandBuffer);
         }
+        if (shouldCompositeSph) {
+            recordPaintSplashGlassSphCompositeLocked(commandBuffer, frameTimeNs);
+        }
         vkCmdEndRenderPass(commandBuffer);
         writeFrameTraceTimestampLocked(commandBuffer, "composite");
+    }
+
+    void recordPaintSplashGlassSphCompositeLocked(
+        VkCommandBuffer commandBuffer,
+        int64_t frameTimeNs
+    ) {
+        if (paintSplashGlassSphCompositePipeline_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphCompositePipelineLayout_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphCompositeDescriptorSet_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphImageView_ == VK_NULL_HANDLE ||
+            paintSplashGlassSphLayout_ != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+            paintSplashGlassSphVisibleFadeLocked(frameTimeNs) <= 0.010f) {
+            return;
+        }
+
+        const VkRect2D scissor = paintSplashGlassSphScreenWorkRectLocked();
+        if (scissor.extent.width == 0 || scissor.extent.height == 0) {
+            return;
+        }
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(swapchainExtent_.width);
+        viewport.height = static_cast<float>(swapchainExtent_.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, paintSplashGlassSphCompositePipeline_);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            paintSplashGlassSphCompositePipelineLayout_,
+            0,
+            1,
+            &paintSplashGlassSphCompositeDescriptorSet_,
+            0,
+            nullptr
+        );
+        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
     }
 
     void recordBackdropCompositeLocked(VkCommandBuffer commandBuffer) {
@@ -6909,6 +8166,7 @@ private:
         releaseCompletedSplashUploadStagingLocked();
         destroyPaintSplashGlassTargetBufferLocked();
         destroyPaintSplashGlassEventBuffersLocked();
+        destroyPaintSplashGlassSphBuffersLocked();
 
         if (splashInitPipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, splashInitPipeline_, nullptr);
@@ -6949,6 +8207,30 @@ private:
         if (paintSplashGlassSurfacePipelineLayout_ != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device_, paintSplashGlassSurfacePipelineLayout_, nullptr);
             paintSplashGlassSurfacePipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphUpdatePipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, paintSplashGlassSphUpdatePipeline_, nullptr);
+            paintSplashGlassSphUpdatePipeline_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphUpdatePipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphUpdatePipelineLayout_, nullptr);
+            paintSplashGlassSphUpdatePipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphFieldPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, paintSplashGlassSphFieldPipeline_, nullptr);
+            paintSplashGlassSphFieldPipeline_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphFieldPipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphFieldPipelineLayout_, nullptr);
+            paintSplashGlassSphFieldPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphCompositePipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, paintSplashGlassSphCompositePipeline_, nullptr);
+            paintSplashGlassSphCompositePipeline_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphCompositePipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, paintSplashGlassSphCompositePipelineLayout_, nullptr);
+            paintSplashGlassSphCompositePipelineLayout_ = VK_NULL_HANDLE;
         }
         if (compositePipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, compositePipeline_, nullptr);
@@ -7051,6 +8333,45 @@ private:
                 nullptr
             );
             paintSplashGlassSurfaceDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphUpdateDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, paintSplashGlassSphUpdateDescriptorPool_, nullptr);
+            paintSplashGlassSphUpdateDescriptorPool_ = VK_NULL_HANDLE;
+            paintSplashGlassSphUpdateDescriptorSet_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphUpdateDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(
+                device_,
+                paintSplashGlassSphUpdateDescriptorSetLayout_,
+                nullptr
+            );
+            paintSplashGlassSphUpdateDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphFieldDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, paintSplashGlassSphFieldDescriptorPool_, nullptr);
+            paintSplashGlassSphFieldDescriptorPool_ = VK_NULL_HANDLE;
+            paintSplashGlassSphFieldDescriptorSet_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphFieldDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(
+                device_,
+                paintSplashGlassSphFieldDescriptorSetLayout_,
+                nullptr
+            );
+            paintSplashGlassSphFieldDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphCompositeDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, paintSplashGlassSphCompositeDescriptorPool_, nullptr);
+            paintSplashGlassSphCompositeDescriptorPool_ = VK_NULL_HANDLE;
+            paintSplashGlassSphCompositeDescriptorSet_ = VK_NULL_HANDLE;
+        }
+        if (paintSplashGlassSphCompositeDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(
+                device_,
+                paintSplashGlassSphCompositeDescriptorSetLayout_,
+                nullptr
+            );
+            paintSplashGlassSphCompositeDescriptorSetLayout_ = VK_NULL_HANDLE;
         }
 
         if (renderPass_ != VK_NULL_HANDLE) {
@@ -7246,9 +8567,34 @@ private:
     VkImageView paintSplashGlassImpactVelocityImageView_ = VK_NULL_HANDLE;
     VkImageLayout paintSplashGlassImpactVelocityLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     VkFramebuffer paintSplashGlassImpactFramebuffer_ = VK_NULL_HANDLE;
+    VkBuffer paintSplashGlassSphParticleBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory paintSplashGlassSphParticleMemory_ = VK_NULL_HANDLE;
+    VkBuffer paintSplashGlassSphParticleWorkBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory paintSplashGlassSphParticleWorkMemory_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout paintSplashGlassSphUpdateDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool paintSplashGlassSphUpdateDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet paintSplashGlassSphUpdateDescriptorSet_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout paintSplashGlassSphFieldDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool paintSplashGlassSphFieldDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet paintSplashGlassSphFieldDescriptorSet_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout paintSplashGlassSphCompositeDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool paintSplashGlassSphCompositeDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet paintSplashGlassSphCompositeDescriptorSet_ = VK_NULL_HANDLE;
+    VkPipelineLayout paintSplashGlassSphUpdatePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline paintSplashGlassSphUpdatePipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout paintSplashGlassSphFieldPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline paintSplashGlassSphFieldPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout paintSplashGlassSphCompositePipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline paintSplashGlassSphCompositePipeline_ = VK_NULL_HANDLE;
+    VkImage paintSplashGlassSphImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory paintSplashGlassSphMemory_ = VK_NULL_HANDLE;
+    VkImageView paintSplashGlassSphImageView_ = VK_NULL_HANDLE;
+    VkImageLayout paintSplashGlassSphLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkFramebuffer paintSplashGlassSphFramebuffer_ = VK_NULL_HANDLE;
     bool paintSplashGlassNeedsReset_ = true;
     int64_t paintSplashGlassDripEndNs_ = 0;
     int64_t paintSplashGlassLastSurfaceUpdateNs_ = 0;
+    int64_t paintSplashGlassLastSphUpdateNs_ = 0;
     float paintSplashGlassSurfaceAge_ = 0.0f;
     VkPipelineLayout particlePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline particlePipeline_ = VK_NULL_HANDLE;
@@ -7511,6 +8857,7 @@ static bool parseBackdropRects(
         rect.glassThickness = std::max(0.0f, values[base + 7]);
         rect.adaptiveAppearance = std::clamp(values[base + 8], 0.0f, 1.0f);
         rect.adaptiveContrast = std::clamp(values[base + 9], 0.0f, 1.0f);
+        rect.shapeKind = values[base + 10] > 0.5f ? 1.0f : 0.0f;
         if (
             rect.right > rect.left &&
             rect.bottom > rect.top &&

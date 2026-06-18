@@ -968,7 +968,7 @@ internal data class VulkanGlassBackdropStats(
     val darkFraction: Float
 )
 
-private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 10
+private const val VULKAN_GLASS_RECT_FLOAT_COUNT = 11
 private const val ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING = false
 private const val ENABLE_VULKAN_CHAT_PACING_LOGGING = false
 
@@ -990,6 +990,7 @@ private fun List<VulkanChatGlassRect>.toNativeRectValues(): FloatArray {
         values[index++] = rect.glassThickness
         values[index++] = rect.adaptiveAppearance
         values[index++] = rect.adaptiveContrast
+        values[index++] = rect.shapeKind
     }
     return values
 }

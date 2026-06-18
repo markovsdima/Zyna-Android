@@ -195,21 +195,24 @@ class GlassInputBarView @JvmOverloads constructor(
             child = attachButton,
             cornerRadius = radius,
             bevelWidth = 32f.dpToPx(density),
-            glassThickness = 48f.dpToPx(density)
+            glassThickness = 48f.dpToPx(density),
+            shapeKind = VulkanChatGlassRect.SHAPE_CIRCLE
         )
         addChildGlassRect(
             out = out,
             child = editText,
             cornerRadius = radius,
             bevelWidth = 36f.dpToPx(density),
-            glassThickness = 55f.dpToPx(density)
+            glassThickness = 55f.dpToPx(density),
+            shapeKind = VulkanChatGlassRect.SHAPE_ROUNDED_RECT
         )
         addChildGlassRect(
             out = out,
             child = sendButton,
             cornerRadius = radius,
             bevelWidth = 32f.dpToPx(density),
-            glassThickness = 48f.dpToPx(density)
+            glassThickness = 48f.dpToPx(density),
+            shapeKind = VulkanChatGlassRect.SHAPE_CIRCLE
         )
     }
 
@@ -336,7 +339,8 @@ class GlassInputBarView @JvmOverloads constructor(
         child: android.view.View,
         cornerRadius: Float,
         bevelWidth: Float,
-        glassThickness: Float
+        glassThickness: Float,
+        shapeKind: Float
     ) {
         if (child.width <= 0 || child.height <= 0 || child.visibility != VISIBLE) {
             return
@@ -350,7 +354,8 @@ class GlassInputBarView @JvmOverloads constructor(
                 cornerRadius = cornerRadius,
                 opacity = 1f,
                 bezelWidth = bevelWidth,
-                glassThickness = glassThickness
+                glassThickness = glassThickness,
+                shapeKind = shapeKind
             )
         )
     }

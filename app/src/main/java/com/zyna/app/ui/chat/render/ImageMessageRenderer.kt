@@ -15,6 +15,8 @@ import android.text.TextUtils
 import android.util.TypedValue
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixImageInfo
+import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.data.messaging.normalizedMessageCaption
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -35,18 +37,28 @@ internal class ImageMessageRenderer(
     private val placeholderPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val placeholderTextPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val timeBadgePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val imagePath = Path()
+    private val imageRadii = FloatArray(8)
     private val imageSrcRect = Rect()
     private val imageDstRect = RectF()
-    private val timeLineSpacing = 5.imageDpToPx(density)
-    private val captionTopSpacing = 7.imageDpToPx(density)
-    private val headerBottomSpacing = 6.imageDpToPx(density)
+    private val captionTopInset = 6.imageDpToPx(density)
+    private val captionHorizontalInset = 12.imageDpToPx(density)
+    private val captionBottomInset = 6.imageDpToPx(density)
+    private val headerTopInset = 7.imageDpToPx(density)
+    private val headerHorizontalInset = 12.imageDpToPx(density)
+    private val forwardedBottomInset = 2.imageDpToPx(density)
+    private val replyHeaderBottomInset = 4.imageDpToPx(density)
     private val senderBottomSpacing = 4.imageDpToPx(density)
     private val replyBarWidth = 2.imageDpToPx(density)
     private val replyHorizontalSpacing = 6.imageDpToPx(density)
     private val replyLineSpacing = 1.imageDpToPx(density)
     private val replyBottomInset = 4.imageDpToPx(density)
     private val imageCornerRadius = 10.imageDpToPx(density).toFloat()
+    private val timeBadgeHorizontalPadding = 6.imageDpToPx(density)
+    private val timeBadgeVerticalPadding = 2.imageDpToPx(density)
+    private val timeBadgeInset = 8.imageDpToPx(density)
+    private val timeBadgeRadius = 8.imageDpToPx(density).toFloat()
     private val maxImageWidth = 320.imageDpToPx(density)
     private val minImageHeight = 128.imageDpToPx(density)
     private val maxImageHeight = 390.imageDpToPx(density)
@@ -70,39 +82,50 @@ internal class ImageMessageRenderer(
         return content is MessageContent.Image
     }
 
+    override fun chrome(message: MessageRenderModel): MessageContentChrome {
+        return if (message.isBareImage()) {
+            MessageContentChrome.BARE
+        } else {
+            MessageContentChrome.FLUSH_BUBBLE
+        }
+    }
+
     override fun measure(
         message: MessageRenderModel,
         theme: MessageRenderTheme,
         maxWidthPx: Int
     ): ImageMessageLayout {
         val content = message.content as MessageContent.Image
+        val isBareImage = message.isBareImage()
         val widthLimit = max(1, maxWidthPx)
         senderPaint.color = theme.metadataColor(message)
         captionPaint.color = theme.textColor(message)
-        timePaint.color = theme.metadataColor(message)
+        timePaint.color = Color.WHITE
         forwardedPaint.color = theme.metadataColor(message)
         replySenderPaint.color = theme.metadataColor(message)
         replyBodyPaint.color = theme.metadataColor(message)
         replyBarPaint.color = theme.metadataColor(message)
         placeholderPaint.color = theme.metadataColor(message).withAlpha(36)
         placeholderTextPaint.color = theme.metadataColor(message).withAlpha(180)
-
-        val forwardedLayout = makeForwardedHeaderLayout(message.forwardedFrom, widthLimit)
-        val forwardedHeight = forwardedLayout?.let { it.height + headerBottomSpacing } ?: 0
-        val forwardedWidth = forwardedLayout?.measuredLineWidth() ?: 0
-
-        val replyLayout = makeReplyHeaderLayout(message.replyInfo, widthLimit)
-        val replyHeight = replyLayout?.let { it.height + headerBottomSpacing } ?: 0
-        val replyWidth = replyLayout?.width ?: 0
-
-        val senderLayout = makeSenderLayout(message, widthLimit)
-        val senderHeight = senderLayout?.let { it.height + senderBottomSpacing } ?: 0
-        val senderWidth = senderLayout?.measuredLineWidth() ?: 0
+        timeBadgePaint.color = Color.argb(102, 0, 0, 0)
 
         val imageSize = imageSize(content, widthLimit)
-        val captionLayout = makeCaptionLayout(content.caption, imageSize.width)
-        val captionHeight = captionLayout?.let { captionTopSpacing + it.height } ?: 0
-        val captionWidth = captionLayout?.maxLineWidth() ?: 0
+        val forwardedLayout = makeForwardedHeaderLayout(message.forwardedFrom, imageSize.width)
+        val forwardedHeight = forwardedLayout?.let { headerTopInset + it.height + forwardedBottomInset } ?: 0
+        val replyLayout = makeReplyHeaderLayout(message.replyInfo, imageSize.width)
+        val replyHeight = replyLayout?.let { headerTopInset + it.height + replyHeaderBottomInset } ?: 0
+        val captionLayout = makeCaptionLayout(
+            caption = content.caption,
+            maxWidth = (imageSize.width - captionHorizontalInset * 2).coerceAtLeast(1)
+        )
+        val captionHeight = captionLayout?.let {
+            captionTopInset + it.height + captionBottomInset
+        } ?: 0
+        val topCaptionHeight = if (content.captionPlacement == CaptionPlacement.TOP) captionHeight else 0
+        val imageY = forwardedHeight + replyHeight + topCaptionHeight
+        val totalHeight = imageY +
+            imageSize.height +
+            if (content.captionPlacement == CaptionPlacement.BOTTOM) captionHeight else 0
 
         val timeLayout = makeLayout(
             text = message.metadataText(),
@@ -110,36 +133,32 @@ internal class ImageMessageRenderer(
             width = imageSize.width
         )
         val timeWidth = timeLayout.measuredLineWidth()
-        val timeY = forwardedHeight +
-            replyHeight +
-            senderHeight +
-            imageSize.height +
-            captionHeight +
-            timeLineSpacing
-
-        val contentWidth = max(
-            max(max(senderWidth, imageSize.width), max(forwardedWidth, replyWidth)),
-            max(captionWidth, timeWidth)
-        ).coerceIn(1, widthLimit)
-
         return ImageMessageLayout(
-            width = contentWidth,
-            height = timeY + timeLayout.height,
+            width = imageSize.width,
+            height = if (isBareImage) imageSize.height else totalHeight,
+            isBareImage = isBareImage,
+            hasHeader = forwardedLayout != null || replyLayout != null,
+            hasCaption = captionLayout != null,
+            captionPlacement = content.captionPlacement,
             forwardedHeaderLayout = forwardedLayout,
-            forwardedY = 0,
+            forwardedY = headerTopInset,
             replyHeaderLayout = replyLayout,
-            replyY = forwardedHeight,
-            senderLayout = senderLayout,
-            senderY = forwardedHeight + replyHeight,
-            imageY = forwardedHeight + replyHeight + senderHeight,
+            replyY = forwardedHeight + headerTopInset,
+            senderLayout = null,
+            senderY = 0,
+            imageY = if (isBareImage) 0 else imageY,
             imageWidth = imageSize.width,
             imageHeight = imageSize.height,
             imageInfo = content.imageInfo,
             captionLayout = captionLayout,
-            captionY = forwardedHeight + replyHeight + senderHeight + imageSize.height + captionTopSpacing,
+            captionY = if (content.captionPlacement == CaptionPlacement.TOP) {
+                forwardedHeight + replyHeight + captionTopInset
+            } else {
+                imageY + imageSize.height + captionTopInset
+            },
             timeLayout = timeLayout,
-            timeX = contentWidth - timeWidth,
-            timeY = timeY
+            timeX = imageSize.width - timeWidth - timeBadgeHorizontalPadding - timeBadgeInset,
+            timeY = imageY + imageSize.height - timeLayout.height - timeBadgeVerticalPadding - timeBadgeInset
         )
     }
 
@@ -148,38 +167,35 @@ internal class ImageMessageRenderer(
 
         layout.forwardedHeaderLayout?.let { forwarded ->
             val save = canvas.save()
-            canvas.translate(0f, layout.forwardedY.toFloat())
+            canvas.translate(headerHorizontalInset.toFloat(), layout.forwardedY.toFloat())
             forwarded.draw(canvas)
             canvas.restoreToCount(save)
         }
 
         layout.replyHeaderLayout?.let { reply ->
             val save = canvas.save()
-            canvas.translate(0f, layout.replyY.toFloat())
+            canvas.translate(headerHorizontalInset.toFloat(), layout.replyY.toFloat())
             drawReplyHeader(canvas, reply)
             canvas.restoreToCount(save)
         }
 
-        layout.senderLayout?.let { sender ->
-            val save = canvas.save()
-            canvas.translate(0f, layout.senderY.toFloat())
-            sender.draw(canvas)
-            canvas.restoreToCount(save)
+        if (layout.captionPlacement == CaptionPlacement.TOP) {
+            drawCaption(canvas, layout)
         }
 
         drawImage(canvas, layout)
-
-        layout.captionLayout?.let { caption ->
-            val save = canvas.save()
-            canvas.translate(0f, layout.captionY.toFloat())
-            caption.draw(canvas)
-            canvas.restoreToCount(save)
+        drawTimeBadge(canvas, layout)
+        if (layout.captionPlacement == CaptionPlacement.BOTTOM) {
+            drawCaption(canvas, layout)
         }
+    }
 
-        val timeSave = canvas.save()
-        canvas.translate(layout.timeX.toFloat(), layout.timeY.toFloat())
-        layout.timeLayout.draw(canvas)
-        canvas.restoreToCount(timeSave)
+    private fun drawCaption(canvas: Canvas, layout: ImageMessageLayout) {
+        val caption = layout.captionLayout ?: return
+        val save = canvas.save()
+        canvas.translate(captionHorizontalInset.toFloat(), layout.captionY.toFloat())
+        caption.draw(canvas)
+        canvas.restoreToCount(save)
     }
 
     private fun drawImage(canvas: Canvas, layout: ImageMessageLayout) {
@@ -190,12 +206,8 @@ internal class ImageMessageRenderer(
             (layout.imageY + layout.imageHeight).toFloat()
         )
         imagePath.reset()
-        imagePath.addRoundRect(
-            imageDstRect,
-            imageCornerRadius,
-            imageCornerRadius,
-            Path.Direction.CW
-        )
+        setImageRadii(layout)
+        imagePath.addRoundRect(imageDstRect, imageRadii, Path.Direction.CW)
 
         val save = canvas.save()
         canvas.clipPath(imagePath)
@@ -216,6 +228,71 @@ internal class ImageMessageRenderer(
         canvas.restoreToCount(save)
     }
 
+    private fun setImageRadii(layout: ImageMessageLayout) {
+        var topLeft = true
+        var topRight = true
+        var bottomRight = true
+        var bottomLeft = true
+
+        if (layout.hasHeader || (layout.hasCaption && layout.captionPlacement == CaptionPlacement.TOP)) {
+            topLeft = false
+            topRight = false
+        }
+        if (layout.hasCaption && layout.captionPlacement == CaptionPlacement.BOTTOM) {
+            bottomRight = false
+            bottomLeft = false
+        }
+
+        fun radius(enabled: Boolean): Float = if (enabled) imageCornerRadius else 0f
+        val tl = radius(topLeft)
+        val tr = radius(topRight)
+        val br = radius(bottomRight)
+        val bl = radius(bottomLeft)
+        imageRadii[0] = tl
+        imageRadii[1] = tl
+        imageRadii[2] = tr
+        imageRadii[3] = tr
+        imageRadii[4] = br
+        imageRadii[5] = br
+        imageRadii[6] = bl
+        imageRadii[7] = bl
+    }
+
+    private fun drawTimeBadge(canvas: Canvas, layout: ImageMessageLayout) {
+        val timeWidth = layout.timeLayout.measuredLineWidth()
+        val badgeLeft = (
+            layout.imageWidth -
+                timeWidth -
+                timeBadgeHorizontalPadding * 2 -
+                timeBadgeInset
+            ).toFloat().coerceAtLeast(0f)
+        val badgeTop = (
+            layout.imageY +
+                layout.imageHeight -
+                layout.timeLayout.height -
+                timeBadgeVerticalPadding * 2 -
+                timeBadgeInset
+            ).toFloat().coerceAtLeast(layout.imageY.toFloat())
+        val badgeRight = badgeLeft + timeWidth + timeBadgeHorizontalPadding * 2
+        val badgeBottom = badgeTop + layout.timeLayout.height + timeBadgeVerticalPadding * 2
+        canvas.drawRoundRect(
+            badgeLeft,
+            badgeTop,
+            badgeRight,
+            badgeBottom,
+            timeBadgeRadius,
+            timeBadgeRadius,
+            timeBadgePaint
+        )
+        val save = canvas.save()
+        canvas.translate(
+            badgeLeft + timeBadgeHorizontalPadding,
+            badgeTop + timeBadgeVerticalPadding
+        )
+        layout.timeLayout.draw(canvas)
+        canvas.restoreToCount(save)
+    }
+
     private fun imageSize(content: MessageContent.Image, maxWidth: Int): ImageSize {
         val imageWidth = min(maxWidth, maxImageWidth).coerceAtLeast(1)
         val sourceWidth = content.imageInfo.width?.takeIf { it > 0 } ?: 4
@@ -228,7 +305,7 @@ internal class ImageMessageRenderer(
     }
 
     private fun makeCaptionLayout(caption: String?, maxWidth: Int): StaticLayout? {
-        val text = caption?.takeIf { it.isNotBlank() } ?: return null
+        val text = caption.normalizedMessageCaption() ?: return null
         return makeLayout(
             text = text,
             paint = captionPaint,
@@ -244,7 +321,7 @@ internal class ImageMessageRenderer(
         return makeSingleLineLayout(
             text = "Forwarded from $sender",
             paint = forwardedPaint,
-            maxWidth = maxWidth
+            maxWidth = (maxWidth - headerHorizontalInset * 2).coerceAtLeast(1)
         )
     }
 
@@ -253,7 +330,7 @@ internal class ImageMessageRenderer(
         maxWidth: Int
     ): ReplyHeaderLayout? {
         replyInfo ?: return null
-        val textWidth = (maxWidth - replyBarWidth - replyHorizontalSpacing)
+        val textWidth = (maxWidth - headerHorizontalInset * 2 - replyBarWidth - replyHorizontalSpacing)
             .coerceAtLeast(1)
         val senderLayout = makeSingleLineLayout(
             text = replyInfo.senderText.ifBlank { "Unknown" },
@@ -356,6 +433,10 @@ internal class ImageMessageRenderer(
 internal data class ImageMessageLayout(
     override val width: Int,
     override val height: Int,
+    val isBareImage: Boolean,
+    val hasHeader: Boolean,
+    val hasCaption: Boolean,
+    val captionPlacement: CaptionPlacement,
     val forwardedHeaderLayout: StaticLayout?,
     val forwardedY: Int,
     val replyHeaderLayout: ReplyHeaderLayout?,
@@ -377,6 +458,13 @@ private data class ImageSize(
     val width: Int,
     val height: Int
 )
+
+private fun MessageRenderModel.isBareImage(): Boolean {
+    val image = content as? MessageContent.Image ?: return false
+    return replyInfo == null &&
+        forwardedFrom.isNullOrBlank() &&
+        image.caption.normalizedMessageCaption() == null
+}
 
 private fun MessageRenderModel.metadataText(): String {
     return when (deliveryState) {

@@ -8,6 +8,7 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.TypedValue
+import com.zyna.app.data.messaging.normalizedMessageCaption
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -340,7 +341,8 @@ private fun MessageRenderModel.metadataText(): String {
 private fun MessageContent.renderText(): String {
     return when (this) {
         is MessageContent.Text -> body
-        is MessageContent.Image -> caption ?: "Photo"
+        is MessageContent.Image -> caption.normalizedMessageCaption() ?: "Photo"
+        is MessageContent.PhotoGroup -> caption.normalizedMessageCaption() ?: "Photo group"
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
 }

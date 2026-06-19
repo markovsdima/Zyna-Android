@@ -8,6 +8,8 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.messaging.ZynaHtmlCodec
+import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
 import com.zyna.app.data.outgoing.OutgoingEditEnvelope
 import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
@@ -815,6 +817,7 @@ class LocalCacheRepository(
             deliveryState = deliveryState.toMatrixDeliveryState(),
             replyInfo = replyInfoOrNull(),
             forwardedFrom = forwardedFrom,
+            zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson),
             isEdited = isEdited,
             isEditPending = isEditPending,
             isEditFailed = isEditFailed,
@@ -857,7 +860,7 @@ class LocalCacheRepository(
             imageThumbnailSourceJson = imageInfo?.thumbnailSourceJson,
             imageWidth = imageInfo?.width,
             imageHeight = imageInfo?.height,
-            imageCaption = imageInfo?.caption,
+            imageCaption = imageInfo?.caption.normalizedMessageCaption(),
             imageMimeType = imageInfo?.mimeType,
             imageBlurhash = imageInfo?.blurhash,
             deliveryState = deliveryState.name,
@@ -866,6 +869,7 @@ class LocalCacheRepository(
             replySenderDisplayName = replyInfo?.senderDisplayName,
             replyBody = replyInfo?.body,
             forwardedFrom = forwardedFrom,
+            zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
             isEdited = isEdited,
             isEditPending = isEditPending,
             isEditFailed = isEditFailed,
@@ -1182,7 +1186,7 @@ class LocalCacheRepository(
             thumbnailSourceJson = imageThumbnailSourceJson?.takeIf { it.isNotBlank() },
             width = imageWidth,
             height = imageHeight,
-            caption = imageCaption?.takeIf { it.isNotBlank() },
+            caption = imageCaption.normalizedMessageCaption(),
             mimeType = imageMimeType?.takeIf { it.isNotBlank() },
             blurhash = imageBlurhash?.takeIf { it.isNotBlank() }
         )
@@ -1333,7 +1337,7 @@ class LocalCacheRepository(
                     ?: existing.imageThumbnailSourceJson,
                 imageWidth = incoming.imageWidth ?: existing.imageWidth,
                 imageHeight = incoming.imageHeight ?: existing.imageHeight,
-                imageCaption = incoming.imageCaption ?: existing.imageCaption,
+                imageCaption = incoming.imageCaption ?: existing.imageCaption.normalizedMessageCaption(),
                 imageMimeType = incoming.imageMimeType ?: existing.imageMimeType,
                 imageBlurhash = incoming.imageBlurhash ?: existing.imageBlurhash,
                 replyEventId = incoming.replyEventId ?: existing.replyEventId,
@@ -1342,6 +1346,7 @@ class LocalCacheRepository(
                     ?: existing.replySenderDisplayName,
                 replyBody = incoming.replyBody ?: existing.replyBody,
                 forwardedFrom = incoming.forwardedFrom ?: existing.forwardedFrom,
+                zynaAttributesJson = incoming.zynaAttributesJson ?: existing.zynaAttributesJson,
                 isEdited = incoming.isEdited || existing.isEdited,
                 isEditPending = if (incoming.isEdited) false else existing.isEditPending,
                 isEditFailed = if (incoming.isEdited) false else existing.isEditFailed,

@@ -5,6 +5,7 @@ import android.util.Log
 import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
+import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
@@ -147,6 +148,26 @@ data class MatrixImageInfo(
     val blurhash: String?
 )
 
+data class MatrixMediaGroupItem(
+    val messageId: String,
+    val eventId: String?,
+    val transactionId: String?,
+    val imageInfo: MatrixImageInfo,
+    val deliveryState: MatrixMessageDeliveryState
+)
+
+data class MatrixMediaGroupPresentation(
+    val id: String,
+    val totalHint: Int,
+    val caption: String?,
+    val captionPlacement: com.zyna.app.data.messaging.CaptionPlacement,
+    val layoutOverride: com.zyna.app.data.messaging.MediaGroupLayoutOverride?,
+    val suppressIndividualCaption: Boolean,
+    val items: List<MatrixMediaGroupItem>,
+    val rendersCompositeBubble: Boolean,
+    val hidesStandaloneBubble: Boolean
+)
+
 data class MatrixChatMessage(
     /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
@@ -162,6 +183,7 @@ data class MatrixChatMessage(
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
     val replyInfo: MatrixReplyInfo? = null,
     val forwardedFrom: String? = null,
+    val zynaAttributes: ZynaMessageAttributes = ZynaMessageAttributes(),
     val isEdited: Boolean = false,
     val isEditPending: Boolean = false,
     val isEditFailed: Boolean = false,
@@ -170,7 +192,8 @@ data class MatrixChatMessage(
     val pendingEditBody: String? = null,
     val outgoingEnvelopeId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
-    val canDiscardOutgoingEnvelope: Boolean = false
+    val canDiscardOutgoingEnvelope: Boolean = false,
+    val mediaGroupPresentation: MatrixMediaGroupPresentation? = null
 ) {
     val isRemote: Boolean
         get() = eventId != null
@@ -671,9 +694,10 @@ class MatrixClientService(
         val transactionId = eventOrTransactionId.transactionIdOrNull()
         val messageContent = (msgLike.kind as? MsgLikeKind.Message)?.content
         val isEdited = messageContent?.isEdited ?: false
-        val forwardedFrom = lazyProvider.latestJson()
-            ?.zynaForwardedFromFromRawEvent()
-            ?: messageContent?.zynaForwardedFrom()
+        val zynaAttributes = lazyProvider.latestJson()
+            ?.zynaAttributesFromRawEvent()
+            ?: messageContent?.zynaAttributes()
+            ?: ZynaMessageAttributes()
 
         return MatrixChatMessage(
             id = eventOrTransactionId.stableId(),
@@ -687,7 +711,8 @@ class MatrixClientService(
             contentType = messageBody.contentType,
             imageInfo = messageBody.imageInfo,
             replyInfo = replyInfo,
-            forwardedFrom = forwardedFrom,
+            forwardedFrom = zynaAttributes.forwardedFrom,
+            zynaAttributes = zynaAttributes,
             isEdited = isEdited
         )
     }
@@ -746,10 +771,10 @@ class MatrixClientService(
             is MessageType.Text -> type.content.body
             is MessageType.Notice -> type.content.body
             is MessageType.Emote -> type.content.body
-            is MessageType.Image -> type.content.caption?.takeIf { it.isNotBlank() } ?: "Photo"
-            is MessageType.Audio -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "Audio" }
-            is MessageType.Video -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "Video" }
-            is MessageType.File -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "File" }
+            is MessageType.Image -> type.content.caption.normalizedMessageCaption() ?: "Photo"
+            is MessageType.Audio -> type.content.caption.normalizedMessageCaption() ?: body.ifBlank { "Audio" }
+            is MessageType.Video -> type.content.caption.normalizedMessageCaption() ?: body.ifBlank { "Video" }
+            is MessageType.File -> type.content.caption.normalizedMessageCaption() ?: body.ifBlank { "File" }
             is MessageType.Gallery -> type.content.body
             is MessageType.Location -> type.content.body
             is MessageType.Other -> type.body
@@ -785,7 +810,7 @@ class MatrixClientService(
                 ?.takeIf { it.isNotBlank() },
             width = info?.width?.toIntOrNull(),
             height = info?.height?.toIntOrNull(),
-            caption = image.caption?.takeIf { it.isNotBlank() },
+            caption = image.caption.normalizedMessageCaption(),
             mimeType = info?.mimetype?.takeIf { it.isNotBlank() },
             blurhash = info?.blurhash?.takeIf { it.isNotBlank() }
         )
@@ -841,27 +866,27 @@ class MatrixClientService(
             "<a href=\"$senderLink\">$senderName</a><br>$quotedBody</blockquote></mx-reply>"
     }
 
-    private fun MessageContent.zynaForwardedFrom(): String? {
+    private fun MessageContent.zynaAttributes(): ZynaMessageAttributes? {
         val formatted = formattedHtmlBodyOrNull() ?: return null
-        return ZynaHtmlCodec.decode(formatted).forwardedFrom
+        return ZynaHtmlCodec.decode(formatted)
     }
 
-    private fun String.zynaForwardedFromFromRawEvent(): String? {
+    private fun String.zynaAttributesFromRawEvent(): ZynaMessageAttributes? {
         val content = runCatching { JSONObject(this).optJSONObject("content") }
             .getOrNull()
             ?: return null
-        return content.zynaForwardedFromFromContent()
+        return content.zynaAttributesFromContent()
     }
 
-    private fun JSONObject.zynaForwardedFromFromContent(): String? {
-        val editedForwardedFrom = optJSONObject("m.new_content")
-            ?.zynaForwardedFromFromContent()
-        if (!editedForwardedFrom.isNullOrBlank()) {
-            return editedForwardedFrom
+    private fun JSONObject.zynaAttributesFromContent(): ZynaMessageAttributes? {
+        val editedAttributes = optJSONObject("m.new_content")
+            ?.zynaAttributesFromContent()
+        if (editedAttributes != null && !editedAttributes.isEmpty) {
+            return editedAttributes
         }
 
         val formatted = optStringOrNull("formatted_body") ?: return null
-        return ZynaHtmlCodec.decode(formatted).forwardedFrom
+        return ZynaHtmlCodec.decode(formatted)
     }
 
     private fun MessageContent.formattedHtmlBodyOrNull(): String? {

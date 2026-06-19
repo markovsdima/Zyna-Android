@@ -41,6 +41,7 @@ data class CachedTimelineMessageEntity(
     val replySenderDisplayName: String?,
     val replyBody: String?,
     val forwardedFrom: String?,
+    val zynaAttributesJson: String?,
     @ColumnInfo(defaultValue = "0")
     val isEdited: Boolean,
     @ColumnInfo(defaultValue = "0")

@@ -33,6 +33,7 @@ import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
+import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -372,7 +373,12 @@ private fun ChatMessageList(
             adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
             adapter.onReplyHeaderClicked = onReplyHeaderClicked
             adapter.matrixMediaLoader = matrixMediaLoader
-            val displayedMessages = messages.asReversed()
+            val displayedMessages = messages
+                .asReversed()
+                .withMediaGroupPresentation(
+                    hasNewerBoundary = canLoadNewer,
+                    hasOlderBoundary = canLoadOlder
+                )
             val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
             val nextNewestMessageId = displayedMessages.firstOrNull()?.id
             val hasNewerMessage = previousNewestMessageId != null &&
@@ -801,18 +807,7 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         } else {
             senderDisplayName?.takeIf { it.isNotBlank() } ?: sender
         },
-        content = when (contentType) {
-            MatrixMessageContentType.REDACTED -> MessageContent.Redacted
-            MatrixMessageContentType.IMAGE -> imageInfo
-                ?.let {
-                    MessageContent.Image(
-                        imageInfo = it,
-                        caption = it.caption
-                    )
-                }
-                ?: MessageContent.Text(body.ifBlank { "Photo" })
-            else -> MessageContent.Text(body)
-        },
+        content = renderContent(),
         timestampText = timestampMillis.formatMessageTime(),
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
@@ -828,6 +823,33 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
         canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
     )
+}
+
+private fun MatrixChatMessage.renderContent(): MessageContent {
+    val presentation = mediaGroupPresentation
+    if (presentation?.rendersCompositeBubble == true && presentation.items.isNotEmpty()) {
+        return MessageContent.PhotoGroup(
+            items = presentation.items,
+            totalHint = presentation.totalHint,
+            caption = presentation.caption,
+            captionPlacement = presentation.captionPlacement,
+            layoutOverride = presentation.layoutOverride
+        )
+    }
+
+    return when (contentType) {
+        MatrixMessageContentType.REDACTED -> MessageContent.Redacted
+        MatrixMessageContentType.IMAGE -> imageInfo
+            ?.let {
+                MessageContent.Image(
+                    imageInfo = it,
+                    caption = if (presentation?.suppressIndividualCaption == true) null else it.caption,
+                    captionPlacement = zynaAttributes.mediaGroup?.captionPlacement ?: CaptionPlacement.BOTTOM
+                )
+            }
+            ?: MessageContent.Text(body.ifBlank { "Photo" })
+        else -> MessageContent.Text(body)
+    }
 }
 
 private fun MatrixChatMessage.editPreviewOrNull(): MessageEditPreview? {

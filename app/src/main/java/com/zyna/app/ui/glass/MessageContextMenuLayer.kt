@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
@@ -757,7 +758,8 @@ private class MenuDivider(
 private fun MessageRenderModel.copyableText(): String? {
     val text = when (val messageContent = content) {
         is MessageContent.Text -> messageContent.body
-        is MessageContent.Image -> messageContent.caption
+        is MessageContent.Image -> messageContent.caption.normalizedMessageCaption()
+        is MessageContent.PhotoGroup -> messageContent.caption.normalizedMessageCaption()
         MessageContent.Redacted -> null
     }
     return text?.takeIf { it.isNotBlank() }

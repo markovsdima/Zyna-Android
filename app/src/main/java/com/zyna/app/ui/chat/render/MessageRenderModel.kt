@@ -1,6 +1,10 @@
 package com.zyna.app.ui.chat.render
 
 import com.zyna.app.data.matrix.MatrixImageInfo
+import com.zyna.app.data.matrix.MatrixMediaGroupItem
+import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.data.messaging.MediaGroupLayoutOverride
+import com.zyna.app.data.messaging.normalizedMessageCaption
 
 internal data class MessageRenderModel(
     val id: String,
@@ -49,7 +53,15 @@ internal sealed interface MessageContent {
     data class Text(val body: String) : MessageContent
     data class Image(
         val imageInfo: MatrixImageInfo,
-        val caption: String?
+        val caption: String?,
+        val captionPlacement: CaptionPlacement = CaptionPlacement.BOTTOM
+    ) : MessageContent
+    data class PhotoGroup(
+        val items: List<MatrixMediaGroupItem>,
+        val totalHint: Int,
+        val caption: String?,
+        val captionPlacement: CaptionPlacement,
+        val layoutOverride: MediaGroupLayoutOverride?
     ) : MessageContent
     data object Redacted : MessageContent
 }
@@ -107,7 +119,8 @@ internal enum class MessageHitTarget {
 internal fun MessageRenderModel.accessibilityText(): String {
     val body = when (content) {
         is MessageContent.Text -> content.body
-        is MessageContent.Image -> content.caption ?: "Photo"
+        is MessageContent.Image -> content.caption.normalizedMessageCaption() ?: "Photo"
+        is MessageContent.PhotoGroup -> content.caption.normalizedMessageCaption() ?: "Photo group"
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
     val reply = replyInfo?.let { ", in reply to ${it.senderText}: ${it.body}" }.orEmpty()

@@ -12,7 +12,10 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
+import android.util.Log
+import com.zyna.app.BuildConfig
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.messaging.CaptionPlacement
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -27,7 +30,12 @@ internal class MessageCellView(
     private val bubbleRenderer = BubbleRenderer(density)
     private val textRenderer = TextMessageRenderer(context)
     private val imageRenderer = ImageMessageRenderer(context, imageLoader)
-    private val contentRenderers: List<MessageContentRenderer> = listOf(imageRenderer, textRenderer)
+    private val photoGroupRenderer = PhotoGroupMessageRenderer(context, imageLoader)
+    private val contentRenderers: List<MessageContentRenderer> = listOf(
+        photoGroupRenderer,
+        imageRenderer,
+        textRenderer
+    )
     private val bubbleRect = RectF()
     private val screenBubbleRect = RectF()
     private val screenLocation = IntArray(2)
@@ -50,7 +58,7 @@ internal class MessageCellView(
     private var replyHeaderTapEventId: String? = null
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
-    private var imageLoadHandle: AutoCloseable? = null
+    private var imageLoadHandles: List<AutoCloseable> = emptyList()
 
     var onContextMenuPreviewRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
@@ -84,8 +92,7 @@ internal class MessageCellView(
 
     fun bind(model: MessageRenderModel, theme: MessageRenderTheme) {
         val needsLayout = renderModel != model || renderTheme != theme
-        imageLoadHandle?.close()
-        imageLoadHandle = null
+        closeImageLoadHandles()
         renderModel = model
         renderTheme = theme
         contentDescription = model.accessibilityText()
@@ -151,12 +158,14 @@ internal class MessageCellView(
             layout = it
         }
 
-        bubbleRenderer.draw(
-            canvas = canvas,
-            rect = currentLayout.bubbleRect,
-            fillColor = theme.bubbleColor(model),
-            message = model
-        )
+        if (currentLayout.drawBubble) {
+            bubbleRenderer.draw(
+                canvas = canvas,
+                rect = currentLayout.bubbleRect,
+                fillColor = theme.bubbleColor(model),
+                message = model
+            )
+        }
         if (bubbleHighlightProgress > 0f) {
             bubbleRenderer.drawOverlay(
                 canvas = canvas,
@@ -255,8 +264,7 @@ internal class MessageCellView(
         removeCallbacks(openContextMenuRunnable)
         bubbleHighlightAnimator?.cancel()
         bubbleHighlightAnimator = null
-        imageLoadHandle?.close()
-        imageLoadHandle = null
+        closeImageLoadHandles()
         resetContextMenuTouchState()
         isContextMenuSourceHidden = false
         super.onDetachedFromWindow()
@@ -397,15 +405,50 @@ internal class MessageCellView(
 
     private fun buildContextMenuRequest(): MessageContextMenuRequest? {
         val model = renderModel ?: return null
+        val currentLayout = layout ?: return null
         if (!bubbleBoundsInScreen(screenBubbleRect)) {
             return null
         }
+        logContextMenuBubble(model, currentLayout)
         return MessageContextMenuRequest(
             cell = this,
             message = model,
             bubbleBoundsInScreen = RectF(screenBubbleRect),
             touchRawX = lastTouchRawX,
             touchRawY = lastTouchRawY
+        )
+    }
+
+    private fun logContextMenuBubble(model: MessageRenderModel, currentLayout: MessageCellLayout) {
+        if (!BuildConfig.DEBUG) {
+            return
+        }
+        val content = model.content
+        val chrome = currentLayout.renderer.chrome(model)
+        Log.d(
+            CONTEXT_MENU_BUBBLE_LOG_TAG,
+            buildString {
+                append("id=").append(model.id)
+                append(" eventId=").append(model.eventId)
+                append(" outgoing=").append(model.isOutgoing)
+                append(" content=").append(content::class.java.simpleName)
+                append(" chrome=").append(chrome)
+                append(" drawBubble=").append(currentLayout.drawBubble)
+                append(" bubble=").append(currentLayout.bubbleRect.toDebugString())
+                append(" screen=").append(screenBubbleRect.toDebugString())
+                append(" contentOffset=")
+                    .append(currentLayout.contentLeft)
+                    .append(',')
+                    .append(currentLayout.contentTop)
+                append(" contentSize=")
+                    .append(currentLayout.contentLayout.width)
+                    .append('x')
+                    .append(currentLayout.contentLayout.height)
+                append(' ')
+                append(content.debugSummary())
+                append(' ')
+                append(currentLayout.contentLayout.debugSummary())
+            }
         )
     }
 
@@ -448,6 +491,7 @@ internal class MessageCellView(
                 bubbleRect = RectF(bubbleRect),
                 contentLeft = 0,
                 contentTop = 0,
+                drawBubble = false,
                 renderer = textRenderer,
                 contentLayout = textRenderer.measure(
                     message = MessageRenderModel(
@@ -465,15 +509,26 @@ internal class MessageCellView(
         }
 
         val renderer = rendererFor(model.content)
+        val chrome = renderer.chrome(model)
+        val contentHorizontalInset = if (chrome == MessageContentChrome.PADDED_BUBBLE) {
+            bubbleHorizontalInset
+        } else {
+            0
+        }
+        val contentVerticalInset = if (chrome == MessageContentChrome.PADDED_BUBBLE) {
+            bubbleVerticalInset
+        } else {
+            0
+        }
         val maxBubbleWidth = maxBubbleWidth(width)
         val maxContentWidth = max(
             minBubbleContentWidth,
-            maxBubbleWidth - bubbleHorizontalInset * 2
+            maxBubbleWidth - contentHorizontalInset * 2
         )
         val contentLayout = renderer.measure(model, theme, maxContentWidth)
-        val bubbleWidth = (contentLayout.width + bubbleHorizontalInset * 2)
+        val bubbleWidth = (contentLayout.width + contentHorizontalInset * 2)
             .coerceAtMost(maxBubbleWidth)
-        val bubbleHeight = contentLayout.height + bubbleVerticalInset * 2
+        val bubbleHeight = contentLayout.height + contentVerticalInset * 2
         val bubbleLeft = if (model.isOutgoing) {
             width - outerHorizontalPadding - bubbleWidth
         } else {
@@ -490,8 +545,9 @@ internal class MessageCellView(
         return MessageCellLayout(
             height = bubbleTop + bubbleHeight + outerBottomPadding,
             bubbleRect = RectF(bubbleRect),
-            contentLeft = bubbleLeft + bubbleHorizontalInset,
-            contentTop = bubbleTop + bubbleVerticalInset,
+            contentLeft = bubbleLeft + contentHorizontalInset,
+            contentTop = bubbleTop + contentVerticalInset,
+            drawBubble = chrome != MessageContentChrome.BARE,
             renderer = renderer,
             contentLayout = contentLayout
         )
@@ -503,21 +559,33 @@ internal class MessageCellView(
     }
 
     private fun startImageLoadIfNeeded(model: MessageRenderModel) {
-        val image = model.content as? MessageContent.Image ?: return
         val loader = imageLoader ?: return
-        if (loader.cachedImage(image.imageInfo) != null) {
-            return
-        }
         val boundMessageId = model.id
-        imageLoadHandle = loader.loadImage(
-            imageInfo = image.imageInfo,
-            targetWidthPx = imageLoadTargetWidth,
-            targetHeightPx = imageLoadTargetHeight
-        ) {
-            if (renderModel?.id == boundMessageId) {
-                invalidate()
-            }
+        val imageInfos = when (val content = model.content) {
+            is MessageContent.Image -> listOf(content.imageInfo)
+            is MessageContent.PhotoGroup -> content.items
+                .take(PhotoGroupLayout.visibleItemCount(content.items.size))
+                .map { it.imageInfo }
+            else -> emptyList()
         }
+        imageLoadHandles = imageInfos
+            .filter { loader.cachedImage(it) == null }
+            .map { imageInfo ->
+                loader.loadImage(
+                    imageInfo = imageInfo,
+                    targetWidthPx = imageLoadTargetWidth,
+                    targetHeightPx = imageLoadTargetHeight
+                ) {
+                    if (renderModel?.id == boundMessageId) {
+                        invalidate()
+                    }
+                }
+            }
+    }
+
+    private fun closeImageLoadHandles() {
+        imageLoadHandles.forEach { it.close() }
+        imageLoadHandles = emptyList()
     }
 
     private fun maxBubbleWidth(width: Int): Int {
@@ -549,6 +617,7 @@ private data class MessageCellLayout(
     val bubbleRect: RectF,
     val contentLeft: Int,
     val contentTop: Int,
+    val drawBubble: Boolean,
     val renderer: MessageContentRenderer,
     val contentLayout: MessageContentLayout
 )
@@ -573,3 +642,67 @@ private const val BUBBLE_HIGHLIGHT_DURATION_MS = 920L
 private const val BUBBLE_HIGHLIGHT_MAX_ALPHA = 72
 private const val BUBBLE_HIGHLIGHT_RAMP_UP_FRACTION = 0.16f
 private const val BUBBLE_HIGHLIGHT_HOLD_FRACTION = 0.42f
+private const val CONTEXT_MENU_BUBBLE_LOG_TAG = "ZynaBubbleLog"
+
+private fun MessageContent.debugSummary(): String {
+    return when (this) {
+        is MessageContent.Image -> "imageCaption=${caption.debugCaption()} placement=$captionPlacement"
+        is MessageContent.PhotoGroup -> {
+            "groupItems=${items.size} totalHint=$totalHint " +
+                "groupCaption=${caption.debugCaption()} placement=$captionPlacement " +
+                "layoutOverride=$layoutOverride"
+        }
+        is MessageContent.Text -> "textLength=${body.length}"
+        MessageContent.Redacted -> "redacted=true"
+    }
+}
+
+private fun MessageContentLayout.debugSummary(): String {
+    return when (this) {
+        is PhotoGroupMessageLayout -> {
+            val bottomCaptionStrip = if (
+                captionLayout != null &&
+                captionPlacement == CaptionPlacement.BOTTOM
+            ) {
+                height - mediaY - mediaHeight
+            } else {
+                0
+            }
+            "groupLayout captionLayout=${captionLayout != null} " +
+                "hasHeader=$hasHeader mediaY=$mediaY media=${mediaWidth}x$mediaHeight " +
+                "height=$height captionY=$captionY captionTextHeight=${captionLayout?.height ?: 0} " +
+                "bottomCaptionStrip=$bottomCaptionStrip trailing=${height - mediaY - mediaHeight}"
+        }
+        is ImageMessageLayout -> {
+            val bottomCaptionStrip = if (
+                captionLayout != null &&
+                captionPlacement == CaptionPlacement.BOTTOM
+            ) {
+                height - imageY - imageHeight
+            } else {
+                0
+            }
+            "imageLayout bare=$isBareImage hasHeader=$hasHeader hasCaption=$hasCaption " +
+                "imageY=$imageY image=${imageWidth}x$imageHeight height=$height " +
+                "captionY=$captionY captionTextHeight=${captionLayout?.height ?: 0} " +
+                "bottomCaptionStrip=$bottomCaptionStrip trailing=${height - imageY - imageHeight}"
+        }
+        else -> "layout=${this::class.java.simpleName}"
+    }
+}
+
+private fun String?.debugCaption(): String {
+    if (this == null) {
+        return "null"
+    }
+    val preview = replace('\n', ' ')
+        .replace('\r', ' ')
+        .take(32)
+    return "len=$length blank=${isBlank()} preview='$preview'"
+}
+
+private fun RectF.toDebugString(): String {
+    return "${left.roundToInt()},${top.roundToInt()}-" +
+        "${right.roundToInt()},${bottom.roundToInt()} " +
+        "${width().roundToInt()}x${height().roundToInt()}"
+}

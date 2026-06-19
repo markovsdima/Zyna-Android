@@ -29,6 +29,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -1283,7 +1284,8 @@ class GlassChatLayout @JvmOverloads constructor(
     private fun copyMessageText(message: MessageRenderModel) {
         val text = when (val content = message.content) {
             is MessageContent.Text -> content.body
-            is MessageContent.Image -> content.caption
+            is MessageContent.Image -> content.caption.normalizedMessageCaption()
+            is MessageContent.PhotoGroup -> content.caption.normalizedMessageCaption()
             MessageContent.Redacted -> null
         }?.takeIf { it.isNotBlank() } ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1300,7 +1302,8 @@ class GlassChatLayout @JvmOverloads constructor(
         }
         val body = when (val currentContent = content) {
             is MessageContent.Text -> currentContent.body
-            is MessageContent.Image -> currentContent.caption ?: "Photo"
+            is MessageContent.Image -> currentContent.caption.normalizedMessageCaption() ?: "Photo"
+            is MessageContent.PhotoGroup -> currentContent.caption.normalizedMessageCaption() ?: "Photo group"
             MessageContent.Redacted -> return null
         }.takeIf { it.isNotBlank() } ?: return null
         return MessageReplyPreview(
@@ -1319,6 +1322,7 @@ class GlassChatLayout @JvmOverloads constructor(
         val body = when (val currentContent = content) {
             is MessageContent.Text -> currentContent.body
             is MessageContent.Image -> return null
+            is MessageContent.PhotoGroup -> return null
             MessageContent.Redacted -> return null
         }.takeIf { it.isNotBlank() } ?: return null
         return MessageForwardPreview(

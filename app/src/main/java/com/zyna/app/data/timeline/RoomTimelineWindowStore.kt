@@ -3,7 +3,7 @@ package com.zyna.app.data.timeline
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
-import com.zyna.app.data.local.TimelineWindowAnchor
+import com.zyna.app.data.local.TimelineWindowBounds
 import com.zyna.app.data.local.TimelineWindowSnapshot
 import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.matrix.MatrixChatMessage
@@ -20,8 +20,7 @@ class RoomTimelineWindowStore(
     private val initialLimit: Int = INITIAL_MESSAGE_LIMIT,
     private val pageSize: Int = OLDER_PAGE_SIZE
 ) {
-    private val anchor = MutableStateFlow<TimelineWindowAnchor?>(null)
-    private var newestAnchor: TimelineWindowAnchor? = null
+    private val bounds = MutableStateFlow<TimelineWindowBounds?>(null)
     private var hasOlderInDb = false
     private var hasNewerInDb = false
     private var didExpandOlder = false
@@ -33,7 +32,7 @@ class RoomTimelineWindowStore(
         localCacheRepository.observeRoomTimelineWindow(
             userId = userId,
             roomId = roomId,
-            anchorFlow = anchor,
+            boundsFlow = bounds,
             initialLimit = initialLimit
         ).map { messages ->
             TimelineWindowUpdate(
@@ -52,8 +51,11 @@ class RoomTimelineWindowStore(
     val canLoadOlderFromCache: Boolean
         get() = hasOlderInDb
 
+    val canLoadNewerFromCache: Boolean
+        get() = hasNewerInDb
+
     val isAtLiveEdge: Boolean
-        get() = !hasNewerInDb
+        get() = bounds.value?.newestAnchor == null
 
     fun recordTimelineFlush(summary: TimelineFlushSummary) {
         pendingOrigin = TimelineWindowChangeOrigin.TIMELINE_FLUSH
@@ -66,7 +68,7 @@ class RoomTimelineWindowStore(
             roomId = roomId,
             limit = initialLimit
         )
-        applySnapshotState(snapshot)
+        applySnapshotState(snapshot, keepLiveEdge = true)
         didFillInitialWindow = snapshot.messages.size >= initialLimit
         return snapshot.messages
     }
@@ -74,7 +76,7 @@ class RoomTimelineWindowStore(
     suspend fun refreshInitialWindowFromCacheIfNeeded(
         flushSummary: TimelineFlushSummary? = null
     ): Boolean {
-        if (didExpandOlder || didFillInitialWindow) {
+        if (didExpandOlder || didFillInitialWindow || bounds.value?.newestAnchor != null) {
             return false
         }
 
@@ -84,20 +86,22 @@ class RoomTimelineWindowStore(
             limit = initialLimit
         )
         val initialAnchor = snapshot.anchor ?: return false
-        val previousAnchor = anchor.value
+        val previousAnchor = bounds.value?.oldestAnchor
+        val didMoveAnchor = previousAnchor != initialAnchor
 
-        applySnapshotState(snapshot)
-        didFillInitialWindow = snapshot.messages.size >= initialLimit
-        if (previousAnchor != initialAnchor) {
+        if (didMoveAnchor) {
             pendingOrigin = TimelineWindowChangeOrigin.TIMELINE_FLUSH
             pendingFlushSummary = flushSummary
         }
-        return previousAnchor != initialAnchor
+        applySnapshotState(snapshot, keepLiveEdge = true)
+        didFillInitialWindow = snapshot.messages.size >= initialLimit
+        return didMoveAnchor
     }
 
     suspend fun expandOlderFromCache(): Boolean {
-        val currentAnchor = anchor.value ?: initializeAnchorFromCache()
+        val currentBounds = bounds.value ?: initializeBoundsFromCache()
             ?: return false
+        val currentAnchor = currentBounds.oldestAnchor ?: return false
 
         val olderAnchor = localCacheRepository.olderRoomTimelineWindowAnchor(
             userId = userId,
@@ -110,21 +114,60 @@ class RoomTimelineWindowStore(
             return false
         }
 
-        anchor.value = olderAnchor
-        pendingOrigin = TimelineWindowChangeOrigin.DATABASE_PAGINATION
-        hasOlderInDb = localCacheRepository.hasOlderRoomTimelineMessages(
+        val nextHasOlderInDb = localCacheRepository.hasOlderRoomTimelineMessages(
             userId = userId,
             roomId = roomId,
             anchor = olderAnchor
         )
-        newestAnchor?.let { newest ->
-            hasNewerInDb = localCacheRepository.hasNewerRoomTimelineMessages(
+        val nextHasNewerInDb = currentBounds.newestAnchor?.let { newest ->
+            localCacheRepository.hasNewerRoomTimelineMessages(
                 userId = userId,
                 roomId = roomId,
                 anchor = newest
             )
-        }
+        } ?: false
+        pendingOrigin = TimelineWindowChangeOrigin.DATABASE_PAGINATION
+        hasOlderInDb = nextHasOlderInDb
+        hasNewerInDb = nextHasNewerInDb
+        bounds.value = currentBounds.copy(oldestAnchor = olderAnchor)
         didExpandOlder = true
+        return true
+    }
+
+    suspend fun expandNewerFromCache(): Boolean {
+        val currentBounds = bounds.value ?: initializeBoundsFromCache()
+            ?: return false
+        val currentAnchor = currentBounds.newestAnchor ?: return false
+
+        val newerAnchor = localCacheRepository.newerRoomTimelineWindowAnchor(
+            userId = userId,
+            roomId = roomId,
+            anchor = currentAnchor,
+            limit = pageSize
+        )
+        if (newerAnchor == null) {
+            hasNewerInDb = false
+            return false
+        }
+
+        val nextHasNewerInDb = localCacheRepository.hasNewerRoomTimelineMessages(
+            userId = userId,
+            roomId = roomId,
+            anchor = newerAnchor
+        )
+        val nextHasOlderInDb = currentBounds.oldestAnchor?.let { oldest ->
+            localCacheRepository.hasOlderRoomTimelineMessages(
+                userId = userId,
+                roomId = roomId,
+                anchor = oldest
+            )
+        } ?: false
+        pendingOrigin = TimelineWindowChangeOrigin.DATABASE_PAGINATION
+        hasOlderInDb = nextHasOlderInDb
+        hasNewerInDb = nextHasNewerInDb
+        bounds.value = currentBounds.copy(
+            newestAnchor = if (nextHasNewerInDb) newerAnchor else null
+        )
         return true
     }
 
@@ -135,7 +178,7 @@ class RoomTimelineWindowStore(
             return true
         }
 
-        val currentAnchor = anchor.value ?: return false
+        val currentAnchor = bounds.value?.oldestAnchor ?: return false
         return withTimeoutOrNull(timeoutMillis) {
             while (true) {
                 delay(MATERIALIZATION_POLL_INTERVAL_MS)
@@ -154,22 +197,99 @@ class RoomTimelineWindowStore(
         } == true
     }
 
-    private suspend fun initializeAnchorFromCache(): TimelineWindowAnchor? {
+    suspend fun expandNewerFromCacheAfterMaterialization(
+        timeoutMillis: Long = MATERIALIZATION_TIMEOUT_MS
+    ): Boolean {
+        if (expandNewerFromCache()) {
+            return true
+        }
+
+        val currentAnchor = bounds.value?.newestAnchor ?: return false
+        return withTimeoutOrNull(timeoutMillis) {
+            while (true) {
+                delay(MATERIALIZATION_POLL_INTERVAL_MS)
+                if (
+                    localCacheRepository.hasNewerRoomTimelineMessages(
+                        userId = userId,
+                        roomId = roomId,
+                        anchor = currentAnchor
+                    ) && expandNewerFromCache()
+                ) {
+                    return@withTimeoutOrNull true
+                }
+            }
+
+            false
+        } == true
+    }
+
+    fun markNewerFullyLoaded() {
+        val currentBounds = bounds.value ?: return
+        if (currentBounds.newestAnchor == null && !hasNewerInDb) {
+            return
+        }
+        pendingOrigin = TimelineWindowChangeOrigin.DATABASE_PAGINATION
+        hasNewerInDb = false
+        bounds.value = currentBounds.copy(newestAnchor = null)
+    }
+
+    suspend fun jumpToEvent(eventId: String): Boolean {
+        val snapshot = localCacheRepository.roomTimelineWindowAroundEvent(
+            userId = userId,
+            roomId = roomId,
+            eventId = eventId,
+            limit = initialLimit
+        ) ?: return false
+
+        pendingOrigin = TimelineWindowChangeOrigin.JUMP
+        pendingFlushSummary = null
+        applySnapshotState(snapshot, keepLiveEdge = !snapshot.hasNewerInDb)
+        didExpandOlder = false
+        didFillInitialWindow = true
+        return true
+    }
+
+    suspend fun jumpToEventAfterMaterialization(
+        eventId: String,
+        timeoutMillis: Long = MATERIALIZATION_TIMEOUT_MS
+    ): Boolean {
+        if (jumpToEvent(eventId)) {
+            return true
+        }
+
+        return withTimeoutOrNull(timeoutMillis) {
+            while (true) {
+                delay(MATERIALIZATION_POLL_INTERVAL_MS)
+                if (jumpToEvent(eventId)) {
+                    return@withTimeoutOrNull true
+                }
+            }
+
+            false
+        } == true
+    }
+
+    private suspend fun initializeBoundsFromCache(): TimelineWindowBounds? {
         val snapshot = localCacheRepository.latestRoomTimelineWindowSnapshot(
             userId = userId,
             roomId = roomId,
             limit = initialLimit
         )
-        applySnapshotState(snapshot)
+        applySnapshotState(snapshot, keepLiveEdge = true)
         didFillInitialWindow = snapshot.messages.size >= initialLimit
-        return snapshot.anchor
+        return bounds.value
     }
 
-    private fun applySnapshotState(snapshot: TimelineWindowSnapshot<MatrixChatMessage>) {
-        anchor.value = snapshot.anchor
-        newestAnchor = snapshot.newestAnchor
+    private fun applySnapshotState(
+        snapshot: TimelineWindowSnapshot<MatrixChatMessage>,
+        keepLiveEdge: Boolean
+    ) {
         hasOlderInDb = snapshot.hasOlderInDb
-        hasNewerInDb = snapshot.hasNewerInDb
+        hasNewerInDb = !keepLiveEdge && snapshot.hasNewerInDb
+        bounds.value = TimelineWindowBounds(
+            oldestAnchor = snapshot.anchor,
+            newestAnchor = if (keepLiveEdge) null else snapshot.newestAnchor
+        )
     }
 
     private fun consumePendingOrigin(): TimelineWindowChangeOrigin {

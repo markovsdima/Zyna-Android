@@ -52,11 +52,14 @@ data class AppUiState(
     val isLoadingChat: Boolean = false,
     val isLoadingOlderChatMessages: Boolean = false,
     val canLoadOlderChatMessages: Boolean = true,
+    val canLoadNewerChatMessages: Boolean = false,
+    val isChatAtLiveEdge: Boolean = true,
     val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
     val chatSendErrorMessage: String? = null,
     val chatReplyTarget: MatrixReplyInfo? = null,
-    val chatEditTarget: MatrixEditTarget? = null
+    val chatEditTarget: MatrixEditTarget? = null,
+    val chatJumpTargetEventId: String? = null
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -163,11 +166,22 @@ class AppViewModel(
                         } else {
                             current.canLoadOlderChatMessages
                         },
+                        canLoadNewerChatMessages = if (shouldClearChat) {
+                            false
+                        } else {
+                            current.canLoadNewerChatMessages
+                        },
+                        isChatAtLiveEdge = if (shouldClearChat) true else current.isChatAtLiveEdge,
                         chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
                         chatReplyTarget = if (shouldClearChat) null else current.chatReplyTarget,
-                        chatEditTarget = if (shouldClearChat) null else current.chatEditTarget
+                        chatEditTarget = if (shouldClearChat) null else current.chatEditTarget,
+                        chatJumpTargetEventId = if (shouldClearChat) {
+                            null
+                        } else {
+                            current.chatJumpTargetEventId
+                        }
                     )
                 }
 
@@ -299,11 +313,14 @@ class AppViewModel(
                     isLoadingChat = initialMessages.isEmpty(),
                     isLoadingOlderChatMessages = false,
                     canLoadOlderChatMessages = true,
+                    canLoadNewerChatMessages = false,
+                    isChatAtLiveEdge = true,
                     chatErrorMessage = null,
                     isSendingChatMessage = false,
                     chatSendErrorMessage = null,
                     chatReplyTarget = null,
-                    chatEditTarget = null
+                    chatEditTarget = null,
+                    chatJumpTargetEventId = null
                 )
             }
 
@@ -335,11 +352,14 @@ class AppViewModel(
                 isLoadingChat = false,
                 isLoadingOlderChatMessages = false,
                 canLoadOlderChatMessages = true,
+                canLoadNewerChatMessages = false,
+                isChatAtLiveEdge = true,
                 chatErrorMessage = null,
                 isSendingChatMessage = false,
                 chatSendErrorMessage = null,
                 chatReplyTarget = null,
-                chatEditTarget = null
+                chatEditTarget = null,
+                chatJumpTargetEventId = null
             )
         }
     }
@@ -657,7 +677,9 @@ class AppViewModel(
                             it
                         } else it.copy(
                             isLoadingOlderChatMessages = false,
-                            canLoadOlderChatMessages = true
+                            canLoadOlderChatMessages = true,
+                            canLoadNewerChatMessages = timelineStore.canLoadNewerFromCache,
+                            isChatAtLiveEdge = timelineStore.isAtLiveEdge
                         )
                     }
                     return@launch
@@ -671,7 +693,10 @@ class AppViewModel(
                         it
                     } else it.copy(
                         isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = !hasReachedStart || didLoadFromFreshCache
+                        canLoadOlderChatMessages = !hasReachedStart || didLoadFromFreshCache,
+                        canLoadNewerChatMessages = timelineStore?.canLoadNewerFromCache
+                            ?: it.canLoadNewerChatMessages,
+                        isChatAtLiveEdge = timelineStore?.isAtLiveEdge ?: it.isChatAtLiveEdge
                     )
                 }
             } catch (error: CancellationException) {
@@ -682,6 +707,226 @@ class AppViewModel(
                         it
                     } else it.copy(isLoadingOlderChatMessages = false)
                 }
+            }
+        }
+    }
+
+    fun loadNewerChatMessages() {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val state = _uiState.value
+        val userId = state.matrixState.userIdOrNull() ?: return
+        if (
+            state.isLoadingChat ||
+            state.isLoadingOlderChatMessages ||
+            !state.canLoadNewerChatMessages ||
+            chatPaginationJob?.isActive == true
+        ) {
+            return
+        }
+
+        _uiState.update {
+            if (!it.isRouteForRoom(userId, route.roomId)) {
+                it
+            } else it.copy(isLoadingOlderChatMessages = true)
+        }
+
+        chatPaginationJob = viewModelScope.launch {
+            try {
+                val timelineStore = chatTimelineWindowStore
+                    ?.takeIf { it.matches(userId, route.roomId) }
+                val didLoadFromCache = timelineStore?.expandNewerFromCache() == true
+                if (didLoadFromCache) {
+                    _uiState.update {
+                        if (!it.isRouteForRoom(userId, route.roomId)) {
+                            it
+                        } else it.copy(
+                            isLoadingOlderChatMessages = false,
+                            canLoadNewerChatMessages = timelineStore.canLoadNewerFromCache,
+                            isChatAtLiveEdge = timelineStore.isAtLiveEdge
+                        )
+                    }
+                    return@launch
+                }
+
+                val hasReachedEnd = matrixClientService.paginateRoomTimelineForwards(route.roomId)
+                val didLoadFromFreshCache =
+                    timelineStore?.expandNewerFromCacheAfterMaterialization() == true
+                if (hasReachedEnd && !didLoadFromFreshCache) {
+                    timelineStore?.markNewerFullyLoaded()
+                }
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        canLoadNewerChatMessages = if (hasReachedEnd && !didLoadFromFreshCache) {
+                            false
+                        } else {
+                            timelineStore?.canLoadNewerFromCache == true || !hasReachedEnd
+                        },
+                        isChatAtLiveEdge = timelineStore?.isAtLiveEdge ?: true
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(isLoadingOlderChatMessages = false)
+                }
+            }
+        }
+    }
+
+    fun jumpToChatEvent(eventId: String) {
+        val normalizedEventId = eventId.takeIf { it.isNotBlank() } ?: return
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val state = _uiState.value
+        val userId = state.matrixState.userIdOrNull() ?: return
+        if (chatPaginationJob?.isActive == true) {
+            logTeleport("jump cancels activePagination target=${normalizedEventId.shortLogId()}")
+            chatPaginationJob?.cancel()
+            chatPaginationJob = null
+        }
+        logTeleport(
+            "jump request target=${normalizedEventId.shortLogId()} " +
+                "messages=${state.chatMessages.size} canOlder=${state.canLoadOlderChatMessages} " +
+                "canNewer=${state.canLoadNewerChatMessages} live=${state.isChatAtLiveEdge}"
+        )
+
+        val isTargetInCurrentWindow = state.chatMessages.any { message ->
+            message.eventId == normalizedEventId || message.id == normalizedEventId
+        }
+        if (isTargetInCurrentWindow) {
+            logTeleport("jump local target=${normalizedEventId.shortLogId()}")
+            _uiState.update {
+                if (!it.isRouteForRoom(userId, route.roomId)) {
+                    it
+                } else it.copy(
+                    chatWindowChangeOrigin = TimelineWindowChangeOrigin.JUMP,
+                    chatTimelineFlushSummary = null,
+                    isLoadingOlderChatMessages = false,
+                    chatSendErrorMessage = null,
+                    chatJumpTargetEventId = normalizedEventId
+                )
+            }
+            resetReadReceiptTracking()
+            return
+        }
+
+        _uiState.update {
+            if (!it.isRouteForRoom(userId, route.roomId)) {
+                it
+            } else it.copy(
+                isLoadingOlderChatMessages = true,
+                chatSendErrorMessage = null,
+                chatJumpTargetEventId = normalizedEventId
+            )
+        }
+        resetReadReceiptTracking()
+
+        chatPaginationJob = viewModelScope.launch {
+            var hasReachedStart = false
+            var didJump = false
+            try {
+                val timelineStore = chatTimelineWindowStore
+                    ?.takeIf { it.matches(userId, route.roomId) }
+                if (timelineStore == null) {
+                    logTeleport("jump abort noStore target=${normalizedEventId.shortLogId()}")
+                    _uiState.update {
+                        if (!it.isRouteForRoom(userId, route.roomId)) {
+                            it
+                        } else it.copy(
+                            isLoadingOlderChatMessages = false,
+                            chatJumpTargetEventId = if (it.chatJumpTargetEventId == normalizedEventId) {
+                                null
+                            } else {
+                                it.chatJumpTargetEventId
+                            }
+                        )
+                    }
+                    return@launch
+                }
+
+                didJump = timelineStore.jumpToEvent(normalizedEventId)
+                logTeleport(
+                    "jump cache target=${normalizedEventId.shortLogId()} didJump=$didJump " +
+                        "canOlder=${timelineStore.canLoadOlderFromCache} " +
+                        "canNewer=${timelineStore.canLoadNewerFromCache} live=${timelineStore.isAtLiveEdge}"
+                )
+                var attempts = 0
+                while (
+                    !didJump &&
+                    !hasReachedStart &&
+                    attempts < JUMP_PAGINATION_ATTEMPTS
+                ) {
+                    attempts += 1
+                    hasReachedStart = matrixClientService.paginateRoomTimelineBackwards(route.roomId)
+                    didJump = timelineStore.jumpToEventAfterMaterialization(normalizedEventId)
+                    logTeleport(
+                        "jump attempt=$attempts target=${normalizedEventId.shortLogId()} " +
+                            "reachedStart=$hasReachedStart didJump=$didJump"
+                    )
+                }
+                logTeleport(
+                    "jump final target=${normalizedEventId.shortLogId()} didJump=$didJump " +
+                        "attempts=$attempts reachedStart=$hasReachedStart " +
+                        "canOlder=${timelineStore.canLoadOlderFromCache} " +
+                        "canNewer=${timelineStore.canLoadNewerFromCache} live=${timelineStore.isAtLiveEdge}"
+                )
+
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        canLoadOlderChatMessages = when {
+                            didJump -> timelineStore.canLoadOlderFromCache || !hasReachedStart
+                            hasReachedStart -> false
+                            else -> it.canLoadOlderChatMessages
+                        },
+                        canLoadNewerChatMessages = if (didJump) {
+                            timelineStore.canLoadNewerFromCache
+                        } else {
+                            it.canLoadNewerChatMessages
+                        },
+                        isChatAtLiveEdge = timelineStore.isAtLiveEdge,
+                        chatJumpTargetEventId = if (didJump) {
+                            it.chatJumpTargetEventId
+                        } else if (it.chatJumpTargetEventId == normalizedEventId) {
+                            null
+                        } else {
+                            it.chatJumpTargetEventId
+                        }
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to jump to chat event", error)
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        chatJumpTargetEventId = if (it.chatJumpTargetEventId == normalizedEventId) {
+                            null
+                        } else {
+                            it.chatJumpTargetEventId
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearChatJumpTarget(eventId: String) {
+        _uiState.update {
+            if (it.chatJumpTargetEventId == eventId) {
+                it.copy(chatJumpTargetEventId = null)
+            } else {
+                it
             }
         }
     }
@@ -811,7 +1056,10 @@ class AppViewModel(
                 isLoadingChat = nextMessages.isEmpty(),
                 isLoadingOlderChatMessages = false,
                 canLoadOlderChatMessages = true,
-                chatErrorMessage = null
+                canLoadNewerChatMessages = if (resetMessages) false else it.canLoadNewerChatMessages,
+                isChatAtLiveEdge = if (resetMessages) true else it.isChatAtLiveEdge,
+                chatErrorMessage = null,
+                chatJumpTargetEventId = if (resetMessages) null else it.chatJumpTargetEventId
             )
         }
         chatCacheJob = viewModelScope.launch {
@@ -823,7 +1071,9 @@ class AppViewModel(
                         chatMessages = update.messages,
                         chatWindowChangeOrigin = update.origin,
                         chatTimelineFlushSummary = update.flushSummary,
-                        isLoadingChat = if (update.messages.isNotEmpty()) false else it.isLoadingChat
+                        isLoadingChat = if (update.messages.isNotEmpty()) false else it.isLoadingChat,
+                        canLoadNewerChatMessages = update.hasNewerInDb,
+                        isChatAtLiveEdge = timelineStore.isAtLiveEdge
                     )
                 }
             }
@@ -1058,10 +1308,22 @@ class AppViewModel(
         }
     }
 
+    private fun logTeleport(message: String) {
+        if (BuildConfig.DEBUG) {
+            Log.d(TELEPORT_LOG_TAG, message)
+        }
+    }
+
     private companion object {
         const val TAG = "AppViewModel"
+        const val TELEPORT_LOG_TAG = "ZynaChatTeleport"
         const val READ_RECEIPT_SEND_DELAY_MS = 250L
+        const val JUMP_PAGINATION_ATTEMPTS = 8
     }
+}
+
+private fun String.shortLogId(): String {
+    return takeLast(10)
 }
 
 class AppViewModelFactory(

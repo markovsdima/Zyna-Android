@@ -435,6 +435,24 @@ class MatrixClientService(
         }
     }
 
+    suspend fun paginateRoomTimelineForwards(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        val activeTimeline = synchronized(activeTimelineLock) {
+            activeRoomTimelines[roomId]
+        } ?: error("Chat timeline is not ready")
+
+        timelinePaginationMutex.withLock {
+            for (page in 0 until TIMELINE_INTERACTIVE_BACKFILL_PAGES) {
+                val hasReachedEnd = activeTimeline.paginateForwards(
+                    TIMELINE_PAGE_SIZE.toUShort()
+                )
+                if (hasReachedEnd) {
+                    return@withLock true
+                }
+            }
+            false
+        }
+    }
+
     fun prepareTransactionId(): String {
         return genTransactionId()
     }

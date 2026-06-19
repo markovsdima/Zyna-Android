@@ -1,6 +1,8 @@
 package com.zyna.app.ui.chat
 
+import android.util.Log
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +24,7 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
+import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixEditTarget
@@ -36,6 +39,7 @@ import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
@@ -56,16 +60,21 @@ fun ChatScreen(
     isLoading: Boolean,
     isLoadingOlder: Boolean,
     canLoadOlder: Boolean,
+    canLoadNewer: Boolean,
+    isAtLiveEdge: Boolean,
     errorMessage: String?,
     isSendingMessage: Boolean = false,
     sendErrorMessage: String? = null,
     replyTarget: MatrixReplyInfo? = null,
     editTarget: MatrixEditTarget? = null,
+    jumpTargetEventId: String? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
+    onLoadNewer: () -> Unit,
     onSendMessage: (String) -> Boolean = { false },
     onReplyToMessage: (MatrixReplyInfo) -> Unit = {},
+    onReplyHeaderClicked: (String) -> Unit = {},
     onCancelReply: () -> Unit = {},
     onEditMessage: (MatrixEditTarget) -> Unit = {},
     onCancelEdit: () -> Unit = {},
@@ -77,7 +86,8 @@ fun ChatScreen(
         roomId: String,
         eventId: String?,
         canEstablishBaseline: Boolean
-    ) -> Unit = { _, _, _ -> }
+    ) -> Unit = { _, _, _ -> },
+    onJumpTargetConsumed: (String) -> Unit = {}
 ) {
     val glassPalette = chatGlassPalette()
     val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
@@ -136,15 +146,20 @@ fun ChatScreen(
                 isLoading = isLoading,
                 isLoadingOlder = isLoadingOlder,
                 canLoadOlder = canLoadOlder,
+                canLoadNewer = canLoadNewer,
+                isAtLiveEdge = isAtLiveEdge,
                 isSendingMessage = isSendingMessage,
                 sendErrorMessage = sendErrorMessage,
                 sendErrorColor = sendErrorColor,
                 replyTarget = replyTarget,
                 editTarget = editTarget,
+                jumpTargetEventId = jumpTargetEventId,
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
+                onLoadNewer = onLoadNewer,
                 onSendMessage = onSendMessage,
                 onReplyToMessage = onReplyToMessage,
+                onReplyHeaderClicked = onReplyHeaderClicked,
                 onCancelReply = onCancelReply,
                 onEditMessage = onEditMessage,
                 onCancelEdit = onCancelEdit,
@@ -153,6 +168,7 @@ fun ChatScreen(
                 onRedactMessage = onRedactMessage,
                 onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
                 onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
+                onJumpTargetConsumed = onJumpTargetConsumed,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
@@ -169,15 +185,20 @@ private fun ChatMessageList(
     isLoading: Boolean,
     isLoadingOlder: Boolean,
     canLoadOlder: Boolean,
+    canLoadNewer: Boolean,
+    isAtLiveEdge: Boolean,
     isSendingMessage: Boolean,
     sendErrorMessage: String?,
     sendErrorColor: Int,
     replyTarget: MatrixReplyInfo?,
     editTarget: MatrixEditTarget?,
+    jumpTargetEventId: String?,
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
+    onLoadNewer: () -> Unit,
     onSendMessage: (String) -> Boolean,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
+    onReplyHeaderClicked: (String) -> Unit,
     onCancelReply: () -> Unit,
     onEditMessage: (MatrixEditTarget) -> Unit,
     onCancelEdit: () -> Unit,
@@ -190,6 +211,7 @@ private fun ChatMessageList(
         eventId: String?,
         canEstablishBaseline: Boolean
     ) -> Unit,
+    onJumpTargetConsumed: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val messageTheme = MessageRenderTheme(
@@ -209,9 +231,11 @@ private fun ChatMessageList(
                 messageTheme = messageTheme,
                 onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
                 onContextMenuRequested = chatLayout::showMessageContextMenu,
-                onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
+                onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
+                onReplyHeaderClicked = onReplyHeaderClicked
             )
             chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.onLoadNewerMessages = onLoadNewer
             chatLayout.onReplyToMessage = { target ->
                 onReplyToMessage(target.toMatrixReplyInfo())
             }
@@ -223,7 +247,7 @@ private fun ChatMessageList(
             chatLayout.onRedactMessage = onRedactMessage
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.onEvaluateVisibleReadReceiptCandidate = {
-                chatLayout.evaluateVisibleReadReceiptCandidate { eventId, canEstablishBaseline ->
+                chatLayout.evaluateVisibleReadReceiptCandidate(isAtLiveEdge) { eventId, canEstablishBaseline ->
                     onVisibleReadReceiptCandidate(roomId, eventId, canEstablishBaseline)
                 }
             }
@@ -236,7 +260,8 @@ private fun ChatMessageList(
             chatLayout.setPalette(palette)
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder && !isLoading
+                canLoadOlder = canLoadOlder && !isLoading && jumpTargetEventId == null,
+                canLoadNewer = canLoadNewer && !isLoading && jumpTargetEventId == null
             )
             chatLayout.setEmptyState(messages.isEmpty(), isLoading)
             chatLayout.setComposerState(
@@ -249,6 +274,7 @@ private fun ChatMessageList(
         update = { chatLayout ->
             chatLayout.setPalette(palette)
             chatLayout.onLoadOlderMessages = onLoadOlder
+            chatLayout.onLoadNewerMessages = onLoadNewer
             chatLayout.onReplyToMessage = { target ->
                 onReplyToMessage(target.toMatrixReplyInfo())
             }
@@ -260,7 +286,7 @@ private fun ChatMessageList(
             chatLayout.onRedactMessage = onRedactMessage
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.onEvaluateVisibleReadReceiptCandidate = {
-                chatLayout.evaluateVisibleReadReceiptCandidate { eventId, canEstablishBaseline ->
+                chatLayout.evaluateVisibleReadReceiptCandidate(isAtLiveEdge) { eventId, canEstablishBaseline ->
                     onVisibleReadReceiptCandidate(roomId, eventId, canEstablishBaseline)
                 }
             }
@@ -272,7 +298,8 @@ private fun ChatMessageList(
             chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder && !isLoading
+                canLoadOlder = canLoadOlder && !isLoading && jumpTargetEventId == null,
+                canLoadNewer = canLoadNewer && !isLoading && jumpTargetEventId == null
             )
             chatLayout.setEmptyState(messages.isEmpty(), isLoading)
             chatLayout.setComposerState(
@@ -286,6 +313,7 @@ private fun ChatMessageList(
             adapter.onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture
             adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
             adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
+            adapter.onReplyHeaderClicked = onReplyHeaderClicked
             val displayedMessages = messages.asReversed()
             val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
             val nextNewestMessageId = displayedMessages.firstOrNull()?.id
@@ -307,10 +335,95 @@ private fun ChatMessageList(
             } else null
             val wasEmpty = adapter.itemCount == 0
             val themeChanged = adapter.messageTheme != messageTheme
+            val jumpTargetPosition = jumpTargetEventId?.let { targetEventId ->
+                displayedMessages.indexOfFirst { message ->
+                    message.eventId == targetEventId || message.id == targetEventId
+                }.takeIf { it != -1 }
+            }
+            val shouldApplyJumpTarget = jumpTargetPosition != null &&
+                windowChangeOrigin == TimelineWindowChangeOrigin.JUMP
+            val visibleCenterPosition = layoutManager?.visibleCenterAdapterPosition()
+            val jumpDistance = jumpTargetPosition?.let { targetPosition ->
+                abs(targetPosition - (visibleCenterPosition ?: targetPosition))
+            } ?: 0
+            val isSameWindowJump = adapter.currentList.isSameMessageWindow(displayedMessages)
+            val shouldTeleportJump = shouldApplyJumpTarget &&
+                (!isSameWindowJump || jumpDistance > LOCAL_JUMP_SMOOTH_SCROLL_MAX_DISTANCE)
+            val shouldSmoothLocalJump = shouldApplyJumpTarget &&
+                isSameWindowJump &&
+                !shouldTeleportJump
+            val teleportDirection = if (
+                jumpTargetPosition != null &&
+                shouldTeleportJump &&
+                !wasEmpty
+            ) {
+                inferTeleportDirection(
+                    adapter = adapter,
+                    layoutManager = layoutManager,
+                    displayedMessages = displayedMessages,
+                    targetPosition = jumpTargetPosition
+                )
+            } else null
+            val didBeginTeleport = teleportDirection?.let(chatLayout::beginSnapshotTeleport) == true
+            if (jumpTargetEventId != null) {
+                logChatTeleport(
+                    "ui update origin=$windowChangeOrigin " +
+                        "targetFound=${jumpTargetPosition != null} " +
+                        "targetPosition=$jumpTargetPosition " +
+                        "shouldApply=$shouldApplyJumpTarget " +
+                        "sameWindow=$isSameWindowJump distance=$jumpDistance " +
+                        "teleport=$shouldTeleportJump smooth=$shouldSmoothLocalJump " +
+                        "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
+                        "firstVisible=$firstVisiblePosition wasEmpty=$wasEmpty " +
+                        "direction=$teleportDirection didBegin=$didBeginTeleport"
+                )
+            }
             adapter.messageTheme = messageTheme
             adapter.submitList(displayedMessages) {
                 if (displayedMessages.isNotEmpty()) {
-                    if (
+                    if (jumpTargetEventId != null && jumpTargetPosition != null && shouldApplyJumpTarget) {
+                        logChatTeleport(
+                            "commit scroll targetPosition=$jumpTargetPosition " +
+                                "didBegin=$didBeginTeleport childCount=${recyclerView.childCount}"
+                        )
+                        recyclerView.stopScroll()
+                        if (didBeginTeleport) {
+                            layoutManager?.scrollToPositionWithOffset(
+                                jumpTargetPosition,
+                                recyclerView.jumpTargetScrollOffset()
+                            )
+                            recyclerView.runAfterNextPreDraw {
+                                logChatTeleport(
+                                    "preDraw complete targetPosition=$jumpTargetPosition " +
+                                        "childCount=${recyclerView.childCount}"
+                                )
+                                chatLayout.completeSnapshotTeleport {
+                                    chatLayout.highlightMessageAtAdapterPosition(jumpTargetPosition)
+                                    onJumpTargetConsumed(jumpTargetEventId)
+                                }
+                            }
+                        } else {
+                            if (shouldSmoothLocalJump) {
+                                val scrollDelayMillis = jumpDistance.localJumpScrollDelayMillis()
+                                recyclerView.smoothScrollToPosition(jumpTargetPosition)
+                                chatLayout.highlightMessageAtAdapterPosition(
+                                    position = jumpTargetPosition,
+                                    delayMillis = scrollDelayMillis + LOCAL_JUMP_HIGHLIGHT_DELAY_MS
+                                )
+                                recyclerView.postDelayed(
+                                    { onJumpTargetConsumed(jumpTargetEventId) },
+                                    scrollDelayMillis
+                                )
+                            } else {
+                                layoutManager?.scrollToPositionWithOffset(
+                                    jumpTargetPosition,
+                                    recyclerView.jumpTargetScrollOffset()
+                                )
+                                chatLayout.highlightMessageAtAdapterPosition(jumpTargetPosition)
+                                onJumpTargetConsumed(jumpTargetEventId)
+                            }
+                        }
+                    } else if (
                         wasEmpty ||
                         (
                             wasAtBottom &&
@@ -343,6 +456,7 @@ private fun ChatMessageList(
 }
 
 private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
+    isAtLiveEdge: Boolean,
     onCandidate: (eventId: String?, canEstablishBaseline: Boolean) -> Unit
 ) {
     val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
@@ -397,7 +511,7 @@ private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
 
     onCandidate(
         candidate,
-        firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
+        isAtLiveEdge && firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
     )
 }
 
@@ -405,6 +519,74 @@ private data class ViewportAnchor(
     val messageId: String,
     val top: Int
 )
+
+private fun inferTeleportDirection(
+    adapter: ChatMessageAdapter,
+    layoutManager: LinearLayoutManager?,
+    displayedMessages: List<MatrixChatMessage>,
+    targetPosition: Int
+): ChatTeleportDirection {
+    val target = displayedMessages.getOrNull(targetPosition)
+        ?: return ChatTeleportDirection.TO_OLDER
+    val referencePosition = layoutManager?.visibleCenterAdapterPosition()
+    val reference = referencePosition?.let { adapter.currentList.getOrNull(it) }
+    if (reference != null && reference.timestampMillis != target.timestampMillis) {
+        return if (target.timestampMillis < reference.timestampMillis) {
+            ChatTeleportDirection.TO_OLDER
+        } else {
+            ChatTeleportDirection.TO_NEWER
+        }
+    }
+
+    return if (referencePosition != null && targetPosition < referencePosition) {
+        ChatTeleportDirection.TO_NEWER
+    } else {
+        ChatTeleportDirection.TO_OLDER
+    }
+}
+
+private fun LinearLayoutManager.visibleCenterAdapterPosition(): Int? {
+    val firstVisible = findFirstVisibleItemPosition()
+    val lastVisible = findLastVisibleItemPosition()
+    if (
+        firstVisible == RecyclerView.NO_POSITION ||
+        lastVisible == RecyclerView.NO_POSITION ||
+        firstVisible > lastVisible
+    ) {
+        return null
+    }
+    return firstVisible + (lastVisible - firstVisible) / 2
+}
+
+private fun List<MatrixChatMessage>.isSameMessageWindow(other: List<MatrixChatMessage>): Boolean {
+    return size == other.size &&
+        firstOrNull()?.id == other.firstOrNull()?.id &&
+        lastOrNull()?.id == other.lastOrNull()?.id
+}
+
+private fun Int.localJumpScrollDelayMillis(): Long {
+    return (LOCAL_JUMP_SCROLL_BASE_DELAY_MS + this * LOCAL_JUMP_SCROLL_PER_ITEM_DELAY_MS)
+        .coerceAtMost(LOCAL_JUMP_SCROLL_MAX_DELAY_MS)
+}
+
+private fun RecyclerView.runAfterNextPreDraw(action: () -> Unit) {
+    val observer = viewTreeObserver
+    observer.addOnPreDrawListener(
+        object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                val currentObserver = viewTreeObserver
+                if (currentObserver.isAlive) {
+                    currentObserver.removeOnPreDrawListener(this)
+                } else {
+                    observer.removeOnPreDrawListener(this)
+                }
+                action()
+                return true
+            }
+        }
+    )
+    invalidate()
+}
 
 private fun RecyclerView.findViewportAnchor(adapter: ChatMessageAdapter): ViewportAnchor? {
     val layoutManager = layoutManager ?: return null
@@ -439,6 +621,11 @@ private fun RecyclerView.findViewportAnchor(adapter: ChatMessageAdapter): Viewpo
     )
 }
 
+private fun RecyclerView.jumpTargetScrollOffset(): Int {
+    val availableHeight = (height - paddingTop - paddingBottom).coerceAtLeast(0)
+    return paddingTop + (availableHeight * JUMP_TARGET_VIEWPORT_FRACTION).toInt()
+}
+
 @Composable
 private fun chatGlassPalette(): GlassPalette {
     val scheme = MaterialTheme.colorScheme
@@ -456,7 +643,8 @@ private class ChatMessageAdapter(
     var messageTheme: MessageRenderTheme,
     var onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
-    var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit
+    var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
+    var onReplyHeaderClicked: (String) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
     init {
         setHasStableIds(true)
@@ -476,7 +664,8 @@ private class ChatMessageAdapter(
             theme = messageTheme,
             onContextMenuPreviewRequested = onContextMenuPreviewRequested,
             onContextMenuRequested = onContextMenuRequested,
-            onContextMenuGestureEvent = onContextMenuGestureEvent
+            onContextMenuGestureEvent = onContextMenuGestureEvent,
+            onReplyHeaderClicked = onReplyHeaderClicked
         )
     }
 }
@@ -496,11 +685,13 @@ private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder
         theme: MessageRenderTheme,
         onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
-        onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit
+        onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
+        onReplyHeaderClicked: (String) -> Unit
     ) {
         messageView.onContextMenuPreviewRequested = onContextMenuPreviewRequested
         messageView.onContextMenuRequested = onContextMenuRequested
         messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
+        messageView.onReplyHeaderClicked = onReplyHeaderClicked
         messageView.bind(message, theme)
     }
 }
@@ -625,9 +816,22 @@ private fun Long.formatMessageTime(): String {
     )
 }
 
+private fun logChatTeleport(message: String) {
+    if (BuildConfig.DEBUG) {
+        Log.d(CHAT_TELEPORT_TAG, message)
+    }
+}
+
 private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
+private const val CHAT_TELEPORT_TAG = "ZynaChatTeleport"
 private const val NEWEST_EDGE_THRESHOLD = 1
+private const val JUMP_TARGET_VIEWPORT_FRACTION = 0.42f
+private const val LOCAL_JUMP_SMOOTH_SCROLL_MAX_DISTANCE = 28
+private const val LOCAL_JUMP_SCROLL_BASE_DELAY_MS = 320L
+private const val LOCAL_JUMP_SCROLL_PER_ITEM_DELAY_MS = 24L
+private const val LOCAL_JUMP_SCROLL_MAX_DELAY_MS = 1_400L
+private const val LOCAL_JUMP_HIGHLIGHT_DELAY_MS = 80L
 private const val READ_RECEIPT_VISIBILITY_THRESHOLD = 0.6f
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
 private const val FNV_64_OFFSET_BASIS = -3750763034362895579L

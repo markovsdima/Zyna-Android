@@ -34,6 +34,17 @@ internal class BubbleRenderer(
         canvas.drawPath(path, paint)
     }
 
+    fun drawOverlay(
+        canvas: Canvas,
+        rect: RectF,
+        color: Int,
+        message: MessageRenderModel
+    ) {
+        rebuildPathIfNeeded(rect, message)
+        paint.color = color
+        canvas.drawPath(path, paint)
+    }
+
     private fun rebuildPathIfNeeded(rect: RectF, message: MessageRenderModel) {
         if (
             rect.left == lastLeft &&

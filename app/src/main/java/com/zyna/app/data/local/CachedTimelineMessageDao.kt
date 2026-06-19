@@ -53,6 +53,39 @@ interface CachedTimelineMessageDao {
 
     @Query(
         """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id NOT LIKE :localIdPattern
+            AND (
+                timestampMillis > :fromTimestampMillis
+                OR (
+                    timestampMillis = :fromTimestampMillis
+                    AND id >= :fromId
+                )
+            )
+            AND (
+                timestampMillis < :toTimestampMillis
+                OR (
+                    timestampMillis = :toTimestampMillis
+                    AND id <= :toId
+                )
+            )
+        ORDER BY timestampMillis ASC, id ASC
+        """
+    )
+    fun observeRoomMessagesRange(
+        userId: String,
+        roomId: String,
+        localIdPattern: String,
+        fromTimestampMillis: Long,
+        fromId: String,
+        toTimestampMillis: Long,
+        toId: String
+    ): Flow<List<CachedTimelineMessageEntity>>
+
+    @Query(
+        """
         SELECT * FROM (
             SELECT * FROM timeline_messages
             WHERE userId = :userId
@@ -68,6 +101,76 @@ interface CachedTimelineMessageDao {
         userId: String,
         roomId: String,
         localIdPattern: String,
+        limit: Int
+    ): List<CachedTimelineMessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id NOT LIKE :localIdPattern
+            AND eventId = :eventId
+        ORDER BY timestampMillis DESC, id DESC
+        LIMIT 1
+        """
+    )
+    suspend fun roomMessageByEventId(
+        userId: String,
+        roomId: String,
+        localIdPattern: String,
+        eventId: String
+    ): CachedTimelineMessageEntity?
+
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id NOT LIKE :localIdPattern
+            AND (
+                timestampMillis < :atTimestampMillis
+                OR (
+                    timestampMillis = :atTimestampMillis
+                    AND id <= :atId
+                )
+            )
+        ORDER BY timestampMillis DESC, id DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun roomMessagesAtOrBefore(
+        userId: String,
+        roomId: String,
+        localIdPattern: String,
+        atTimestampMillis: Long,
+        atId: String,
+        limit: Int
+    ): List<CachedTimelineMessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM timeline_messages
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id NOT LIKE :localIdPattern
+            AND (
+                timestampMillis > :afterTimestampMillis
+                OR (
+                    timestampMillis = :afterTimestampMillis
+                    AND id > :afterId
+                )
+            )
+        ORDER BY timestampMillis ASC, id ASC
+        LIMIT :limit
+        """
+    )
+    suspend fun roomMessagesAfter(
+        userId: String,
+        roomId: String,
+        localIdPattern: String,
+        afterTimestampMillis: Long,
+        afterId: String,
         limit: Int
     ): List<CachedTimelineMessageEntity>
 

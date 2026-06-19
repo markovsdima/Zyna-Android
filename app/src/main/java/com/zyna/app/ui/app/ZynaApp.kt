@@ -19,8 +19,10 @@ fun ZynaApp(
     onRefreshChat: () -> Unit,
     onCloseChat: () -> Unit,
     onLoadOlderChatMessages: () -> Unit,
+    onLoadNewerChatMessages: () -> Unit,
     onSendChatMessage: (String) -> Boolean,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
+    onReplyHeaderClicked: (String) -> Unit,
     onCancelReply: () -> Unit,
     onEditMessage: (MatrixEditTarget) -> Unit,
     onCancelEdit: () -> Unit,
@@ -33,6 +35,7 @@ fun ZynaApp(
         eventId: String?,
         canEstablishBaseline: Boolean
     ) -> Unit,
+    onChatJumpTargetConsumed: (String) -> Unit,
     onLogout: () -> Unit
 ) {
     when (val route = state.route) {
@@ -62,16 +65,21 @@ fun ZynaApp(
             isLoading = state.isLoadingChat,
             isLoadingOlder = state.isLoadingOlderChatMessages,
             canLoadOlder = state.canLoadOlderChatMessages,
+            canLoadNewer = state.canLoadNewerChatMessages,
+            isAtLiveEdge = state.isChatAtLiveEdge,
             errorMessage = state.chatErrorMessage,
             isSendingMessage = state.isSendingChatMessage,
             sendErrorMessage = state.chatSendErrorMessage,
             replyTarget = state.chatReplyTarget,
             editTarget = state.chatEditTarget,
+            jumpTargetEventId = state.chatJumpTargetEventId,
             onRefresh = onRefreshChat,
             onBack = onCloseChat,
             onLoadOlder = onLoadOlderChatMessages,
+            onLoadNewer = onLoadNewerChatMessages,
             onSendMessage = onSendChatMessage,
             onReplyToMessage = onReplyToMessage,
+            onReplyHeaderClicked = onReplyHeaderClicked,
             onCancelReply = onCancelReply,
             onEditMessage = onEditMessage,
             onCancelEdit = onCancelEdit,
@@ -79,7 +87,8 @@ fun ZynaApp(
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
             onRedactMessage = onRedactMessage,
             onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
-            onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate
+            onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
+            onJumpTargetConsumed = onChatJumpTargetConsumed
         )
     }
 }

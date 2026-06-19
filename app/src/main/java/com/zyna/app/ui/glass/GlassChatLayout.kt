@@ -1,8 +1,13 @@
 package com.zyna.app.ui.glass
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.Build
 import android.os.Looper
@@ -12,7 +17,9 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.ViewTreeObserver
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
@@ -20,6 +27,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
+import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
@@ -41,6 +49,7 @@ class GlassChatLayout @JvmOverloads constructor(
     val recyclerView = RecyclerView(context)
     val inputBar = GlassInputBarView(context, glassController)
     var onLoadOlderMessages: () -> Unit = {}
+    var onLoadNewerMessages: () -> Unit = {}
     var onRetryOutgoingEnvelope: (String) -> Unit = {}
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
     internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
@@ -68,10 +77,15 @@ class GlassChatLayout @JvmOverloads constructor(
     private var composerErrorMessage: String? = null
     private var isLoadingOlderMessages = false
     private var canLoadOlderMessages = false
+    private var canLoadNewerMessages = false
     private var prefetchCheckPosted = false
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
     private var recyclerAccessibilityBeforeMenu = IMPORTANT_FOR_ACCESSIBILITY_AUTO
+    private var teleportSnapshotView: ImageView? = null
+    private var teleportSnapshotBitmap: Bitmap? = null
+    private var teleportAnimator: ValueAnimator? = null
+    private var teleportDirection = ChatTeleportDirection.TO_OLDER
     private var hardwareBackdropCapture: HardwareBufferChatCapture? = null
     private var hardwareBackdropCaptureScheduled = false
     private var hardwareBackdropCaptureRequiresFreshImage = false
@@ -113,6 +127,9 @@ class GlassChatLayout @JvmOverloads constructor(
     private val vulkanGlassAdaptiveRenderRunnable = Runnable {
         vulkanGlassAdaptiveRenderScheduled = false
         renderVulkanGlassAdaptiveTransitionFrame()
+    }
+    private val teleportTimeoutRunnable = Runnable {
+        cancelSnapshotTeleport()
     }
     private val recyclerDrawListener = ViewTreeObserver.OnDrawListener {
         val scrollOffset = recyclerView.computeVerticalScrollOffset()
@@ -224,6 +241,7 @@ class GlassChatLayout @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        cancelSnapshotTeleport()
         detachRecyclerDrawListener()
         removeCallbacks(readReceiptCandidateEvaluationRunnable)
         removeCallbacks(hardwareBackdropCaptureRunnable)
@@ -279,9 +297,14 @@ class GlassChatLayout @JvmOverloads constructor(
         emptyView.visibility = if (isEmpty) VISIBLE else GONE
     }
 
-    fun setPaginationState(isLoadingOlder: Boolean, canLoadOlder: Boolean) {
+    fun setPaginationState(
+        isLoadingOlder: Boolean,
+        canLoadOlder: Boolean,
+        canLoadNewer: Boolean
+    ) {
         isLoadingOlderMessages = isLoadingOlder
         canLoadOlderMessages = canLoadOlder
+        canLoadNewerMessages = canLoadNewer
     }
 
     fun setComposerState(isSending: Boolean, errorMessage: String?, errorColor: Int) {
@@ -306,6 +329,141 @@ class GlassChatLayout @JvmOverloads constructor(
     fun invalidateGlassContent() {
         glassController.invalidateBackdrop()
         scheduleVulkanGlassBackdropCapture()
+    }
+
+    fun beginSnapshotTeleport(direction: ChatTeleportDirection): Boolean {
+        val blockedReason = when {
+            isContextGestureActive -> "contextGestureActive"
+            isContextMenuShowing -> "contextMenuShowing"
+            recyclerView.width <= 0 -> "recyclerWidth=${recyclerView.width}"
+            recyclerView.height <= 0 -> "recyclerHeight=${recyclerView.height}"
+            recyclerView.childCount == 0 -> "childCount=0"
+            else -> null
+        }
+        if (blockedReason != null) {
+            logChatTeleport("begin skipped reason=$blockedReason direction=$direction")
+            return false
+        }
+
+        cancelSnapshotTeleport()
+        val bitmap = try {
+            Bitmap.createBitmap(recyclerView.width, recyclerView.height, Bitmap.Config.ARGB_8888)
+        } catch (error: OutOfMemoryError) {
+            Log.w(CHAT_TELEPORT_TAG, "Unable to allocate teleport snapshot", error)
+            return false
+        } catch (error: IllegalArgumentException) {
+            Log.w(CHAT_TELEPORT_TAG, "Unable to allocate teleport snapshot", error)
+            return false
+        }
+
+        Canvas(bitmap).also { canvas ->
+            canvas.drawColor(palette.background)
+            recyclerView.draw(canvas)
+        }
+
+        val snapshotView = ImageView(context).apply {
+            setImageBitmap(bitmap)
+            scaleType = ImageView.ScaleType.FIT_XY
+            setBackgroundColor(palette.background)
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            isClickable = true
+        }
+        teleportSnapshotBitmap = bitmap
+        teleportSnapshotView = snapshotView
+        teleportDirection = direction
+        logChatTeleport(
+            "begin snapshot direction=$direction " +
+                "size=${recyclerView.width}x${recyclerView.height} childCount=${recyclerView.childCount}"
+        )
+
+        val inputIndex = indexOfChild(inputBar).takeIf { it >= 0 } ?: childCount
+        addView(
+            snapshotView,
+            inputIndex,
+            LayoutParams(recyclerView.width, recyclerView.height)
+        )
+        layoutTeleportSnapshot()
+        setContextScrollLocked(true)
+        removeCallbacks(teleportTimeoutRunnable)
+        postDelayed(teleportTimeoutRunnable, CHAT_TELEPORT_TIMEOUT_MS)
+        return true
+    }
+
+    fun completeSnapshotTeleport(onComplete: () -> Unit = {}) {
+        val snapshotView = teleportSnapshotView
+        if (snapshotView == null) {
+            onComplete()
+            return
+        }
+
+        removeCallbacks(teleportTimeoutRunnable)
+        teleportAnimator?.removeAllListeners()
+        teleportAnimator?.cancel()
+
+        val distance = recyclerView.height.toFloat().takeIf { it > 0f }
+            ?: height.toFloat().coerceAtLeast(1f)
+        val directionSign = when (teleportDirection) {
+            ChatTeleportDirection.TO_OLDER -> 1f
+            ChatTeleportDirection.TO_NEWER -> -1f
+        }
+        logChatTeleport(
+            "complete start direction=$teleportDirection distance=$distance " +
+                "childCount=${recyclerView.childCount}"
+        )
+
+        recyclerView.translationY = -directionSign * distance
+        snapshotView.translationY = 0f
+
+        var didFinish = false
+        fun finishOnce(reason: String) {
+            if (didFinish) {
+                return
+            }
+            didFinish = true
+            logChatTeleport("complete finish reason=$reason")
+            cleanupSnapshotTeleport()
+            onComplete()
+        }
+
+        teleportAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = CHAT_TELEPORT_DURATION_MS
+            interpolator = DecelerateInterpolator(CHAT_TELEPORT_DECELERATION)
+            addUpdateListener { animation ->
+                val progress = animation.animatedValue as Float
+                snapshotView.translationY = directionSign * distance * progress
+                recyclerView.translationY = -directionSign * distance * (1f - progress)
+                invalidateGlassContent()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: Animator) {
+                    finishOnce("cancel")
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    finishOnce("end")
+                }
+            })
+            start()
+        }
+    }
+
+    fun cancelSnapshotTeleport() {
+        removeCallbacks(teleportTimeoutRunnable)
+        teleportAnimator?.removeAllListeners()
+        teleportAnimator?.cancel()
+        cleanupSnapshotTeleport()
+    }
+
+    fun highlightMessageAtAdapterPosition(position: Int, delayMillis: Long = CHAT_TARGET_HIGHLIGHT_DELAY_MS) {
+        recyclerView.postDelayed(
+            {
+                val cell = recyclerView
+                    .findViewHolderForAdapterPosition(position)
+                    ?.itemView as? MessageCellView
+                cell?.highlightBubble()
+            },
+            delayMillis
+        )
     }
 
     internal fun beginMessageContextMenuGesture(request: MessageContextMenuRequest): Boolean {
@@ -389,7 +547,7 @@ class GlassChatLayout @JvmOverloads constructor(
     }
 
     private fun maybeLoadOlderMessages() {
-        if (isLoadingOlderMessages || !canLoadOlderMessages) {
+        if (isLoadingOlderMessages || teleportSnapshotView != null || teleportAnimator != null) {
             return
         }
 
@@ -398,9 +556,23 @@ class GlassChatLayout @JvmOverloads constructor(
         if (itemCount == 0) {
             return
         }
+        val firstVisibleItem = layoutManager.findFirstVisibleItemPosition()
+        if (
+            canLoadNewerMessages &&
+            firstVisibleItem != RecyclerView.NO_POSITION &&
+            firstVisibleItem <= NEWER_LOAD_THRESHOLD
+        ) {
+            onLoadNewerMessages()
+            return
+        }
+
+        if (!canLoadOlderMessages) {
+            return
+        }
+
         val lastVisibleItem = layoutManager.findLastVisibleItemPosition()
         val shouldLoadMore =
-            itemCount < OLDER_PREFETCH_TARGET_ITEMS || (
+            (!canLoadNewerMessages && itemCount < OLDER_PREFETCH_TARGET_ITEMS) || (
                 lastVisibleItem != RecyclerView.NO_POSITION &&
                     lastVisibleItem >= itemCount - LOAD_OLDER_THRESHOLD
             )
@@ -461,6 +633,7 @@ class GlassChatLayout @JvmOverloads constructor(
         val height = bottom - top
         recyclerView.layout(0, 0, width, height)
         vulkanOverlay.layout(0, 0, width, height)
+        layoutTeleportSnapshot()
 
         val bottomInset = if (imeBottomInset > 0) imeBottomInset else navBottomInset
         val bottomMargin = 6.dpToPx(density)
@@ -1063,6 +1236,34 @@ class GlassChatLayout @JvmOverloads constructor(
         }
     }
 
+    private fun cleanupSnapshotTeleport() {
+        teleportAnimator = null
+        removeCallbacks(teleportTimeoutRunnable)
+        recyclerView.translationY = 0f
+        teleportSnapshotView?.let { snapshotView ->
+            snapshotView.setImageDrawable(null)
+            removeView(snapshotView)
+        }
+        teleportSnapshotView = null
+        teleportSnapshotBitmap?.recycle()
+        teleportSnapshotBitmap = null
+        if (!isContextGestureActive && !isContextMenuShowing) {
+            setContextScrollLocked(false)
+        }
+        invalidateGlassContent()
+    }
+
+    private fun layoutTeleportSnapshot() {
+        val snapshotView = teleportSnapshotView ?: return
+        val width = recyclerView.width
+        val height = recyclerView.height
+        snapshotView.measure(
+            MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
+        )
+        snapshotView.layout(recyclerView.left, recyclerView.top, recyclerView.right, recyclerView.bottom)
+    }
+
     private fun layoutComposerError(inputTop: Int, width: Int): Int {
         if (composerErrorView.visibility != VISIBLE) {
             return inputTop
@@ -1177,18 +1378,35 @@ private class VulkanGlassAdaptiveMaterialState {
     }
 }
 
+private fun logChatTeleport(message: String) {
+    if (BuildConfig.DEBUG) {
+        Log.d(CHAT_TELEPORT_TAG, message)
+    }
+}
+
+enum class ChatTeleportDirection {
+    TO_OLDER,
+    TO_NEWER
+}
+
 private const val ENABLE_VULKAN_CHAT_OVERLAY = true
 private const val ENABLE_VULKAN_CHAT_GLASS_BACKDROP = true
 private const val ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT = false
 private const val ENABLE_VULKAN_CHAT_INPUT_GLASS = true
 private const val ENABLE_VULKAN_CHAT_VERBOSE_TIMING = false
 private const val ENABLE_VULKAN_CHAT_PERF_LOGGING = false
+private const val CHAT_TELEPORT_TAG = "ZynaChatTeleport"
+private const val CHAT_TELEPORT_DURATION_MS = 340L
+private const val CHAT_TELEPORT_TIMEOUT_MS = 900L
+private const val CHAT_TELEPORT_DECELERATION = 1.7f
+private const val CHAT_TARGET_HIGHLIGHT_DELAY_MS = 80L
 private const val HARDWARE_BUFFER_CAPTURE_TAG = "ZynaHwBufferCapture"
 private const val VULKAN_GLASS_CAPTURE_DELAY_MS = 32L
 private const val VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS = 0L
 private const val VULKAN_GLASS_REALTIME_CAPTURE_MIN_INTERVAL_MS = 0L
 private const val VULKAN_GLASS_PERF_LOG_WINDOW_NANOS = 1_000_000_000L
 private const val LOAD_OLDER_THRESHOLD = 240
+private const val NEWER_LOAD_THRESHOLD = 16
 private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L

@@ -73,31 +73,47 @@ class LocalCacheRepository(
     fun observeRoomTimelineWindow(
         userId: String,
         roomId: String,
-        anchorFlow: Flow<TimelineWindowAnchor?>,
+        boundsFlow: Flow<TimelineWindowBounds?>,
         initialLimit: Int
     ): Flow<List<MatrixChatMessage>> {
-        return anchorFlow.flatMapLatest { anchor ->
-            val messagesFlow = if (anchor == null) {
-                messageDao.observeLatestRoomMessagesWindow(
-                    userId = userId,
-                    roomId = roomId,
-                    localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
-                    limit = initialLimit
-                )
-            } else {
-                messageDao.observeRoomMessagesFrom(
-                    userId = userId,
-                    roomId = roomId,
-                    localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
-                    fromTimestampMillis = anchor.timestampMillis,
-                    fromId = anchor.id
-                )
+        return boundsFlow.flatMapLatest { bounds ->
+            val oldestAnchor = bounds?.oldestAnchor
+            val newestAnchor = bounds?.newestAnchor
+            val messagesFlow = when {
+                oldestAnchor == null -> {
+                    messageDao.observeLatestRoomMessagesWindow(
+                        userId = userId,
+                        roomId = roomId,
+                        localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+                        limit = initialLimit
+                    )
+                }
+                newestAnchor == null -> {
+                    messageDao.observeRoomMessagesFrom(
+                        userId = userId,
+                        roomId = roomId,
+                        localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+                        fromTimestampMillis = oldestAnchor.timestampMillis,
+                        fromId = oldestAnchor.id
+                    )
+                }
+                else -> {
+                    messageDao.observeRoomMessagesRange(
+                        userId = userId,
+                        roomId = roomId,
+                        localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+                        fromTimestampMillis = oldestAnchor.timestampMillis,
+                        fromId = oldestAnchor.id,
+                        toTimestampMillis = newestAnchor.timestampMillis,
+                        toId = newestAnchor.id
+                    )
+                }
             }
             combine(
                 messagesFlow,
                 outgoingDao.observeActiveRoomEnvelopes(userId, roomId)
             ) { messages, outgoingEnvelopes ->
-                mergeTimelineWithOutgoing(messages, outgoingEnvelopes)
+                mergeTimelineWithOutgoing(messages, outgoingEnvelopes, bounds)
             }
         }.flowOn(Dispatchers.Default)
     }
@@ -132,7 +148,76 @@ class LocalCacheRepository(
 
         TimelineWindowSnapshot(
             anchor = oldestAnchor,
-            messages = mergeTimelineWithOutgoing(messages, outgoingEnvelopes),
+            messages = mergeTimelineWithOutgoing(
+                messages = messages,
+                outgoingEnvelopes = outgoingEnvelopes,
+                bounds = TimelineWindowBounds(oldestAnchor = oldestAnchor)
+            ),
+            newestAnchor = newestAnchor,
+            hasOlderInDb = oldestAnchor?.let { anchor ->
+                hasOlderRoomTimelineMessages(
+                    userId = userId,
+                    roomId = roomId,
+                    anchor = anchor
+                )
+            } ?: false,
+            hasNewerInDb = newestAnchor?.let { anchor ->
+                hasNewerRoomTimelineMessages(
+                    userId = userId,
+                    roomId = roomId,
+                    anchor = anchor
+                )
+            } ?: false
+        )
+    }
+
+    suspend fun roomTimelineWindowAroundEvent(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        limit: Int
+    ): TimelineWindowSnapshot<MatrixChatMessage>? = withContext(Dispatchers.IO) {
+        val target = messageDao.roomMessageByEventId(
+            userId = userId,
+            roomId = roomId,
+            localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+            eventId = eventId
+        ) ?: return@withContext null
+
+        val halfLimit = (limit / 2).coerceAtLeast(1)
+        val atOrBeforeTarget = messageDao.roomMessagesAtOrBefore(
+            userId = userId,
+            roomId = roomId,
+            localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+            atTimestampMillis = target.timestampMillis,
+            atId = target.id,
+            limit = halfLimit
+        )
+        val afterTarget = messageDao.roomMessagesAfter(
+            userId = userId,
+            roomId = roomId,
+            localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+            afterTimestampMillis = target.timestampMillis,
+            afterId = target.id,
+            limit = halfLimit
+        )
+        val messages = (atOrBeforeTarget.asReversed() + target + afterTarget)
+            .dedupeTimelineWindowEntities()
+        val oldestAnchor = messages.firstOrNull()?.toTimelineWindowAnchor()
+        val newestAnchor = messages.lastOrNull()?.toTimelineWindowAnchor()
+        val bounds = TimelineWindowBounds(
+            oldestAnchor = oldestAnchor,
+            newestAnchor = newestAnchor
+        )
+        val outgoingEnvelopes = outgoingDao.activeRoomEnvelopesSnapshot(userId, roomId)
+
+        TimelineWindowSnapshot(
+            anchor = oldestAnchor,
+            messages = mergeTimelineWithOutgoing(
+                messages = messages,
+                outgoingEnvelopes = outgoingEnvelopes,
+                bounds = bounds
+            ),
             newestAnchor = newestAnchor,
             hasOlderInDb = oldestAnchor?.let { anchor ->
                 hasOlderRoomTimelineMessages(
@@ -163,6 +248,24 @@ class LocalCacheRepository(
             localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
             beforeTimestampMillis = anchor.timestampMillis,
             beforeId = anchor.id,
+            limit = limit
+        )
+            .lastOrNull()
+            ?.toTimelineWindowAnchor()
+    }
+
+    suspend fun newerRoomTimelineWindowAnchor(
+        userId: String,
+        roomId: String,
+        anchor: TimelineWindowAnchor,
+        limit: Int
+    ): TimelineWindowAnchor? = withContext(Dispatchers.IO) {
+        messageDao.roomMessagesAfter(
+            userId = userId,
+            roomId = roomId,
+            localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
+            afterTimestampMillis = anchor.timestampMillis,
+            afterId = anchor.id,
             limit = limit
         )
             .lastOrNull()
@@ -829,7 +932,8 @@ class LocalCacheRepository(
 
     private fun mergeTimelineWithOutgoing(
         messages: List<CachedTimelineMessageEntity>,
-        outgoingEnvelopes: List<OutgoingEnvelopeEntity>
+        outgoingEnvelopes: List<OutgoingEnvelopeEntity>,
+        bounds: TimelineWindowBounds? = null
     ): List<MatrixChatMessage> {
         val hiddenTimelineIds = outgoingEnvelopes
             .flatMap { envelope -> listOfNotNull(envelope.transactionId, envelope.eventId) }
@@ -842,9 +946,32 @@ class LocalCacheRepository(
             .map { it.toChatMessage() }
         val outgoingMessages = outgoingEnvelopes
             .mapNotNull { it.toChatMessageOrNull() }
+            .filter { message -> bounds?.contains(message) ?: true }
 
         return (timelineMessages + outgoingMessages)
             .sortedWith(compareBy<MatrixChatMessage> { it.timestampMillis }.thenBy { it.id })
+    }
+
+    private fun TimelineWindowBounds.contains(message: MatrixChatMessage): Boolean {
+        val oldest = oldestAnchor
+        val newest = newestAnchor
+        if (oldest != null && message.isOlderThan(oldest)) {
+            return false
+        }
+        if (newest != null && message.isNewerThan(newest)) {
+            return false
+        }
+        return true
+    }
+
+    private fun MatrixChatMessage.isOlderThan(anchor: TimelineWindowAnchor): Boolean {
+        return timestampMillis < anchor.timestampMillis ||
+            (timestampMillis == anchor.timestampMillis && id < anchor.id)
+    }
+
+    private fun MatrixChatMessage.isNewerThan(anchor: TimelineWindowAnchor): Boolean {
+        return timestampMillis > anchor.timestampMillis ||
+            (timestampMillis == anchor.timestampMillis && id > anchor.id)
     }
 
     private fun OutgoingEnvelopeEntity.toChatMessageOrNull(): MatrixChatMessage? {
@@ -997,6 +1124,26 @@ class LocalCacheRepository(
             timestampMillis = timestampMillis,
             id = id
         )
+    }
+
+    private fun List<CachedTimelineMessageEntity>.dedupeTimelineWindowEntities(): List<CachedTimelineMessageEntity> {
+        val seenEventIds = mutableSetOf<String>()
+        val seenTransactionIds = mutableSetOf<String>()
+        val seenIds = mutableSetOf<String>()
+        return sortedWith(
+            compareBy<CachedTimelineMessageEntity> { it.timestampMillis }.thenBy { it.id }
+        )
+            .filter { message ->
+                val eventId = message.eventId?.takeIf { it.isNotBlank() }
+                if (eventId != null) {
+                    return@filter seenEventIds.add(eventId)
+                }
+                val transactionId = message.transactionId?.takeIf { it.isNotBlank() }
+                if (transactionId != null) {
+                    return@filter seenTransactionIds.add(transactionId)
+                }
+                seenIds.add(message.id)
+            }
     }
 
     private fun CachedTimelineMessageEntity.replyInfoOrNull(): MatrixReplyInfo? {

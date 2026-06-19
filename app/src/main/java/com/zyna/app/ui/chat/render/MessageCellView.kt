@@ -1,5 +1,8 @@
 package com.zyna.app.ui.chat.render
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -8,8 +11,10 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.animation.DecelerateInterpolator
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 internal class MessageCellView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
@@ -37,10 +42,14 @@ internal class MessageCellView(context: Context) : View(context) {
     private var isContextMenuOpened = false
     private var isContextMenuSourceHidden = false
     private var isDrawingContextMenuCopy = false
+    private var replyHeaderTapEventId: String? = null
+    private var bubbleHighlightProgress = 0f
+    private var bubbleHighlightAnimator: ValueAnimator? = null
 
     var onContextMenuPreviewRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuGestureEvent: ((action: Int, rawX: Float, rawY: Float) -> Unit)? = null
+    var onReplyHeaderClicked: ((eventId: String) -> Unit)? = null
 
     private val beginContextMenuPreviewRunnable = Runnable {
         beginContextMenuPreview()
@@ -77,6 +86,41 @@ internal class MessageCellView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun highlightBubble() {
+        bubbleHighlightAnimator?.cancel()
+        bubbleHighlightAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = BUBBLE_HIGHLIGHT_DURATION_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                val progress = animation.animatedValue as Float
+                bubbleHighlightProgress = when {
+                    progress < BUBBLE_HIGHLIGHT_RAMP_UP_FRACTION ->
+                        progress / BUBBLE_HIGHLIGHT_RAMP_UP_FRACTION
+                    progress < BUBBLE_HIGHLIGHT_HOLD_FRACTION -> 1f
+                    else -> {
+                        val fadeProgress = (progress - BUBBLE_HIGHLIGHT_HOLD_FRACTION) /
+                            (1f - BUBBLE_HIGHLIGHT_HOLD_FRACTION)
+                        (1f - fadeProgress).coerceIn(0f, 1f)
+                    }
+                }
+                invalidate()
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: Animator) {
+                    bubbleHighlightProgress = 0f
+                    invalidate()
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    bubbleHighlightAnimator = null
+                    bubbleHighlightProgress = 0f
+                    invalidate()
+                }
+            })
+            start()
+        }
+    }
+
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         val width = resolveMeasuredWidth(widthMeasureSpec)
         lastMeasuredWidth = width
@@ -102,6 +146,14 @@ internal class MessageCellView(context: Context) : View(context) {
             fillColor = theme.bubbleColor(model),
             message = model
         )
+        if (bubbleHighlightProgress > 0f) {
+            bubbleRenderer.drawOverlay(
+                canvas = canvas,
+                rect = currentLayout.bubbleRect,
+                color = highlightColor(theme.textColor(model), bubbleHighlightProgress),
+                message = model
+            )
+        }
 
         val save = canvas.save()
         canvas.translate(currentLayout.contentLeft.toFloat(), currentLayout.contentTop.toFloat())
@@ -119,6 +171,7 @@ internal class MessageCellView(context: Context) : View(context) {
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                replyHeaderTapEventId = replyHeaderEventIdAt(event.x, event.y)
                 if (hitTest(event.x, event.y) == MessageHitTarget.BUBBLE && renderModel != null) {
                     downTouchX = event.x
                     downTouchY = event.y
@@ -132,6 +185,9 @@ internal class MessageCellView(context: Context) : View(context) {
                 }
             }
             MotionEvent.ACTION_MOVE -> {
+                if (replyHeaderTapEventId != null && movedPastTouchSlop(event.x, event.y)) {
+                    replyHeaderTapEventId = null
+                }
                 if (isContextMenuCandidate && !isContextMenuPreviewing && movedPastTouchSlop(event.x, event.y)) {
                     cancelContextMenuCandidate()
                 }
@@ -147,6 +203,17 @@ internal class MessageCellView(context: Context) : View(context) {
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
                 val wasContextMenuGesture = isContextMenuPreviewing || isContextMenuOpened
+                val replyHeaderClickEventId = if (
+                    event.actionMasked == MotionEvent.ACTION_UP &&
+                    !wasContextMenuGesture &&
+                    !movedPastTouchSlop(event.x, event.y)
+                ) {
+                    val downEventId = replyHeaderTapEventId
+                    replyHeaderEventIdAt(event.x, event.y)
+                        ?.takeIf { it == downEventId }
+                } else {
+                    null
+                }
                 removeCallbacks(beginContextMenuPreviewRunnable)
                 removeCallbacks(openContextMenuRunnable)
                 if (wasContextMenuGesture) {
@@ -157,14 +224,26 @@ internal class MessageCellView(context: Context) : View(context) {
                 if (wasContextMenuGesture) {
                     return true
                 }
+                if (replyHeaderClickEventId != null) {
+                    onReplyHeaderClicked?.invoke(replyHeaderClickEventId)
+                    performClick()
+                    return true
+                }
             }
         }
         return super.onTouchEvent(event)
     }
 
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
+    }
+
     override fun onDetachedFromWindow() {
         removeCallbacks(beginContextMenuPreviewRunnable)
         removeCallbacks(openContextMenuRunnable)
+        bubbleHighlightAnimator?.cancel()
+        bubbleHighlightAnimator = null
         resetContextMenuTouchState()
         isContextMenuSourceHidden = false
         super.onDetachedFromWindow()
@@ -175,6 +254,26 @@ internal class MessageCellView(context: Context) : View(context) {
             MessageHitTarget.BUBBLE
         } else {
             MessageHitTarget.OUTSIDE
+        }
+    }
+
+    private fun replyHeaderEventIdAt(x: Float, y: Float): String? {
+        val currentLayout = layout ?: return null
+        val model = renderModel ?: return null
+        val replyEventId = model.replyInfo
+            ?.eventId
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val textLayout = currentLayout.contentLayout as? TextMessageLayout ?: return null
+        val replyLayout = textLayout.replyHeaderLayout ?: return null
+        val left = currentLayout.contentLeft.toFloat()
+        val top = (currentLayout.contentTop + textLayout.replyY).toFloat()
+        val right = left + replyLayout.width
+        val bottom = top + replyLayout.height
+        return if (x >= left && x <= right && y >= top && y <= bottom) {
+            replyEventId
+        } else {
+            null
         }
     }
 
@@ -323,6 +422,7 @@ internal class MessageCellView(context: Context) : View(context) {
         isContextMenuCandidate = false
         isContextMenuPreviewing = false
         isContextMenuOpened = false
+        replyHeaderTapEventId = null
     }
 
     private fun buildLayout(width: Int): MessageCellLayout {
@@ -396,6 +496,12 @@ internal class MessageCellView(context: Context) : View(context) {
         return available.coerceAtLeast(minBubbleContentWidth + bubbleHorizontalInset * 2)
     }
 
+    private fun highlightColor(baseColor: Int, progress: Float): Int {
+        val alpha = (BUBBLE_HIGHLIGHT_MAX_ALPHA * progress).roundToInt()
+            .coerceIn(0, 255)
+        return (baseColor and 0x00FFFFFF) or (alpha shl 24)
+    }
+
     private fun resolveMeasuredWidth(widthMeasureSpec: Int): Int {
         val mode = MeasureSpec.getMode(widthMeasureSpec)
         val size = MeasureSpec.getSize(widthMeasureSpec)
@@ -432,3 +538,7 @@ internal data class PaintSplashTarget(
 )
 
 private const val CONTEXT_MENU_PREVIEW_DELAY_MS = 90L
+private const val BUBBLE_HIGHLIGHT_DURATION_MS = 920L
+private const val BUBBLE_HIGHLIGHT_MAX_ALPHA = 72
+private const val BUBBLE_HIGHLIGHT_RAMP_UP_FRACTION = 0.16f
+private const val BUBBLE_HIGHLIGHT_HOLD_FRACTION = 0.42f

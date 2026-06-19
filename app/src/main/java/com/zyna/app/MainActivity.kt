@@ -48,8 +48,10 @@ class MainActivity : ComponentActivity() {
                     onRefreshChat = appViewModel::refreshCurrentChat,
                     onCloseChat = appViewModel::closeChat,
                     onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
+                    onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
                     onSendChatMessage = appViewModel::sendChatMessage,
                     onReplyToMessage = appViewModel::setChatReplyTarget,
+                    onReplyHeaderClicked = appViewModel::jumpToChatEvent,
                     onCancelReply = appViewModel::clearChatReplyTarget,
                     onEditMessage = appViewModel::setChatEditTarget,
                     onCancelEdit = appViewModel::clearChatEditTarget,
@@ -58,6 +60,7 @@ class MainActivity : ComponentActivity() {
                     onRedactMessage = appViewModel::redactMessage,
                     onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
                     onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
+                    onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
                     onLogout = appViewModel::logout
                 )
             }
@@ -143,8 +146,10 @@ fun AppPreview() {
             onRefreshChat = {},
             onCloseChat = {},
             onLoadOlderChatMessages = {},
+            onLoadNewerChatMessages = {},
             onSendChatMessage = { false },
             onReplyToMessage = {},
+            onReplyHeaderClicked = {},
             onCancelReply = {},
             onEditMessage = {},
             onCancelEdit = {},
@@ -153,6 +158,7 @@ fun AppPreview() {
             onRedactMessage = {},
             onDebugMarkOutgoingEnvelopeFailed = {},
             onVisibleReadReceiptCandidate = { _, _, _ -> },
+            onChatJumpTargetConsumed = {},
             onLogout = {}
         )
     }

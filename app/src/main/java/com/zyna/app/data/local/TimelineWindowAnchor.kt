@@ -5,6 +5,11 @@ data class TimelineWindowAnchor(
     val id: String
 )
 
+data class TimelineWindowBounds(
+    val oldestAnchor: TimelineWindowAnchor?,
+    val newestAnchor: TimelineWindowAnchor? = null
+)
+
 data class TimelineWindowSnapshot<T>(
     val anchor: TimelineWindowAnchor?,
     val messages: List<T>,
@@ -17,6 +22,7 @@ enum class TimelineWindowChangeOrigin {
     INITIAL_LOAD,
     TIMELINE_FLUSH,
     DATABASE_PAGINATION,
+    JUMP,
     LOCAL_MUTATION
 }
 

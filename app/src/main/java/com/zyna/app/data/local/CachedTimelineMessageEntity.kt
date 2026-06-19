@@ -28,6 +28,13 @@ data class CachedTimelineMessageEntity(
     val isOwn: Boolean,
     @ColumnInfo(defaultValue = "TEXT")
     val contentType: String,
+    val imageSourceJson: String?,
+    val imageThumbnailSourceJson: String?,
+    val imageWidth: Int?,
+    val imageHeight: Int?,
+    val imageCaption: String?,
+    val imageMimeType: String?,
+    val imageBlurhash: String?,
     val deliveryState: String,
     val replyEventId: String?,
     val replySenderId: String?,

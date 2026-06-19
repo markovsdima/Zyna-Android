@@ -12,17 +12,22 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
+import com.zyna.app.data.media.MatrixMediaLoader
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-internal class MessageCellView(context: Context) : View(context) {
+internal class MessageCellView(
+    context: Context,
+    private val imageLoader: MatrixMediaLoader? = null
+) : View(context) {
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val contextCancelDistance = touchSlop * 2f
     private val bubbleRenderer = BubbleRenderer(density)
     private val textRenderer = TextMessageRenderer(context)
-    private val contentRenderers: List<MessageContentRenderer> = listOf(textRenderer)
+    private val imageRenderer = ImageMessageRenderer(context, imageLoader)
+    private val contentRenderers: List<MessageContentRenderer> = listOf(imageRenderer, textRenderer)
     private val bubbleRect = RectF()
     private val screenBubbleRect = RectF()
     private val screenLocation = IntArray(2)
@@ -45,6 +50,7 @@ internal class MessageCellView(context: Context) : View(context) {
     private var replyHeaderTapEventId: String? = null
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
+    private var imageLoadHandle: AutoCloseable? = null
 
     var onContextMenuPreviewRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
@@ -67,6 +73,8 @@ internal class MessageCellView(context: Context) : View(context) {
     private val horizontalChrome = 96.dpToPx(density)
     private val minTextMaxWidth = 180.dpToPx(density)
     private val maxTextMaxWidth = 520.dpToPx(density)
+    private val imageLoadTargetWidth = 320.dpToPx(density)
+    private val imageLoadTargetHeight = 390.dpToPx(density)
 
     init {
         isClickable = true
@@ -76,6 +84,8 @@ internal class MessageCellView(context: Context) : View(context) {
 
     fun bind(model: MessageRenderModel, theme: MessageRenderTheme) {
         val needsLayout = renderModel != model || renderTheme != theme
+        imageLoadHandle?.close()
+        imageLoadHandle = null
         renderModel = model
         renderTheme = theme
         contentDescription = model.accessibilityText()
@@ -83,6 +93,7 @@ internal class MessageCellView(context: Context) : View(context) {
             layout = null
             requestLayout()
         }
+        startImageLoadIfNeeded(model)
         invalidate()
     }
 
@@ -244,6 +255,8 @@ internal class MessageCellView(context: Context) : View(context) {
         removeCallbacks(openContextMenuRunnable)
         bubbleHighlightAnimator?.cancel()
         bubbleHighlightAnimator = null
+        imageLoadHandle?.close()
+        imageLoadHandle = null
         resetContextMenuTouchState()
         isContextMenuSourceHidden = false
         super.onDetachedFromWindow()
@@ -487,6 +500,24 @@ internal class MessageCellView(context: Context) : View(context) {
     private fun rendererFor(content: MessageContent): MessageContentRenderer {
         return contentRenderers.firstOrNull { it.supports(content) }
             ?: error("No renderer registered for ${content::class.java.simpleName}")
+    }
+
+    private fun startImageLoadIfNeeded(model: MessageRenderModel) {
+        val image = model.content as? MessageContent.Image ?: return
+        val loader = imageLoader ?: return
+        if (loader.cachedImage(image.imageInfo) != null) {
+            return
+        }
+        val boundMessageId = model.id
+        imageLoadHandle = loader.loadImage(
+            imageInfo = image.imageInfo,
+            targetWidthPx = imageLoadTargetWidth,
+            targetHeightPx = imageLoadTargetHeight
+        ) {
+            if (renderModel?.id == boundMessageId) {
+                invalidate()
+            }
+        }
     }
 
     private fun maxBubbleWidth(width: Int): Int {

@@ -2,6 +2,7 @@ package com.zyna.app.data.local
 
 import androidx.room.withTransaction
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
@@ -810,6 +811,7 @@ class LocalCacheRepository(
             timestampMillis = timestampMillis,
             isOwn = isOwn,
             contentType = contentType.toMatrixContentType(),
+            imageInfo = imageInfoOrNull(),
             deliveryState = deliveryState.toMatrixDeliveryState(),
             replyInfo = replyInfoOrNull(),
             forwardedFrom = forwardedFrom,
@@ -851,6 +853,13 @@ class LocalCacheRepository(
             timestampMillis = timestampMillis,
             isOwn = isOwn,
             contentType = contentType.name,
+            imageSourceJson = imageInfo?.sourceJson,
+            imageThumbnailSourceJson = imageInfo?.thumbnailSourceJson,
+            imageWidth = imageInfo?.width,
+            imageHeight = imageInfo?.height,
+            imageCaption = imageInfo?.caption,
+            imageMimeType = imageInfo?.mimeType,
+            imageBlurhash = imageInfo?.blurhash,
             deliveryState = deliveryState.name,
             replyEventId = replyInfo?.eventId,
             replySenderId = replyInfo?.senderId,
@@ -1166,6 +1175,19 @@ class LocalCacheRepository(
         )
     }
 
+    private fun CachedTimelineMessageEntity.imageInfoOrNull(): MatrixImageInfo? {
+        val sourceJson = imageSourceJson?.takeIf { it.isNotBlank() } ?: return null
+        return MatrixImageInfo(
+            sourceJson = sourceJson,
+            thumbnailSourceJson = imageThumbnailSourceJson?.takeIf { it.isNotBlank() },
+            width = imageWidth,
+            height = imageHeight,
+            caption = imageCaption?.takeIf { it.isNotBlank() },
+            mimeType = imageMimeType?.takeIf { it.isNotBlank() },
+            blurhash = imageBlurhash?.takeIf { it.isNotBlank() }
+        )
+    }
+
     private fun OutgoingEnvelopeEntity.replyInfoOrNull(): MatrixReplyInfo? {
         val eventId = replyEventId?.takeIf { it.isNotBlank() } ?: return null
         return MatrixReplyInfo(
@@ -1306,6 +1328,14 @@ class LocalCacheRepository(
                 eventId = incoming.eventId ?: existing.eventId,
                 transactionId = incoming.transactionId ?: existing.transactionId,
                 senderDisplayName = incoming.senderDisplayName ?: existing.senderDisplayName,
+                imageSourceJson = incoming.imageSourceJson ?: existing.imageSourceJson,
+                imageThumbnailSourceJson = incoming.imageThumbnailSourceJson
+                    ?: existing.imageThumbnailSourceJson,
+                imageWidth = incoming.imageWidth ?: existing.imageWidth,
+                imageHeight = incoming.imageHeight ?: existing.imageHeight,
+                imageCaption = incoming.imageCaption ?: existing.imageCaption,
+                imageMimeType = incoming.imageMimeType ?: existing.imageMimeType,
+                imageBlurhash = incoming.imageBlurhash ?: existing.imageBlurhash,
                 replyEventId = incoming.replyEventId ?: existing.replyEventId,
                 replySenderId = incoming.replySenderId ?: existing.replySenderId,
                 replySenderDisplayName = incoming.replySenderDisplayName

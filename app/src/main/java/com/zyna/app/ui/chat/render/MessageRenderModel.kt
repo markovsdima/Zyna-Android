@@ -1,5 +1,7 @@
 package com.zyna.app.ui.chat.render
 
+import com.zyna.app.data.matrix.MatrixImageInfo
+
 internal data class MessageRenderModel(
     val id: String,
     val eventId: String? = null,
@@ -45,6 +47,10 @@ internal data class MessageForwardPreview(
 
 internal sealed interface MessageContent {
     data class Text(val body: String) : MessageContent
+    data class Image(
+        val imageInfo: MatrixImageInfo,
+        val caption: String?
+    ) : MessageContent
     data object Redacted : MessageContent
 }
 
@@ -101,6 +107,7 @@ internal enum class MessageHitTarget {
 internal fun MessageRenderModel.accessibilityText(): String {
     val body = when (content) {
         is MessageContent.Text -> content.body
+        is MessageContent.Image -> content.caption ?: "Photo"
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
     val reply = replyInfo?.let { ", in reply to ${it.senderText}: ${it.body}" }.orEmpty()

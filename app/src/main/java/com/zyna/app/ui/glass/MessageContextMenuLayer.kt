@@ -757,6 +757,7 @@ private class MenuDivider(
 private fun MessageRenderModel.copyableText(): String? {
     val text = when (val messageContent = content) {
         is MessageContent.Text -> messageContent.body
+        is MessageContent.Image -> messageContent.caption
         MessageContent.Redacted -> null
     }
     return text?.takeIf { it.isNotBlank() }

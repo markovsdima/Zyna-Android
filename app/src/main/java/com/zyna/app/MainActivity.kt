@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
             ZynaAndroidTheme {
                 ZynaApp(
                     state = state,
+                    matrixMediaLoader = appContainer.matrixMediaLoader,
                     onLogin = appViewModel::login,
                     onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
                     onRefreshRooms = appViewModel::refreshRooms,
@@ -145,6 +146,7 @@ fun AppPreview() {
     ZynaAndroidTheme {
         ZynaApp(
             state = AppUiState(matrixState = MatrixClientState.LoggedOut),
+            matrixMediaLoader = null,
             onLogin = { _, _, _ -> },
             onSubmitRecoveryKey = {},
             onRefreshRooms = {},

@@ -26,6 +26,7 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
+import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
@@ -71,6 +72,7 @@ fun ChatScreen(
     replyTarget: MatrixReplyInfo? = null,
     editTarget: MatrixEditTarget? = null,
     forwardTarget: MatrixForwardTarget? = null,
+    matrixMediaLoader: MatrixMediaLoader? = null,
     jumpTargetEventId: String? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
@@ -163,6 +165,7 @@ fun ChatScreen(
                 replyTarget = replyTarget,
                 editTarget = editTarget,
                 forwardTarget = forwardTarget,
+                matrixMediaLoader = matrixMediaLoader,
                 jumpTargetEventId = jumpTargetEventId,
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
@@ -208,6 +211,7 @@ private fun ChatMessageList(
     replyTarget: MatrixReplyInfo?,
     editTarget: MatrixEditTarget?,
     forwardTarget: MatrixForwardTarget?,
+    matrixMediaLoader: MatrixMediaLoader?,
     jumpTargetEventId: String?,
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
@@ -249,6 +253,7 @@ private fun ChatMessageList(
             val chatLayout = GlassChatLayout(context)
             chatLayout.recyclerView.adapter = ChatMessageAdapter(
                 messageTheme = messageTheme,
+                matrixMediaLoader = matrixMediaLoader,
                 onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
                 onContextMenuRequested = chatLayout::showMessageContextMenu,
                 onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
@@ -366,6 +371,7 @@ private fun ChatMessageList(
             adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
             adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
             adapter.onReplyHeaderClicked = onReplyHeaderClicked
+            adapter.matrixMediaLoader = matrixMediaLoader
             val displayedMessages = messages.asReversed()
             val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
             val nextNewestMessageId = displayedMessages.firstOrNull()?.id
@@ -725,6 +731,7 @@ private fun chatGlassPalette(): GlassPalette {
 
 private class ChatMessageAdapter(
     var messageTheme: MessageRenderTheme,
+    var matrixMediaLoader: MatrixMediaLoader?,
     var onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
@@ -735,7 +742,7 @@ private class ChatMessageAdapter(
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
-        return ChatMessageViewHolder(parent)
+        return ChatMessageViewHolder(parent, matrixMediaLoader)
     }
 
     override fun getItemId(position: Int): Long {
@@ -754,8 +761,11 @@ private class ChatMessageAdapter(
     }
 }
 
-private class ChatMessageViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
-    MessageCellView(parent.context).apply {
+private class ChatMessageViewHolder(
+    parent: ViewGroup,
+    matrixMediaLoader: MatrixMediaLoader?
+) : RecyclerView.ViewHolder(
+    MessageCellView(parent.context, matrixMediaLoader).apply {
         layoutParams = RecyclerView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -793,6 +803,14 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         },
         content = when (contentType) {
             MatrixMessageContentType.REDACTED -> MessageContent.Redacted
+            MatrixMessageContentType.IMAGE -> imageInfo
+                ?.let {
+                    MessageContent.Image(
+                        imageInfo = it,
+                        caption = it.caption
+                    )
+                }
+                ?: MessageContent.Text(body.ifBlank { "Photo" })
             else -> MessageContent.Text(body)
         },
         timestampText = timestampMillis.formatMessageTime(),

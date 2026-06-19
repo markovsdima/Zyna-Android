@@ -1283,6 +1283,7 @@ class GlassChatLayout @JvmOverloads constructor(
     private fun copyMessageText(message: MessageRenderModel) {
         val text = when (val content = message.content) {
             is MessageContent.Text -> content.body
+            is MessageContent.Image -> content.caption
             MessageContent.Redacted -> null
         }?.takeIf { it.isNotBlank() } ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1299,6 +1300,7 @@ class GlassChatLayout @JvmOverloads constructor(
         }
         val body = when (val currentContent = content) {
             is MessageContent.Text -> currentContent.body
+            is MessageContent.Image -> currentContent.caption ?: "Photo"
             MessageContent.Redacted -> return null
         }.takeIf { it.isNotBlank() } ?: return null
         return MessageReplyPreview(
@@ -1316,6 +1318,7 @@ class GlassChatLayout @JvmOverloads constructor(
         }
         val body = when (val currentContent = content) {
             is MessageContent.Text -> currentContent.body
+            is MessageContent.Image -> return null
             MessageContent.Redacted -> return null
         }.takeIf { it.isNotBlank() } ?: return null
         return MessageForwardPreview(

@@ -1,6 +1,7 @@
 package com.zyna.app.ui.app
 
 import androidx.compose.runtime.Composable
+import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
@@ -13,6 +14,7 @@ import com.zyna.app.ui.security.RecoveryKeyScreen
 @Composable
 fun ZynaApp(
     state: AppUiState,
+    matrixMediaLoader: MatrixMediaLoader?,
     onLogin: (homeserver: String, username: String, password: String) -> Unit,
     onSubmitRecoveryKey: (String) -> Unit,
     onRefreshRooms: () -> Unit,
@@ -90,6 +92,7 @@ fun ZynaApp(
             replyTarget = state.chatReplyTarget,
             editTarget = state.chatEditTarget,
             forwardTarget = state.chatForwardTarget,
+            matrixMediaLoader = matrixMediaLoader,
             jumpTargetEventId = state.chatJumpTargetEventId,
             onRefresh = onRefreshChat,
             onBack = onCloseChat,

@@ -1,143 +1,150 @@
 package com.zyna.app.ui.chat.render
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.Rect
+import android.graphics.RectF
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.TypedValue
+import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.matrix.MatrixImageInfo
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
-internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
+internal class ImageMessageRenderer(
+    context: Context,
+    private val imageLoader: MatrixMediaLoader?
+) : MessageContentRenderer {
     private val density = context.resources.displayMetrics.density
     private val senderPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
-    private val bodyPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
+    private val captionPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val timePaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val forwardedPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val replySenderPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val replyBodyPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val replyBarPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val timeSpacing = 6.dpToPx(density)
-    private val senderBottomSpacing = 3.dpToPx(density)
-    private val timeLineSpacing = 2.dpToPx(density)
-    private val replyBarWidth = 2.dpToPx(density)
-    private val replyHorizontalSpacing = 6.dpToPx(density)
-    private val replyLineSpacing = 1.dpToPx(density)
-    private val replyBottomInset = 4.dpToPx(density)
-    private val replyBottomSpacing = 6.dpToPx(density)
-    private val forwardedBottomSpacing = 5.dpToPx(density)
+    private val placeholderPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val placeholderTextPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
+    private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val imagePath = Path()
+    private val imageSrcRect = Rect()
+    private val imageDstRect = RectF()
+    private val timeLineSpacing = 5.imageDpToPx(density)
+    private val captionTopSpacing = 7.imageDpToPx(density)
+    private val headerBottomSpacing = 6.imageDpToPx(density)
+    private val senderBottomSpacing = 4.imageDpToPx(density)
+    private val replyBarWidth = 2.imageDpToPx(density)
+    private val replyHorizontalSpacing = 6.imageDpToPx(density)
+    private val replyLineSpacing = 1.imageDpToPx(density)
+    private val replyBottomInset = 4.imageDpToPx(density)
+    private val imageCornerRadius = 10.imageDpToPx(density).toFloat()
+    private val maxImageWidth = 320.imageDpToPx(density)
+    private val minImageHeight = 128.imageDpToPx(density)
+    private val maxImageHeight = 390.imageDpToPx(density)
 
     init {
-        senderPaint.textSize = 12.spToPx(context)
+        senderPaint.textSize = 12.imageSpToPx(context)
         senderPaint.isFakeBoldText = true
-        bodyPaint.textSize = 16.spToPx(context)
-        timePaint.textSize = 11.spToPx(context)
-        forwardedPaint.textSize = 12.spToPx(context)
+        captionPaint.textSize = 15.imageSpToPx(context)
+        timePaint.textSize = 11.imageSpToPx(context)
+        forwardedPaint.textSize = 12.imageSpToPx(context)
         forwardedPaint.isFakeBoldText = true
-        replySenderPaint.textSize = 12.spToPx(context)
+        replySenderPaint.textSize = 12.imageSpToPx(context)
         replySenderPaint.isFakeBoldText = true
-        replyBodyPaint.textSize = 12.spToPx(context)
+        replyBodyPaint.textSize = 12.imageSpToPx(context)
+        placeholderTextPaint.textSize = 14.imageSpToPx(context)
+        placeholderTextPaint.isFakeBoldText = true
+        placeholderTextPaint.textAlign = Paint.Align.CENTER
     }
 
     override fun supports(content: MessageContent): Boolean {
-        return content is MessageContent.Text || content is MessageContent.Redacted
+        return content is MessageContent.Image
     }
 
     override fun measure(
         message: MessageRenderModel,
         theme: MessageRenderTheme,
         maxWidthPx: Int
-    ): TextMessageLayout {
+    ): ImageMessageLayout {
+        val content = message.content as MessageContent.Image
         val widthLimit = max(1, maxWidthPx)
-        val isRedacted = message.isRedacted
         senderPaint.color = theme.metadataColor(message)
-        bodyPaint.color = if (isRedacted) theme.metadataColor(message) else theme.textColor(message)
-        bodyPaint.textSkewX = if (isRedacted) REDACTED_TEXT_SKEW_X else 0f
+        captionPaint.color = theme.textColor(message)
         timePaint.color = theme.metadataColor(message)
         forwardedPaint.color = theme.metadataColor(message)
         replySenderPaint.color = theme.metadataColor(message)
         replyBodyPaint.color = theme.metadataColor(message)
         replyBarPaint.color = theme.metadataColor(message)
+        placeholderPaint.color = theme.metadataColor(message).withAlpha(36)
+        placeholderTextPaint.color = theme.metadataColor(message).withAlpha(180)
 
         val forwardedLayout = makeForwardedHeaderLayout(message.forwardedFrom, widthLimit)
-        val forwardedHeight = if (forwardedLayout == null) {
-            0
-        } else {
-            forwardedLayout.height + forwardedBottomSpacing
-        }
+        val forwardedHeight = forwardedLayout?.let { it.height + headerBottomSpacing } ?: 0
         val forwardedWidth = forwardedLayout?.measuredLineWidth() ?: 0
 
         val replyLayout = makeReplyHeaderLayout(message.replyInfo, widthLimit)
-        val replyHeight = if (replyLayout == null) 0 else replyLayout.height + replyBottomSpacing
+        val replyHeight = replyLayout?.let { it.height + headerBottomSpacing } ?: 0
         val replyWidth = replyLayout?.width ?: 0
 
         val senderLayout = makeSenderLayout(message, widthLimit)
-        val senderHeight = if (senderLayout == null) 0 else senderLayout.height + senderBottomSpacing
+        val senderHeight = senderLayout?.let { it.height + senderBottomSpacing } ?: 0
         val senderWidth = senderLayout?.measuredLineWidth() ?: 0
 
-        val bodyText = message.content.renderText().ifEmpty { " " }
-        val bodyLayout = makeLayout(
-            text = bodyText,
-            paint = bodyPaint,
-            width = widthLimit
-        )
-        val bodyWidth = bodyLayout.maxLineWidth()
-        val lastLineWidth = bodyLayout.lastLineWidth()
+        val imageSize = imageSize(content, widthLimit)
+        val captionLayout = makeCaptionLayout(content.caption, imageSize.width)
+        val captionHeight = captionLayout?.let { captionTopSpacing + it.height } ?: 0
+        val captionWidth = captionLayout?.maxLineWidth() ?: 0
 
         val timeLayout = makeLayout(
             text = message.metadataText(),
             paint = timePaint,
-            width = widthLimit
+            width = imageSize.width
         )
         val timeWidth = timeLayout.measuredLineWidth()
-        val timeRowHeight = timeLayout.height
-        val inlineWidth = lastLineWidth + timeSpacing + timeWidth
-        val fitsInline = inlineWidth <= widthLimit
+        val timeY = forwardedHeight +
+            replyHeight +
+            senderHeight +
+            imageSize.height +
+            captionHeight +
+            timeLineSpacing
 
-        val contentWidth = if (fitsInline) {
-            max(max(senderWidth, bodyWidth), inlineWidth)
-        } else {
-            max(max(senderWidth, bodyWidth), timeWidth)
-        }.coerceAtLeast(max(replyWidth, forwardedWidth)).coerceIn(1, widthLimit)
+        val contentWidth = max(
+            max(max(senderWidth, imageSize.width), max(forwardedWidth, replyWidth)),
+            max(captionWidth, timeWidth)
+        ).coerceIn(1, widthLimit)
 
-        val replyY = forwardedHeight
-        val senderY = forwardedHeight + replyHeight
-        val bodyY = forwardedHeight + replyHeight + senderHeight
-        val timeX = contentWidth - timeWidth
-        val timeY = if (fitsInline) {
-            bodyY + bodyLayout.height - timeRowHeight
-        } else {
-            bodyY + bodyLayout.height + timeLineSpacing
-        }
-        val contentHeight = if (fitsInline) {
-            forwardedHeight + replyHeight + senderHeight + bodyLayout.height
-        } else {
-            forwardedHeight + replyHeight + senderHeight + bodyLayout.height + timeLineSpacing + timeRowHeight
-        }
-
-        return TextMessageLayout(
+        return ImageMessageLayout(
             width = contentWidth,
-            height = contentHeight,
+            height = timeY + timeLayout.height,
             forwardedHeaderLayout = forwardedLayout,
             forwardedY = 0,
             replyHeaderLayout = replyLayout,
-            replyY = replyY,
+            replyY = forwardedHeight,
             senderLayout = senderLayout,
-            senderY = senderY,
-            bodyLayout = bodyLayout,
-            bodyY = bodyY,
+            senderY = forwardedHeight + replyHeight,
+            imageY = forwardedHeight + replyHeight + senderHeight,
+            imageWidth = imageSize.width,
+            imageHeight = imageSize.height,
+            imageInfo = content.imageInfo,
+            captionLayout = captionLayout,
+            captionY = forwardedHeight + replyHeight + senderHeight + imageSize.height + captionTopSpacing,
             timeLayout = timeLayout,
-            timeX = timeX,
+            timeX = contentWidth - timeWidth,
             timeY = timeY
         )
     }
 
     override fun draw(canvas: Canvas, layout: MessageContentLayout) {
-        layout as TextMessageLayout
+        layout as ImageMessageLayout
 
         layout.forwardedHeaderLayout?.let { forwarded ->
             val save = canvas.save()
@@ -160,15 +167,85 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             canvas.restoreToCount(save)
         }
 
-        val bodySave = canvas.save()
-        canvas.translate(0f, layout.bodyY.toFloat())
-        layout.bodyLayout.draw(canvas)
-        canvas.restoreToCount(bodySave)
+        drawImage(canvas, layout)
+
+        layout.captionLayout?.let { caption ->
+            val save = canvas.save()
+            canvas.translate(0f, layout.captionY.toFloat())
+            caption.draw(canvas)
+            canvas.restoreToCount(save)
+        }
 
         val timeSave = canvas.save()
         canvas.translate(layout.timeX.toFloat(), layout.timeY.toFloat())
         layout.timeLayout.draw(canvas)
         canvas.restoreToCount(timeSave)
+    }
+
+    private fun drawImage(canvas: Canvas, layout: ImageMessageLayout) {
+        imageDstRect.set(
+            0f,
+            layout.imageY.toFloat(),
+            layout.imageWidth.toFloat(),
+            (layout.imageY + layout.imageHeight).toFloat()
+        )
+        imagePath.reset()
+        imagePath.addRoundRect(
+            imageDstRect,
+            imageCornerRadius,
+            imageCornerRadius,
+            Path.Direction.CW
+        )
+
+        val save = canvas.save()
+        canvas.clipPath(imagePath)
+        canvas.drawRect(imageDstRect, placeholderPaint)
+        val bitmap = imageLoader?.cachedImage(layout.imageInfo)
+        if (bitmap != null && !bitmap.isRecycled) {
+            imageSrcRect.setCenterCrop(
+                bitmap = bitmap,
+                targetWidth = layout.imageWidth,
+                targetHeight = layout.imageHeight
+            )
+            canvas.drawBitmap(bitmap, imageSrcRect, imageDstRect, bitmapPaint)
+        } else {
+            val baseline = imageDstRect.centerY() -
+                (placeholderTextPaint.descent() + placeholderTextPaint.ascent()) / 2f
+            canvas.drawText("Photo", imageDstRect.centerX(), baseline, placeholderTextPaint)
+        }
+        canvas.restoreToCount(save)
+    }
+
+    private fun imageSize(content: MessageContent.Image, maxWidth: Int): ImageSize {
+        val imageWidth = min(maxWidth, maxImageWidth).coerceAtLeast(1)
+        val sourceWidth = content.imageInfo.width?.takeIf { it > 0 } ?: 4
+        val sourceHeight = content.imageInfo.height?.takeIf { it > 0 } ?: 3
+        val aspect = (sourceHeight.toFloat() / sourceWidth.toFloat()).coerceIn(0.45f, 2.1f)
+        val imageHeight = (imageWidth * aspect)
+            .roundToInt()
+            .coerceIn(min(minImageHeight, maxImageHeight), maxImageHeight)
+        return ImageSize(width = imageWidth, height = imageHeight)
+    }
+
+    private fun makeCaptionLayout(caption: String?, maxWidth: Int): StaticLayout? {
+        val text = caption?.takeIf { it.isNotBlank() } ?: return null
+        return makeLayout(
+            text = text,
+            paint = captionPaint,
+            width = maxWidth
+        )
+    }
+
+    private fun makeForwardedHeaderLayout(
+        forwardedFrom: String?,
+        maxWidth: Int
+    ): StaticLayout? {
+        val sender = forwardedFrom?.takeIf { it.isNotBlank() } ?: return null
+        return makeSingleLineLayout(
+            text = "Forwarded from $sender",
+            paint = forwardedPaint,
+            maxWidth = maxWidth
+        )
     }
 
     private fun makeReplyHeaderLayout(
@@ -202,18 +279,6 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
         )
     }
 
-    private fun makeForwardedHeaderLayout(
-        forwardedFrom: String?,
-        maxWidth: Int
-    ): StaticLayout? {
-        val sender = forwardedFrom?.takeIf { it.isNotBlank() } ?: return null
-        return makeSingleLineLayout(
-            text = "Forwarded from $sender",
-            paint = forwardedPaint,
-            maxWidth = maxWidth
-        )
-    }
-
     private fun drawReplyHeader(canvas: Canvas, layout: ReplyHeaderLayout) {
         val contentHeight = (layout.height - replyBottomInset).coerceAtLeast(1)
         val radius = replyBarWidth / 2f
@@ -241,21 +306,10 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
 
     private fun makeSenderLayout(message: MessageRenderModel, maxWidth: Int): StaticLayout? {
         val sender = message.senderText.takeIf { it.isNotBlank() } ?: return null
-        val ellipsized = TextUtils.ellipsize(
-            sender,
-            senderPaint,
-            maxWidth.toFloat(),
-            TextUtils.TruncateAt.END
-        )
-        val width = ceil(senderPaint.measureText(ellipsized, 0, ellipsized.length).toDouble())
-            .toInt()
-            .coerceIn(1, maxWidth)
-        return makeLayout(
-            text = ellipsized,
+        return makeSingleLineLayout(
+            text = sender,
             paint = senderPaint,
-            width = width,
-            maxLines = 1,
-            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = maxWidth
         )
     }
 
@@ -299,7 +353,7 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
     }
 }
 
-internal data class TextMessageLayout(
+internal data class ImageMessageLayout(
     override val width: Int,
     override val height: Int,
     val forwardedHeaderLayout: StaticLayout?,
@@ -308,20 +362,20 @@ internal data class TextMessageLayout(
     val replyY: Int,
     val senderLayout: StaticLayout?,
     val senderY: Int,
-    val bodyLayout: StaticLayout,
-    val bodyY: Int,
+    val imageY: Int,
+    val imageWidth: Int,
+    val imageHeight: Int,
+    val imageInfo: MatrixImageInfo,
+    val captionLayout: StaticLayout?,
+    val captionY: Int,
     val timeLayout: StaticLayout,
     val timeX: Int,
     val timeY: Int
 ) : MessageContentLayout
 
-internal data class ReplyHeaderLayout(
+private data class ImageSize(
     val width: Int,
-    val height: Int,
-    val senderLayout: StaticLayout,
-    val senderY: Int,
-    val bodyLayout: StaticLayout,
-    val bodyY: Int
+    val height: Int
 )
 
 private fun MessageRenderModel.metadataText(): String {
@@ -337,11 +391,24 @@ private fun MessageRenderModel.metadataText(): String {
     }
 }
 
-private fun MessageContent.renderText(): String {
-    return when (this) {
-        is MessageContent.Text -> body
-        is MessageContent.Image -> caption ?: "Photo"
-        MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
+private fun Rect.setCenterCrop(
+    bitmap: Bitmap,
+    targetWidth: Int,
+    targetHeight: Int
+) {
+    val bitmapWidth = bitmap.width.coerceAtLeast(1)
+    val bitmapHeight = bitmap.height.coerceAtLeast(1)
+    val targetAspect = targetWidth.toFloat() / targetHeight.coerceAtLeast(1).toFloat()
+    val bitmapAspect = bitmapWidth.toFloat() / bitmapHeight.toFloat()
+
+    if (bitmapAspect > targetAspect) {
+        val cropWidth = (bitmapHeight * targetAspect).roundToInt().coerceAtLeast(1)
+        val left = (bitmapWidth - cropWidth) / 2
+        set(left, 0, left + cropWidth, bitmapHeight)
+    } else {
+        val cropHeight = (bitmapWidth / targetAspect).roundToInt().coerceAtLeast(1)
+        val top = (bitmapHeight - cropHeight) / 2
+        set(0, top, bitmapWidth, top + cropHeight)
     }
 }
 
@@ -353,13 +420,6 @@ private fun StaticLayout.maxLineWidth(): Int {
     return ceil(width.toDouble()).toInt().coerceAtLeast(1)
 }
 
-private fun StaticLayout.lastLineWidth(): Int {
-    if (lineCount == 0) {
-        return 0
-    }
-    return ceil(getLineWidth(lineCount - 1).toDouble()).toInt()
-}
-
 private fun StaticLayout.measuredLineWidth(): Int {
     if (lineCount == 0) {
         return min(width, 1)
@@ -367,7 +427,11 @@ private fun StaticLayout.measuredLineWidth(): Int {
     return maxLineWidth().coerceAtMost(width)
 }
 
-private fun Int.spToPx(context: Context): Float {
+private fun Int.imageDpToPx(density: Float): Int {
+    return (this * density).roundToInt()
+}
+
+private fun Int.imageSpToPx(context: Context): Float {
     return TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_SP,
         toFloat(),
@@ -375,4 +439,11 @@ private fun Int.spToPx(context: Context): Float {
     )
 }
 
-private const val REDACTED_TEXT_SKEW_X = -0.12f
+private fun Int.withAlpha(alpha: Int): Int {
+    return Color.argb(
+        alpha.coerceIn(0, 255),
+        Color.red(this),
+        Color.green(this),
+        Color.blue(this)
+    )
+}

@@ -5,6 +5,7 @@ import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.LocalDatabasePassphraseStore
 import com.zyna.app.data.local.ZynaDatabase
 import com.zyna.app.data.matrix.MatrixClientService
+import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
@@ -26,6 +27,9 @@ class AppContainer(context: Context) {
         context = appContext,
         sessionStore = sessionStore,
         storePassphraseStore = matrixStorePassphraseStore
+    )
+    val matrixMediaLoader = MatrixMediaLoader(
+        matrixClientService = matrixClientService
     )
     val outgoingOutboxService = OutgoingOutboxService(
         matrixClientService = matrixClientService,

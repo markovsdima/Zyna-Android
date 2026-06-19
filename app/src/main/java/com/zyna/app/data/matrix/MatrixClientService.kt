@@ -35,6 +35,7 @@ import org.matrix.rustcomponents.sdk.EmbeddedEventDetails
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.EventTimelineItem
 import org.matrix.rustcomponents.sdk.LatestEventValue
+import org.matrix.rustcomponents.sdk.MediaSource
 import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeContent
@@ -136,6 +137,16 @@ data class MatrixForwardTarget(
     val forwardedFrom: String?
 )
 
+data class MatrixImageInfo(
+    val sourceJson: String,
+    val thumbnailSourceJson: String?,
+    val width: Int?,
+    val height: Int?,
+    val caption: String?,
+    val mimeType: String?,
+    val blurhash: String?
+)
+
 data class MatrixChatMessage(
     /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
@@ -147,6 +158,7 @@ data class MatrixChatMessage(
     val timestampMillis: Long,
     val isOwn: Boolean,
     val contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
+    val imageInfo: MatrixImageInfo? = null,
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
     val replyInfo: MatrixReplyInfo? = null,
     val forwardedFrom: String? = null,
@@ -599,6 +611,30 @@ class MatrixClientService(
         }
     }
 
+    suspend fun loadMediaContent(sourceJson: String): ByteArray = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val source = MediaSource.fromJson(sourceJson)
+        source.use { mediaSource ->
+            activeClient.getMediaContent(mediaSource)
+        }
+    }
+
+    suspend fun loadMediaThumbnail(
+        sourceJson: String,
+        width: Int,
+        height: Int
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val source = MediaSource.fromJson(sourceJson)
+        source.use { mediaSource ->
+            activeClient.getMediaThumbnail(
+                mediaSource = mediaSource,
+                width = width.coerceAtLeast(1).toULong(),
+                height = height.coerceAtLeast(1).toULong()
+            )
+        }
+    }
+
     private fun TimelineItem.toChatMessageOrNull(): MatrixChatMessage? = use { item ->
         val event = item.asEvent() ?: return@use null
         event.toChatMessageOrNull()
@@ -611,15 +647,18 @@ class MatrixClientService(
         val messageBody = when (val kind = msgLike.kind) {
             is MsgLikeKind.Message -> MatrixMessageBody(
                 body = kind.content.displayBody(),
-                contentType = kind.content.contentType()
+                contentType = kind.content.contentType(),
+                imageInfo = kind.content.imageInfoOrNull()
             )
             MsgLikeKind.Redacted -> MatrixMessageBody(
                 body = "Deleted message",
-                contentType = MatrixMessageContentType.REDACTED
+                contentType = MatrixMessageContentType.REDACTED,
+                imageInfo = null
             )
             is MsgLikeKind.UnableToDecrypt -> MatrixMessageBody(
                 body = "Unable to decrypt message",
-                contentType = MatrixMessageContentType.UNABLE_TO_DECRYPT
+                contentType = MatrixMessageContentType.UNABLE_TO_DECRYPT,
+                imageInfo = null
             )
             else -> return null
         }
@@ -646,6 +685,7 @@ class MatrixClientService(
             timestampMillis = timestamp.toLong(),
             isOwn = isOwn,
             contentType = messageBody.contentType,
+            imageInfo = messageBody.imageInfo,
             replyInfo = replyInfo,
             forwardedFrom = forwardedFrom,
             isEdited = isEdited
@@ -706,7 +746,7 @@ class MatrixClientService(
             is MessageType.Text -> type.content.body
             is MessageType.Notice -> type.content.body
             is MessageType.Emote -> type.content.body
-            is MessageType.Image -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "Image" }
+            is MessageType.Image -> type.content.caption?.takeIf { it.isNotBlank() } ?: "Photo"
             is MessageType.Audio -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "Audio" }
             is MessageType.Video -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "Video" }
             is MessageType.File -> type.content.caption?.takeIf { it.isNotBlank() } ?: body.ifBlank { "File" }
@@ -729,6 +769,26 @@ class MatrixClientService(
             is MessageType.Location -> MatrixMessageContentType.LOCATION
             is MessageType.Other -> MatrixMessageContentType.UNSUPPORTED
         }
+    }
+
+    private fun MessageContent.imageInfoOrNull(): MatrixImageInfo? {
+        val image = (msgType as? MessageType.Image)?.content ?: return null
+        val sourceJson = runCatching { image.source.toJson() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val info = image.info
+        return MatrixImageInfo(
+            sourceJson = sourceJson,
+            thumbnailSourceJson = info?.thumbnailSource
+                ?.let { source -> runCatching { source.toJson() }.getOrNull() }
+                ?.takeIf { it.isNotBlank() },
+            width = info?.width?.toIntOrNull(),
+            height = info?.height?.toIntOrNull(),
+            caption = image.caption?.takeIf { it.isNotBlank() },
+            mimeType = info?.mimetype?.takeIf { it.isNotBlank() },
+            blurhash = info?.blurhash?.takeIf { it.isNotBlank() }
+        )
     }
 
     private fun plainReplyBody(body: String, replyInfo: MatrixReplyInfo): String {
@@ -953,6 +1013,10 @@ class MatrixClientService(
             ?.takeIf { it.isNotBlank() }
     }
 
+    private fun ULong.toIntOrNull(): Int? {
+        return takeIf { it in 1UL..Int.MAX_VALUE.toULong() }?.toInt()
+    }
+
     private fun LatestEventValueLocalState.toLastOwnMessageStatus(): MatrixLastOwnMessageStatus {
         return when (this) {
             LatestEventValueLocalState.IS_SENDING -> MatrixLastOwnMessageStatus.PENDING
@@ -1081,7 +1145,8 @@ class MatrixClientService(
 
     private data class MatrixMessageBody(
         val body: String,
-        val contentType: MatrixMessageContentType
+        val contentType: MatrixMessageContentType,
+        val imageInfo: MatrixImageInfo?
     )
 
     private companion object {

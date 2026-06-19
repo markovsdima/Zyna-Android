@@ -4,18 +4,21 @@ internal data class MessageRenderModel(
     val id: String,
     val eventId: String? = null,
     val senderId: String = "",
+    val senderDisplayName: String? = null,
     val senderText: String,
     val content: MessageContent,
     val timestampText: String,
     val isOutgoing: Boolean,
     val deliveryState: RenderDeliveryState,
     val replyInfo: MessageReplyPreview? = null,
+    val forwardedFrom: String? = null,
     val editInfo: MessageEditPreview? = null,
     val isEdited: Boolean = false,
     val isEditPending: Boolean = false,
     val isEditFailed: Boolean = false,
     val outgoingEnvelopeId: String? = null,
     val redactionTargetMessageId: String? = null,
+    val canForward: Boolean = false,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
     val attributes: MessageRenderAttributes = MessageRenderAttributes(),
@@ -33,6 +36,11 @@ internal data class MessageReplyPreview(
     val senderId: String,
     val senderText: String,
     val body: String
+)
+
+internal data class MessageForwardPreview(
+    val body: String,
+    val forwardedFrom: String?
 )
 
 internal sealed interface MessageContent {
@@ -96,6 +104,7 @@ internal fun MessageRenderModel.accessibilityText(): String {
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
     val reply = replyInfo?.let { ", in reply to ${it.senderText}: ${it.body}" }.orEmpty()
+    val forward = forwardedFrom?.let { ", forwarded from $it" }.orEmpty()
     val state = when (deliveryState) {
         RenderDeliveryState.SENT -> when {
             isEditPending -> ", editing"
@@ -107,7 +116,7 @@ internal fun MessageRenderModel.accessibilityText(): String {
         RenderDeliveryState.FAILED -> ", failed"
     }
     val sender = senderText.takeIf { it.isNotBlank() } ?: if (isOutgoing) "You" else "Unknown sender"
-    return "$sender$reply, $body, $timestampText$state"
+    return "$sender$reply$forward, $body, $timestampText$state"
 }
 
 internal val MessageRenderModel.isRedacted: Boolean

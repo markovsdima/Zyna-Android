@@ -94,6 +94,7 @@ class GlassInputBarView @JvmOverloads constructor(
     var onSendMessage: (String) -> Boolean = { false }
     var onPreviewCancelled: () -> Unit = {}
     var onEditCancelled: () -> Unit = {}
+    var allowEmptySend: Boolean = false
     private var isSending = false
     private var pendingSentText: String? = null
     private var preview: GlassComposerPreview? = null
@@ -506,7 +507,7 @@ class GlassInputBarView @JvmOverloads constructor(
             return
         }
         val text = editText.text?.toString()?.trim().orEmpty()
-        if (text.isEmpty()) {
+        if (text.isEmpty() && !allowEmptySend) {
             return
         }
         if (onSendMessage(text)) {

@@ -3,6 +3,8 @@ package com.zyna.app.data.matrix
 import android.content.Context
 import android.util.Log
 import com.zyna.app.data.local.TimelineFlushSummary
+import com.zyna.app.data.messaging.ZynaHtmlCodec
+import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
@@ -129,18 +131,25 @@ data class MatrixEditTarget(
     val body: String
 )
 
+data class MatrixForwardTarget(
+    val body: String,
+    val forwardedFrom: String?
+)
+
 data class MatrixChatMessage(
     /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
     val eventId: String? = null,
     val transactionId: String? = null,
     val sender: String,
+    val senderDisplayName: String? = null,
     val body: String,
     val timestampMillis: Long,
     val isOwn: Boolean,
     val contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
     val replyInfo: MatrixReplyInfo? = null,
+    val forwardedFrom: String? = null,
     val isEdited: Boolean = false,
     val isEditPending: Boolean = false,
     val isEditFailed: Boolean = false,
@@ -461,17 +470,25 @@ class MatrixClientService(
         roomId: String,
         body: String,
         transactionId: String,
-        replyInfo: MatrixReplyInfo? = null
+        replyInfo: MatrixReplyInfo? = null,
+        forwardedFrom: String? = null
     ): String = withContext(Dispatchers.IO) {
         val text = body.trim()
         require(text.isNotEmpty()) { "Message is empty" }
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         val reply = replyInfo?.takeIf { it.eventId.isNotBlank() }
+        val forwardedSender = forwardedFrom?.trim()?.takeIf { it.isNotBlank() }
         val content = JSONObject()
             .put("msgtype", "m.text")
             .put("body", if (reply == null) text else plainReplyBody(text, reply))
             .put(TRANSACTION_ID_CONTENT_KEY, transactionId)
+        val formattedBody = formattedBody(
+            roomId = roomId,
+            body = text,
+            replyInfo = reply,
+            forwardedFrom = forwardedSender
+        )
         if (reply != null) {
             content.put(
                 "m.relates_to",
@@ -480,11 +497,10 @@ class MatrixClientService(
                     JSONObject().put("event_id", reply.eventId)
                 )
             )
+        }
+        if (formattedBody != null) {
             content.put("format", "org.matrix.custom.html")
-            content.put(
-                "formatted_body",
-                htmlReplyFallback(roomId = roomId, replyInfo = reply) + text.escapeHtml().htmlLineBreaks()
-            )
+            content.put("formatted_body", formattedBody)
         }
         val contentJson = content
             .toString()
@@ -614,18 +630,24 @@ class MatrixClientService(
         }
         val eventId = eventOrTransactionId.eventIdOrNull()
         val transactionId = eventOrTransactionId.transactionIdOrNull()
-        val isEdited = (msgLike.kind as? MsgLikeKind.Message)?.content?.isEdited ?: false
+        val messageContent = (msgLike.kind as? MsgLikeKind.Message)?.content
+        val isEdited = messageContent?.isEdited ?: false
+        val forwardedFrom = lazyProvider.latestJson()
+            ?.zynaForwardedFromFromRawEvent()
+            ?: messageContent?.zynaForwardedFrom()
 
         return MatrixChatMessage(
             id = eventOrTransactionId.stableId(),
             eventId = eventId,
             transactionId = transactionId,
             sender = sender,
+            senderDisplayName = senderProfile.displayNameOrNull(),
             body = body,
             timestampMillis = timestamp.toLong(),
             isOwn = isOwn,
             contentType = messageBody.contentType,
             replyInfo = replyInfo,
+            forwardedFrom = forwardedFrom,
             isEdited = isEdited
         )
     }
@@ -724,14 +746,75 @@ class MatrixClientService(
         return quotedLines.joinToString(separator = "\n") + "\n\n" + body
     }
 
+    private fun formattedBody(
+        roomId: String,
+        body: String,
+        replyInfo: MatrixReplyInfo?,
+        forwardedFrom: String?
+    ): String? {
+        if (replyInfo == null && forwardedFrom.isNullOrBlank()) {
+            return null
+        }
+        var html = ZynaHtmlCodec.escapeForHtmlAttribute(body).htmlLineBreaks()
+        if (replyInfo != null) {
+            html = htmlReplyFallback(roomId, replyInfo) + html
+        }
+        return ZynaHtmlCodec.encode(
+            userHtml = html,
+            attributes = ZynaMessageAttributes(forwardedFrom = forwardedFrom)
+        )
+    }
+
     private fun htmlReplyFallback(roomId: String, replyInfo: MatrixReplyInfo): String {
-        val roomEventLink = "https://matrix.to/#/$roomId/${replyInfo.eventId}".escapeHtmlAttribute()
-        val senderLink = "https://matrix.to/#/${replyInfo.senderId}".escapeHtmlAttribute()
-        val senderName = (replyInfo.senderDisplayName ?: replyInfo.senderId).escapeHtmlAttribute()
-        val quotedBody = replyInfo.body.escapeHtmlAttribute().htmlLineBreaks()
+        val roomEventLink = ZynaHtmlCodec.escapeForHtmlAttribute(
+            "https://matrix.to/#/$roomId/${replyInfo.eventId}"
+        )
+        val senderLink = ZynaHtmlCodec.escapeForHtmlAttribute(
+            "https://matrix.to/#/${replyInfo.senderId}"
+        )
+        val senderName = ZynaHtmlCodec.escapeForHtmlAttribute(
+            replyInfo.senderDisplayName ?: replyInfo.senderId
+        )
+        val quotedBody = ZynaHtmlCodec.escapeForHtmlAttribute(replyInfo.body).htmlLineBreaks()
 
         return "<mx-reply><blockquote><a href=\"$roomEventLink\">In reply to</a> " +
             "<a href=\"$senderLink\">$senderName</a><br>$quotedBody</blockquote></mx-reply>"
+    }
+
+    private fun MessageContent.zynaForwardedFrom(): String? {
+        val formatted = formattedHtmlBodyOrNull() ?: return null
+        return ZynaHtmlCodec.decode(formatted).forwardedFrom
+    }
+
+    private fun String.zynaForwardedFromFromRawEvent(): String? {
+        val content = runCatching { JSONObject(this).optJSONObject("content") }
+            .getOrNull()
+            ?: return null
+        return content.zynaForwardedFromFromContent()
+    }
+
+    private fun JSONObject.zynaForwardedFromFromContent(): String? {
+        val editedForwardedFrom = optJSONObject("m.new_content")
+            ?.zynaForwardedFromFromContent()
+        if (!editedForwardedFrom.isNullOrBlank()) {
+            return editedForwardedFrom
+        }
+
+        val formatted = optStringOrNull("formatted_body") ?: return null
+        return ZynaHtmlCodec.decode(formatted).forwardedFrom
+    }
+
+    private fun MessageContent.formattedHtmlBodyOrNull(): String? {
+        return when (val type = msgType) {
+            is MessageType.Text -> type.content.formatted?.body
+            is MessageType.Notice -> type.content.formatted?.body
+            is MessageType.Emote -> type.content.formatted?.body
+            else -> null
+        }
+    }
+
+    private fun JSONObject.optStringOrNull(key: String): String? {
+        return opt(key) as? String
     }
 
     private fun String.stripMatrixReplyFallback(): String {
@@ -747,18 +830,6 @@ class MatrixClientService(
             .filter { it.isNotBlank() }
             .all { it.startsWith(">") }
         return if (isReplyFallback) normalized.substring(separatorIndex + 2) else this
-    }
-
-    private fun String.escapeHtml(): String {
-        return replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-    }
-
-    private fun String.escapeHtmlAttribute(): String {
-        return escapeHtml()
-            .replace("\"", "&quot;")
-            .replace("'", "&#39;")
     }
 
     private fun String.htmlLineBreaks(): String {
@@ -874,6 +945,12 @@ class MatrixClientService(
 
         val displayName = (profile as? ProfileDetails.Ready)?.displayName
         return displayName?.takeIf { it.isNotBlank() } ?: this
+    }
+
+    private fun ProfileDetails.displayNameOrNull(): String? {
+        return (this as? ProfileDetails.Ready)
+            ?.displayName
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun LatestEventValueLocalState.toLastOwnMessageStatus(): MatrixLastOwnMessageStatus {

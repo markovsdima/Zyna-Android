@@ -28,6 +28,7 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixEditTarget
+import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
@@ -35,6 +36,7 @@ import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
+import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
@@ -68,6 +70,7 @@ fun ChatScreen(
     sendErrorMessage: String? = null,
     replyTarget: MatrixReplyInfo? = null,
     editTarget: MatrixEditTarget? = null,
+    forwardTarget: MatrixForwardTarget? = null,
     jumpTargetEventId: String? = null,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
@@ -80,6 +83,8 @@ fun ChatScreen(
     onCancelReply: () -> Unit = {},
     onEditMessage: (MatrixEditTarget) -> Unit = {},
     onCancelEdit: () -> Unit = {},
+    onForwardMessage: (MatrixForwardTarget) -> Unit = {},
+    onCancelForward: () -> Unit = {},
     onRetryOutgoingEnvelope: (String) -> Unit = {},
     onDiscardOutgoingEnvelope: (String) -> Unit = {},
     onRedactMessage: (String) -> Unit = {},
@@ -157,6 +162,7 @@ fun ChatScreen(
                 sendErrorColor = sendErrorColor,
                 replyTarget = replyTarget,
                 editTarget = editTarget,
+                forwardTarget = forwardTarget,
                 jumpTargetEventId = jumpTargetEventId,
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
@@ -168,6 +174,8 @@ fun ChatScreen(
                 onCancelReply = onCancelReply,
                 onEditMessage = onEditMessage,
                 onCancelEdit = onCancelEdit,
+                onForwardMessage = onForwardMessage,
+                onCancelForward = onCancelForward,
                 onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
                 onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
                 onRedactMessage = onRedactMessage,
@@ -199,6 +207,7 @@ private fun ChatMessageList(
     sendErrorColor: Int,
     replyTarget: MatrixReplyInfo?,
     editTarget: MatrixEditTarget?,
+    forwardTarget: MatrixForwardTarget?,
     jumpTargetEventId: String?,
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
@@ -210,6 +219,8 @@ private fun ChatMessageList(
     onCancelReply: () -> Unit,
     onEditMessage: (MatrixEditTarget) -> Unit,
     onCancelEdit: () -> Unit,
+    onForwardMessage: (MatrixForwardTarget) -> Unit,
+    onCancelForward: () -> Unit,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
@@ -252,6 +263,9 @@ private fun ChatMessageList(
             chatLayout.onEditMessage = { target ->
                 onEditMessage(target.toMatrixEditTarget())
             }
+            chatLayout.onForwardMessage = { target ->
+                onForwardMessage(target.toMatrixForwardTarget())
+            }
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
@@ -262,8 +276,13 @@ private fun ChatMessageList(
                 }
             }
             chatLayout.inputBar.onSendMessage = onSendMessage
-            chatLayout.inputBar.onPreviewCancelled = onCancelReply
-            chatLayout.inputBar.setPreview(replyTarget?.toComposerPreview())
+            chatLayout.inputBar.onPreviewCancelled = {
+                if (forwardTarget != null) onCancelForward() else onCancelReply()
+            }
+            chatLayout.inputBar.allowEmptySend = forwardTarget != null
+            chatLayout.inputBar.setPreview(
+                forwardTarget?.toComposerPreview() ?: replyTarget?.toComposerPreview()
+            )
             chatLayout.inputBar.onEditCancelled = onCancelEdit
             chatLayout.inputBar.setEditDraft(editTarget?.eventId, editTarget?.body)
             chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
@@ -299,6 +318,9 @@ private fun ChatMessageList(
             chatLayout.onEditMessage = { target ->
                 onEditMessage(target.toMatrixEditTarget())
             }
+            chatLayout.onForwardMessage = { target ->
+                onForwardMessage(target.toMatrixForwardTarget())
+            }
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
@@ -309,8 +331,13 @@ private fun ChatMessageList(
                 }
             }
             chatLayout.inputBar.onSendMessage = onSendMessage
-            chatLayout.inputBar.onPreviewCancelled = onCancelReply
-            chatLayout.inputBar.setPreview(replyTarget?.toComposerPreview())
+            chatLayout.inputBar.onPreviewCancelled = {
+                if (forwardTarget != null) onCancelForward() else onCancelReply()
+            }
+            chatLayout.inputBar.allowEmptySend = forwardTarget != null
+            chatLayout.inputBar.setPreview(
+                forwardTarget?.toComposerPreview() ?: replyTarget?.toComposerPreview()
+            )
             chatLayout.inputBar.onEditCancelled = onCancelEdit
             chatLayout.inputBar.setEditDraft(editTarget?.eventId, editTarget?.body)
             chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
@@ -758,7 +785,12 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         id = id,
         eventId = eventId,
         senderId = sender,
-        senderText = if (isOwn) "You" else sender,
+        senderDisplayName = senderDisplayName,
+        senderText = if (isOwn) {
+            "You"
+        } else {
+            senderDisplayName?.takeIf { it.isNotBlank() } ?: sender
+        },
         content = when (contentType) {
             MatrixMessageContentType.REDACTED -> MessageContent.Redacted
             else -> MessageContent.Text(body)
@@ -767,12 +799,14 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
         replyInfo = replyInfo?.toRenderReplyPreview(),
+        forwardedFrom = forwardedFrom,
         editInfo = editPreviewOrNull(),
         isEdited = isEdited,
         isEditPending = isEditPending,
         isEditFailed = isEditFailed,
         outgoingEnvelopeId = outgoingEnvelopeId,
         redactionTargetMessageId = redactionTargetMessageId(),
+        canForward = canForwardMessage(),
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
         canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
     )
@@ -827,6 +861,13 @@ private fun MessageReplyPreview.toMatrixReplyInfo(): MatrixReplyInfo {
     )
 }
 
+private fun MessageForwardPreview.toMatrixForwardTarget(): MatrixForwardTarget {
+    return MatrixForwardTarget(
+        body = body,
+        forwardedFrom = forwardedFrom
+    )
+}
+
 private fun MatrixReplyInfo.toComposerPreview(): GlassComposerPreview {
     val sender = senderDisplayName
         ?.takeIf { it.isNotBlank() }
@@ -834,6 +875,17 @@ private fun MatrixReplyInfo.toComposerPreview(): GlassComposerPreview {
         ?: "Unknown"
     return GlassComposerPreview(
         title = sender,
+        body = body.ifBlank { "Message" }
+    )
+}
+
+private fun MatrixForwardTarget.toComposerPreview(): GlassComposerPreview {
+    val title = forwardedFrom
+        ?.takeIf { it.isNotBlank() }
+        ?.let { "Forwarded from $it" }
+        ?: "Forward message"
+    return GlassComposerPreview(
+        title = title,
         body = body.ifBlank { "Message" }
     )
 }
@@ -857,6 +909,14 @@ private fun MatrixChatMessage.redactionTargetMessageId(): String? {
     } else {
         null
     }
+}
+
+private fun MatrixChatMessage.canForwardMessage(): Boolean {
+    return eventId != null &&
+        outgoingEnvelopeId == null &&
+        contentType == MatrixMessageContentType.TEXT &&
+        deliveryState == MatrixMessageDeliveryState.SENT &&
+        body.isNotBlank()
 }
 
 private fun MatrixMessageDeliveryState.toRenderDeliveryState(): RenderDeliveryState {

@@ -379,7 +379,8 @@ class LocalCacheRepository(
         envelopeId: String,
         transactionId: String,
         body: String,
-        replyInfo: MatrixReplyInfo?
+        replyInfo: MatrixReplyInfo?,
+        forwardedFrom: String?
     ) {
         val now = System.currentTimeMillis()
         database.withTransaction {
@@ -400,6 +401,7 @@ class LocalCacheRepository(
                     replySenderId = replyInfo?.senderId,
                     replySenderDisplayName = replyInfo?.senderDisplayName,
                     replyBody = replyInfo?.body,
+                    forwardedFrom = forwardedFrom,
                     body = body,
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -437,6 +439,7 @@ class LocalCacheRepository(
                     replySenderId = null,
                     replySenderDisplayName = null,
                     replyBody = null,
+                    forwardedFrom = null,
                     body = "",
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -802,12 +805,14 @@ class LocalCacheRepository(
             eventId = eventId,
             transactionId = transactionId,
             sender = sender,
+            senderDisplayName = senderDisplayName,
             body = displayBody,
             timestampMillis = timestampMillis,
             isOwn = isOwn,
             contentType = contentType.toMatrixContentType(),
             deliveryState = deliveryState.toMatrixDeliveryState(),
             replyInfo = replyInfoOrNull(),
+            forwardedFrom = forwardedFrom,
             isEdited = isEdited,
             isEditPending = isEditPending,
             isEditFailed = isEditFailed,
@@ -841,6 +846,7 @@ class LocalCacheRepository(
             transactionId = transactionId,
             timelineIndex = timelineIndex,
             sender = sender,
+            senderDisplayName = senderDisplayName,
             body = body,
             timestampMillis = timestampMillis,
             isOwn = isOwn,
@@ -850,6 +856,7 @@ class LocalCacheRepository(
             replySenderId = replyInfo?.senderId,
             replySenderDisplayName = replyInfo?.senderDisplayName,
             replyBody = replyInfo?.body,
+            forwardedFrom = forwardedFrom,
             isEdited = isEdited,
             isEditPending = isEditPending,
             isEditFailed = isEditFailed,
@@ -989,6 +996,7 @@ class LocalCacheRepository(
             contentType = MatrixMessageContentType.TEXT,
             deliveryState = state.toOutgoingDeliveryState(),
             replyInfo = replyInfoOrNull(),
+            forwardedFrom = forwardedFrom,
             outgoingEnvelopeId = id,
             canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
             canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
@@ -1036,7 +1044,8 @@ class LocalCacheRepository(
         return if (isOwn) {
             OWN_MESSAGE_PREVIEW_SENDER
         } else {
-            sender.takeIf { it.isNotBlank() }
+            senderDisplayName?.takeIf { it.isNotBlank() }
+                ?: sender.takeIf { it.isNotBlank() }
         }
     }
 
@@ -1062,6 +1071,7 @@ class LocalCacheRepository(
             eventId = eventId,
             body = body,
             replyInfo = replyInfoOrNull(),
+            forwardedFrom = forwardedFrom,
             createdAtMillis = createdAtMillis,
             failureMessage = failureMessage
         )
@@ -1295,11 +1305,13 @@ class LocalCacheRepository(
                 body = if (existing.isEdited && !incoming.isEdited) existing.body else incoming.body,
                 eventId = incoming.eventId ?: existing.eventId,
                 transactionId = incoming.transactionId ?: existing.transactionId,
+                senderDisplayName = incoming.senderDisplayName ?: existing.senderDisplayName,
                 replyEventId = incoming.replyEventId ?: existing.replyEventId,
                 replySenderId = incoming.replySenderId ?: existing.replySenderId,
                 replySenderDisplayName = incoming.replySenderDisplayName
                     ?: existing.replySenderDisplayName,
                 replyBody = incoming.replyBody ?: existing.replyBody,
+                forwardedFrom = incoming.forwardedFrom ?: existing.forwardedFrom,
                 isEdited = incoming.isEdited || existing.isEdited,
                 isEditPending = if (incoming.isEdited) false else existing.isEditPending,
                 isEditFailed = if (incoming.isEdited) false else existing.isEditFailed,

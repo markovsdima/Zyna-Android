@@ -26,6 +26,7 @@ data class OutgoingTextEnvelope(
     val eventId: String?,
     val body: String,
     val replyInfo: MatrixReplyInfo?,
+    val forwardedFrom: String?,
     val createdAtMillis: Long,
     val failureMessage: String?
 )

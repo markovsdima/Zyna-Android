@@ -13,6 +13,7 @@ import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixEditTarget
+import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
@@ -33,6 +34,7 @@ sealed interface AppRoute {
     data object Login : AppRoute
     data class RecoveryKey(val userId: String) : AppRoute
     data object Rooms : AppRoute
+    data object ForwardPicker : AppRoute
     data class Chat(
         val roomId: String,
         val displayName: String
@@ -59,6 +61,9 @@ data class AppUiState(
     val chatSendErrorMessage: String? = null,
     val chatReplyTarget: MatrixReplyInfo? = null,
     val chatEditTarget: MatrixEditTarget? = null,
+    val chatForwardTarget: MatrixForwardTarget? = null,
+    val pendingForwardTarget: MatrixForwardTarget? = null,
+    val forwardReturnRoute: AppRoute? = null,
     val chatJumpTargetEventId: String? = null,
     val chatScrollToLiveEdgeRequested: Boolean = false
 ) {
@@ -178,6 +183,17 @@ class AppViewModel(
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
                         chatReplyTarget = if (shouldClearChat) null else current.chatReplyTarget,
                         chatEditTarget = if (shouldClearChat) null else current.chatEditTarget,
+                        chatForwardTarget = if (shouldClearChat) null else current.chatForwardTarget,
+                        pendingForwardTarget = if (shouldClearSessionData) {
+                            null
+                        } else {
+                            current.pendingForwardTarget
+                        },
+                        forwardReturnRoute = if (shouldClearSessionData) {
+                            null
+                        } else {
+                            current.forwardReturnRoute
+                        },
                         chatJumpTargetEventId = if (shouldClearChat) {
                             null
                         } else {
@@ -287,6 +303,13 @@ class AppViewModel(
     }
 
     fun openRoom(room: MatrixRoomSummary) {
+        openRoom(room, forwardTarget = null)
+    }
+
+    private fun openRoom(
+        room: MatrixRoomSummary,
+        forwardTarget: MatrixForwardTarget?
+    ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         stopChatTimeline()
 
@@ -326,6 +349,9 @@ class AppViewModel(
                     chatSendErrorMessage = null,
                     chatReplyTarget = null,
                     chatEditTarget = null,
+                    chatForwardTarget = forwardTarget,
+                    pendingForwardTarget = null,
+                    forwardReturnRoute = null,
                     chatJumpTargetEventId = null,
                     chatScrollToLiveEdgeRequested = false
                 )
@@ -366,6 +392,9 @@ class AppViewModel(
                 chatSendErrorMessage = null,
                 chatReplyTarget = null,
                 chatEditTarget = null,
+                chatForwardTarget = null,
+                pendingForwardTarget = null,
+                forwardReturnRoute = null,
                 chatJumpTargetEventId = null,
                 chatScrollToLiveEdgeRequested = false
             )
@@ -381,12 +410,14 @@ class AppViewModel(
     fun sendChatMessage(body: String): Boolean {
         val route = _uiState.value.route as? AppRoute.Chat ?: return false
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
-        val text = body.trim()
-        if (text.isEmpty() || _uiState.value.isSendingChatMessage) {
+        val state = _uiState.value
+        val forwardTarget = state.chatForwardTarget
+        val text = forwardTarget?.body?.trim() ?: body.trim()
+        if (text.isEmpty() || state.isSendingChatMessage) {
             return false
         }
-        val replyInfo = _uiState.value.chatReplyTarget
-        val editTarget = _uiState.value.chatEditTarget
+        val replyInfo = if (forwardTarget == null) state.chatReplyTarget else null
+        val editTarget = if (forwardTarget == null) state.chatEditTarget else null
         val envelopeId = "text:${UUID.randomUUID()}"
         val transactionId = matrixClientService.prepareTransactionId()
 
@@ -426,7 +457,8 @@ class AppViewModel(
                         envelopeId = envelopeId,
                         transactionId = transactionId,
                         body = text,
-                        replyInfo = replyInfo
+                        replyInfo = replyInfo,
+                        forwardedFrom = forwardTarget?.forwardedFrom
                     )
                     outgoingOutboxService.kick(
                         reason = "new-envelope",
@@ -440,7 +472,8 @@ class AppViewModel(
                         isSendingChatMessage = false,
                         chatSendErrorMessage = null,
                         chatReplyTarget = null,
-                        chatEditTarget = null
+                        chatEditTarget = null,
+                        chatForwardTarget = null
                     )
                 }
             } catch (error: CancellationException) {
@@ -471,7 +504,8 @@ class AppViewModel(
             } else {
                 it.copy(
                     chatReplyTarget = replyInfo,
-                    chatEditTarget = null
+                    chatEditTarget = null,
+                    chatForwardTarget = null
                 )
             }
         }
@@ -488,8 +522,50 @@ class AppViewModel(
             } else {
                 it.copy(
                     chatReplyTarget = null,
-                    chatEditTarget = editTarget
+                    chatEditTarget = editTarget,
+                    chatForwardTarget = null
                 )
+            }
+        }
+    }
+
+    fun startForwardMessage(target: MatrixForwardTarget) {
+        if (target.body.isBlank()) {
+            return
+        }
+        _uiState.update { current ->
+            current.copy(
+                route = AppRoute.ForwardPicker,
+                pendingForwardTarget = target,
+                forwardReturnRoute = current.route,
+                chatReplyTarget = null,
+                chatEditTarget = null,
+                chatForwardTarget = null
+            )
+        }
+    }
+
+    fun cancelForwardPicker() {
+        _uiState.update { current ->
+            current.copy(
+                route = current.forwardReturnRoute ?: AppRoute.Rooms,
+                pendingForwardTarget = null,
+                forwardReturnRoute = null
+            )
+        }
+    }
+
+    fun selectForwardRoom(room: MatrixRoomSummary) {
+        val target = _uiState.value.pendingForwardTarget ?: return
+        openRoom(room, forwardTarget = target)
+    }
+
+    fun clearChatForwardTarget() {
+        _uiState.update {
+            if (it.chatForwardTarget == null) {
+                it
+            } else {
+                it.copy(chatForwardTarget = null)
             }
         }
     }

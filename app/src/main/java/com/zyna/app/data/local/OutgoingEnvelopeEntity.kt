@@ -28,6 +28,7 @@ data class OutgoingEnvelopeEntity(
     val replySenderId: String?,
     val replySenderDisplayName: String?,
     val replyBody: String?,
+    val forwardedFrom: String?,
     val body: String,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,

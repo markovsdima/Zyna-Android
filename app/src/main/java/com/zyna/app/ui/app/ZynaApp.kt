@@ -2,6 +2,7 @@ package com.zyna.app.ui.app
 
 import androidx.compose.runtime.Composable
 import com.zyna.app.data.matrix.MatrixEditTarget
+import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.ui.auth.LoginScreen
@@ -16,6 +17,8 @@ fun ZynaApp(
     onSubmitRecoveryKey: (String) -> Unit,
     onRefreshRooms: () -> Unit,
     onOpenRoom: (MatrixRoomSummary) -> Unit,
+    onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
+    onCancelForwardPicker: () -> Unit,
     onRefreshChat: () -> Unit,
     onCloseChat: () -> Unit,
     onLoadOlderChatMessages: () -> Unit,
@@ -27,6 +30,8 @@ fun ZynaApp(
     onCancelReply: () -> Unit,
     onEditMessage: (MatrixEditTarget) -> Unit,
     onCancelEdit: () -> Unit,
+    onForwardMessage: (MatrixForwardTarget) -> Unit,
+    onCancelForward: () -> Unit,
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
@@ -59,6 +64,15 @@ fun ZynaApp(
             onOpenRoom = onOpenRoom,
             onLogout = onLogout
         )
+        AppRoute.ForwardPicker -> RoomsScreen(
+            rooms = state.rooms,
+            isRefreshing = state.isRefreshingRooms,
+            onRefresh = onRefreshRooms,
+            onOpenRoom = onForwardRoomSelected,
+            onLogout = null,
+            title = "Forward to",
+            onBack = onCancelForwardPicker
+        )
         is AppRoute.Chat -> ChatScreen(
             roomName = route.displayName,
             roomId = route.roomId,
@@ -75,6 +89,7 @@ fun ZynaApp(
             sendErrorMessage = state.chatSendErrorMessage,
             replyTarget = state.chatReplyTarget,
             editTarget = state.chatEditTarget,
+            forwardTarget = state.chatForwardTarget,
             jumpTargetEventId = state.chatJumpTargetEventId,
             onRefresh = onRefreshChat,
             onBack = onCloseChat,
@@ -87,6 +102,8 @@ fun ZynaApp(
             onCancelReply = onCancelReply,
             onEditMessage = onEditMessage,
             onCancelEdit = onCancelEdit,
+            onForwardMessage = onForwardMessage,
+            onCancelForward = onCancelForward,
             onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
             onRedactMessage = onRedactMessage,

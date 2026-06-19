@@ -17,6 +17,7 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
     private val senderPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val bodyPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val timePaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
+    private val forwardedPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val replySenderPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val replyBodyPaint = TextPaint(TextPaint.ANTI_ALIAS_FLAG or TextPaint.SUBPIXEL_TEXT_FLAG)
     private val replyBarPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -28,12 +29,15 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
     private val replyLineSpacing = 1.dpToPx(density)
     private val replyBottomInset = 4.dpToPx(density)
     private val replyBottomSpacing = 6.dpToPx(density)
+    private val forwardedBottomSpacing = 5.dpToPx(density)
 
     init {
         senderPaint.textSize = 12.spToPx(context)
         senderPaint.isFakeBoldText = true
         bodyPaint.textSize = 16.spToPx(context)
         timePaint.textSize = 11.spToPx(context)
+        forwardedPaint.textSize = 12.spToPx(context)
+        forwardedPaint.isFakeBoldText = true
         replySenderPaint.textSize = 12.spToPx(context)
         replySenderPaint.isFakeBoldText = true
         replyBodyPaint.textSize = 12.spToPx(context)
@@ -54,9 +58,18 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
         bodyPaint.color = if (isRedacted) theme.metadataColor(message) else theme.textColor(message)
         bodyPaint.textSkewX = if (isRedacted) REDACTED_TEXT_SKEW_X else 0f
         timePaint.color = theme.metadataColor(message)
+        forwardedPaint.color = theme.metadataColor(message)
         replySenderPaint.color = theme.metadataColor(message)
         replyBodyPaint.color = theme.metadataColor(message)
         replyBarPaint.color = theme.metadataColor(message)
+
+        val forwardedLayout = makeForwardedHeaderLayout(message.forwardedFrom, widthLimit)
+        val forwardedHeight = if (forwardedLayout == null) {
+            0
+        } else {
+            forwardedLayout.height + forwardedBottomSpacing
+        }
+        val forwardedWidth = forwardedLayout?.measuredLineWidth() ?: 0
 
         val replyLayout = makeReplyHeaderLayout(message.replyInfo, widthLimit)
         val replyHeight = if (replyLayout == null) 0 else replyLayout.height + replyBottomSpacing
@@ -89,10 +102,11 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             max(max(senderWidth, bodyWidth), inlineWidth)
         } else {
             max(max(senderWidth, bodyWidth), timeWidth)
-        }.coerceAtLeast(replyWidth).coerceIn(1, widthLimit)
+        }.coerceAtLeast(max(replyWidth, forwardedWidth)).coerceIn(1, widthLimit)
 
-        val senderY = replyHeight
-        val bodyY = replyHeight + senderHeight
+        val replyY = forwardedHeight
+        val senderY = forwardedHeight + replyHeight
+        val bodyY = forwardedHeight + replyHeight + senderHeight
         val timeX = contentWidth - timeWidth
         val timeY = if (fitsInline) {
             bodyY + bodyLayout.height - timeRowHeight
@@ -100,16 +114,18 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             bodyY + bodyLayout.height + timeLineSpacing
         }
         val contentHeight = if (fitsInline) {
-            replyHeight + senderHeight + bodyLayout.height
+            forwardedHeight + replyHeight + senderHeight + bodyLayout.height
         } else {
-            replyHeight + senderHeight + bodyLayout.height + timeLineSpacing + timeRowHeight
+            forwardedHeight + replyHeight + senderHeight + bodyLayout.height + timeLineSpacing + timeRowHeight
         }
 
         return TextMessageLayout(
             width = contentWidth,
             height = contentHeight,
+            forwardedHeaderLayout = forwardedLayout,
+            forwardedY = 0,
             replyHeaderLayout = replyLayout,
-            replyY = 0,
+            replyY = replyY,
             senderLayout = senderLayout,
             senderY = senderY,
             bodyLayout = bodyLayout,
@@ -122,6 +138,13 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
 
     override fun draw(canvas: Canvas, layout: MessageContentLayout) {
         layout as TextMessageLayout
+
+        layout.forwardedHeaderLayout?.let { forwarded ->
+            val save = canvas.save()
+            canvas.translate(0f, layout.forwardedY.toFloat())
+            forwarded.draw(canvas)
+            canvas.restoreToCount(save)
+        }
 
         layout.replyHeaderLayout?.let { reply ->
             val save = canvas.save()
@@ -176,6 +199,18 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
             senderY = 0,
             bodyLayout = bodyLayout,
             bodyY = senderLayout.height + replyLineSpacing
+        )
+    }
+
+    private fun makeForwardedHeaderLayout(
+        forwardedFrom: String?,
+        maxWidth: Int
+    ): StaticLayout? {
+        val sender = forwardedFrom?.takeIf { it.isNotBlank() } ?: return null
+        return makeSingleLineLayout(
+            text = "Forwarded from $sender",
+            paint = forwardedPaint,
+            maxWidth = maxWidth
         )
     }
 
@@ -267,6 +302,8 @@ internal class TextMessageRenderer(context: Context) : MessageContentRenderer {
 internal data class TextMessageLayout(
     override val width: Int,
     override val height: Int,
+    val forwardedHeaderLayout: StaticLayout?,
+    val forwardedY: Int,
     val replyHeaderLayout: ReplyHeaderLayout?,
     val replyY: Int,
     val senderLayout: StaticLayout?,

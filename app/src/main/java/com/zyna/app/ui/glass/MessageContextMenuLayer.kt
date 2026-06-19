@@ -381,6 +381,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             ) {
                 add(MessageContextMenuAction.REPLY)
             }
+            if (message.forwardableText() != null) {
+                add(MessageContextMenuAction.FORWARD)
+            }
             if (message.editInfo != null) {
                 add(MessageContextMenuAction.EDIT)
             }
@@ -709,6 +712,7 @@ internal enum class MessageContextMenuAction(
     val isDestructive: Boolean = false
 ) {
     REPLY("Reply"),
+    FORWARD("Forward"),
     EDIT("Edit"),
     COPY("Copy"),
     DELETE("Delete", true),
@@ -756,6 +760,13 @@ private fun MessageRenderModel.copyableText(): String? {
         MessageContent.Redacted -> null
     }
     return text?.takeIf { it.isNotBlank() }
+}
+
+private fun MessageRenderModel.forwardableText(): String? {
+    if (!canForward || eventId.isNullOrBlank() || outgoingEnvelopeId != null) {
+        return null
+    }
+    return copyableText()
 }
 
 private fun lerp(from: Float, to: Float, progress: Float): Float {

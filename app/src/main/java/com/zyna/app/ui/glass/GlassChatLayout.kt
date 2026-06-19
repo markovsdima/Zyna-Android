@@ -33,6 +33,7 @@ import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
+import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import kotlin.math.abs
@@ -57,6 +58,7 @@ class GlassChatLayout @JvmOverloads constructor(
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
     internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
     internal var onEditMessage: (MessageEditPreview) -> Unit = {}
+    internal var onForwardMessage: (MessageForwardPreview) -> Unit = {}
     var onRedactMessage: (String) -> Unit = {}
     var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
     var onEvaluateVisibleReadReceiptCandidate: () -> Unit = {}
@@ -1237,6 +1239,10 @@ class GlassChatLayout @JvmOverloads constructor(
                 message.editInfo?.let(onEditMessage)
                 true
             }
+            MessageContextMenuAction.FORWARD -> {
+                message.toForwardPreviewOrNull()?.let(onForwardMessage)
+                true
+            }
             MessageContextMenuAction.COPY -> {
                 copyMessageText(message)
                 true
@@ -1300,6 +1306,21 @@ class GlassChatLayout @JvmOverloads constructor(
             senderId = senderId,
             senderText = senderText,
             body = body
+        )
+    }
+
+    private fun MessageRenderModel.toForwardPreviewOrNull(): MessageForwardPreview? {
+        eventId?.takeIf { it.isNotBlank() } ?: return null
+        if (!canForward || content is MessageContent.Redacted || outgoingEnvelopeId != null) {
+            return null
+        }
+        val body = when (val currentContent = content) {
+            is MessageContent.Text -> currentContent.body
+            MessageContent.Redacted -> return null
+        }.takeIf { it.isNotBlank() } ?: return null
+        return MessageForwardPreview(
+            body = body,
+            forwardedFrom = senderDisplayName?.takeIf { it.isNotBlank() }
         )
     }
 

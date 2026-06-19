@@ -221,7 +221,8 @@ class OutgoingOutboxService(
                 roomId = candidate.roomId,
                 body = candidate.body,
                 transactionId = candidate.transactionId,
-                replyInfo = candidate.replyInfo
+                replyInfo = candidate.replyInfo,
+                forwardedFrom = candidate.forwardedFrom
             )
             retryBackoff.clear(candidate.id)
             localCacheRepository.markOutgoingDispatchAccepted(

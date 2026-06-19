@@ -43,12 +43,21 @@ fun RoomsScreen(
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onOpenRoom: (MatrixRoomSummary) -> Unit,
-    onLogout: () -> Unit
+    onLogout: (() -> Unit)?,
+    title: String = "Chats",
+    onBack: (() -> Unit)? = null
 ) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Chats") },
+                navigationIcon = {
+                    if (onBack != null) {
+                        TextButton(onClick = onBack) {
+                            Text("Back")
+                        }
+                    }
+                },
+                title = { Text(title) },
                 actions = {
                     TextButton(
                         onClick = onRefresh,
@@ -56,8 +65,10 @@ fun RoomsScreen(
                     ) {
                         Text(if (isRefreshing) "Syncing" else "Refresh")
                     }
-                    TextButton(onClick = onLogout) {
-                        Text("Log out")
+                    if (onLogout != null) {
+                        TextButton(onClick = onLogout) {
+                            Text("Log out")
+                        }
                     }
                 }
             )

@@ -9,6 +9,7 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
+import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
@@ -26,6 +27,7 @@ import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed interface AppRoute {
     data object Login : AppRoute
@@ -100,7 +103,8 @@ private sealed interface PendingReadReceiptSend {
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
-    private val outgoingOutboxService: OutgoingOutboxService
+    private val outgoingOutboxService: OutgoingOutboxService,
+    private val matrixMediaLoader: MatrixMediaLoader
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -1232,6 +1236,9 @@ class AppViewModel(
         stopRoomListLiveRefresh()
         viewModelScope.launch {
             localCacheRepository.clearAll()
+            withContext(Dispatchers.IO) {
+                matrixMediaLoader.clear()
+            }
             matrixClientService.logout()
         }
     }
@@ -1577,7 +1584,8 @@ private fun String.shortLogId(): String {
 class AppViewModelFactory(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
-    private val outgoingOutboxService: OutgoingOutboxService
+    private val outgoingOutboxService: OutgoingOutboxService,
+    private val matrixMediaLoader: MatrixMediaLoader
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
@@ -1585,7 +1593,8 @@ class AppViewModelFactory(
             return AppViewModel(
                 matrixClientService = matrixClientService,
                 localCacheRepository = localCacheRepository,
-                outgoingOutboxService = outgoingOutboxService
+                outgoingOutboxService = outgoingOutboxService,
+                matrixMediaLoader = matrixMediaLoader
             ) as T
         }
         error("Unknown ViewModel class: ${modelClass.name}")

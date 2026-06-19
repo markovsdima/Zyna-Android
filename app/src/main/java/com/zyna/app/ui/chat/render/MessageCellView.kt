@@ -259,6 +259,15 @@ internal class MessageCellView(
         return true
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        renderModel?.let { model ->
+            closeImageLoadHandles()
+            startImageLoadIfNeeded(model)
+            invalidate()
+        }
+    }
+
     override fun onDetachedFromWindow() {
         removeCallbacks(beginContextMenuPreviewRunnable)
         removeCallbacks(openContextMenuRunnable)

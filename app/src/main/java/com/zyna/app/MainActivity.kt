@@ -59,7 +59,8 @@ class MainActivity : ComponentActivity() {
                 factory = AppViewModelFactory(
                     matrixClientService = appContainer.matrixClientService,
                     localCacheRepository = appContainer.localCacheRepository,
-                    outgoingOutboxService = appContainer.outgoingOutboxService
+                    outgoingOutboxService = appContainer.outgoingOutboxService,
+                    matrixMediaLoader = appContainer.matrixMediaLoader
                 )
             )
             val state by appViewModel.uiState.collectAsState()

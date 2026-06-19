@@ -30,7 +30,8 @@ class AppContainer(context: Context) {
         storePassphraseStore = matrixStorePassphraseStore
     )
     val matrixMediaLoader = MatrixMediaLoader(
-        matrixClientService = matrixClientService
+        matrixClientService = matrixClientService,
+        context = appContext
     )
     val outgoingOutboxService = OutgoingOutboxService(
         matrixClientService = matrixClientService,

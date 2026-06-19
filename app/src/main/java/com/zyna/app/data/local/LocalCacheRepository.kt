@@ -418,6 +418,8 @@ class LocalCacheRepository(
                     imageSizeBytes = null,
                     imageCaption = null,
                     zynaAttributesJson = null,
+                    imageUploadedJson = null,
+                    imageUploadedAtMillis = null,
                     body = body,
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -469,6 +471,8 @@ class LocalCacheRepository(
                     imageSizeBytes = sizeBytes,
                     imageCaption = normalizedCaption,
                     zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
+                    imageUploadedJson = null,
+                    imageUploadedAtMillis = null,
                     body = normalizedCaption ?: "Photo",
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -514,6 +518,8 @@ class LocalCacheRepository(
                     imageSizeBytes = null,
                     imageCaption = null,
                     zynaAttributesJson = null,
+                    imageUploadedJson = null,
+                    imageUploadedAtMillis = null,
                     body = "",
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -596,6 +602,28 @@ class LocalCacheRepository(
                 updatedAtMillis = now
             )
             updateRoomPreview(userId, roomId, now)
+        }
+    }
+
+    suspend fun markOutgoingImageUploadAccepted(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        uploadedImageJson: String
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val didUpdate = outgoingDao.markImageUploadAccepted(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                uploadedImageJson = uploadedImageJson,
+                updatedAtMillis = now
+            ) > 0
+            if (didUpdate) {
+                updateRoomPreview(userId, roomId, now)
+            }
+            didUpdate
         }
     }
 
@@ -1233,7 +1261,9 @@ class LocalCacheRepository(
 
     private fun OutgoingEnvelopeEntity.toOutgoingImageEnvelopeOrNull(): OutgoingImageEnvelope? {
         if (kind != OutgoingEnvelopeKind.IMAGE.name) return null
-        val localPath = imageLocalPath?.takeIf { it.isNotBlank() } ?: return null
+        val localPath = imageLocalPath?.takeIf { it.isNotBlank() }
+        val uploadedImageJson = imageUploadedJson?.takeIf { it.isNotBlank() }
+        if (localPath == null && uploadedImageJson == null) return null
 
         return OutgoingImageEnvelope(
             userId = userId,
@@ -1249,6 +1279,7 @@ class LocalCacheRepository(
             sizeBytes = imageSizeBytes?.takeIf { it > 0L } ?: 0L,
             caption = imageCaption,
             zynaAttributesJson = zynaAttributesJson,
+            uploadedImageJson = uploadedImageJson,
             createdAtMillis = createdAtMillis,
             failureMessage = failureMessage
         )

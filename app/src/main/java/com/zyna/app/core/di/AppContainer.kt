@@ -35,6 +35,7 @@ class AppContainer(context: Context) {
     )
     val outgoingOutboxService = OutgoingOutboxService(
         matrixClientService = matrixClientService,
-        localCacheRepository = localCacheRepository
+        localCacheRepository = localCacheRepository,
+        context = appContext
     )
 }

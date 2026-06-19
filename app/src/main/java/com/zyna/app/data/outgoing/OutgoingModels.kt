@@ -39,13 +39,14 @@ data class OutgoingImageEnvelope(
     val transportState: OutgoingTransportState,
     val transactionId: String,
     val eventId: String?,
-    val localPath: String,
+    val localPath: String?,
     val mimeType: String,
     val width: Int,
     val height: Int,
     val sizeBytes: Long,
     val caption: String?,
     val zynaAttributesJson: String?,
+    val uploadedImageJson: String?,
     val createdAtMillis: Long,
     val failureMessage: String?
 )

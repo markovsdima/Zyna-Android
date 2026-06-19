@@ -36,6 +36,8 @@ data class OutgoingEnvelopeEntity(
     val imageSizeBytes: Long?,
     val imageCaption: String?,
     val zynaAttributesJson: String?,
+    val imageUploadedJson: String?,
+    val imageUploadedAtMillis: Long?,
     val body: String,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,

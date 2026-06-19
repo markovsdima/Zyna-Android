@@ -559,19 +559,36 @@ class MatrixClientService(
         transactionId: String,
         zynaAttributesJson: String?
     ): String = withContext(Dispatchers.IO) {
+        val uploadedImageJson = uploadImageForEvent(
+            roomId = roomId,
+            localPath = localPath,
+            mimeType = mimeType,
+            sizeBytes = sizeBytes,
+            width = width,
+            height = height
+        )
+        sendUploadedImageMessage(
+            roomId = roomId,
+            uploadedImageJson = uploadedImageJson,
+            caption = caption,
+            transactionId = transactionId,
+            zynaAttributesJson = zynaAttributesJson
+        )
+    }
+
+    suspend fun uploadImageForEvent(
+        roomId: String,
+        localPath: String,
+        mimeType: String,
+        sizeBytes: Long,
+        width: Int,
+        height: Int
+    ): String = withContext(Dispatchers.IO) {
         val imageFile = File(localPath)
         require(imageFile.isFile) { "Image file is not available" }
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
-        val normalizedCaption = caption.normalizedMessageCaption()
-        val zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson)
-        val plainCaption = normalizedCaption
-            ?: ZERO_WIDTH_SPACE.takeUnless { zynaAttributes.isEmpty }
-        val formattedCaption = formattedMediaCaption(
-            caption = normalizedCaption,
-            attributes = zynaAttributes
-        )
-        val uploadedImageJson = room.uploadImageForEvent(
+        room.uploadImageForEvent(
             originalFilePath = imageFile.absolutePath,
             thumbnailFilePath = null,
             originalMimetype = mimeType.ifBlank { "image/jpeg" },
@@ -585,6 +602,25 @@ class MatrixClientService(
             thumbnailWidth = null,
             thumbnailHeight = null,
             blurhash = null
+        )
+    }
+
+    suspend fun sendUploadedImageMessage(
+        roomId: String,
+        uploadedImageJson: String,
+        caption: String?,
+        transactionId: String,
+        zynaAttributesJson: String?
+    ): String = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val normalizedCaption = caption.normalizedMessageCaption()
+        val zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson)
+        val plainCaption = normalizedCaption
+            ?: ZERO_WIDTH_SPACE.takeUnless { zynaAttributes.isEmpty }
+        val formattedCaption = formattedMediaCaption(
+            caption = normalizedCaption,
+            attributes = zynaAttributes
         )
 
         room.sendUploadedImageWithTransactionIdReturningEventId(

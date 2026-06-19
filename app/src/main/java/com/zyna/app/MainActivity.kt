@@ -1,5 +1,6 @@
 package com.zyna.app
 
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.graphics.Rect
@@ -31,6 +32,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.outgoing.OutgoingMediaStorage
+import com.zyna.app.data.outgoing.OutgoingOutboxDebugHooks
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
 import com.zyna.app.ui.app.AppRoute
@@ -54,6 +56,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         preferMaxRefreshRate()
         val appContainer = (application as ZynaApplication).appContainer
+        OutgoingOutboxDebugHooks.handleIntent(this, intent)
         setContent {
             val appViewModel: AppViewModel = viewModel(
                 factory = AppViewModelFactory(
@@ -180,6 +183,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        OutgoingOutboxDebugHooks.handleIntent(this, intent)
     }
 
     override fun onResume() {

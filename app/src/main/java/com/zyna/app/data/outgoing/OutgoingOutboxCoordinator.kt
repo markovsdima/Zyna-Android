@@ -1,5 +1,6 @@
 package com.zyna.app.data.outgoing
 
+import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import com.zyna.app.data.local.LocalCacheRepository
@@ -25,8 +26,10 @@ data class OutgoingOutboxFailure(
 
 class OutgoingOutboxService(
     private val matrixClientService: MatrixClientService,
-    private val localCacheRepository: LocalCacheRepository
+    private val localCacheRepository: LocalCacheRepository,
+    context: Context
 ) {
+    private val appContext = context.applicationContext
     private val retryBackoff = OutgoingRetryBackoff<String>()
     private val inFlight = OutgoingInFlightTracker<String>()
     private val _sendFailures = MutableSharedFlow<OutgoingOutboxFailure>(
@@ -283,13 +286,12 @@ class OutgoingOutboxService(
                 roomId = candidate.roomId,
                 envelopeId = candidate.id
             )
-            val eventId = matrixClientService.sendImageMessage(
+            val uploadedImageJson = candidate.uploadedImageJson
+                ?: uploadImageAndCheckpoint(candidate)
+                ?: return
+            val eventId = matrixClientService.sendUploadedImageMessage(
                 roomId = candidate.roomId,
-                localPath = candidate.localPath,
-                mimeType = candidate.mimeType,
-                sizeBytes = candidate.sizeBytes,
-                width = candidate.width,
-                height = candidate.height,
+                uploadedImageJson = uploadedImageJson,
                 caption = candidate.caption,
                 transactionId = candidate.transactionId,
                 zynaAttributesJson = candidate.zynaAttributesJson
@@ -309,6 +311,41 @@ class OutgoingOutboxService(
         } finally {
             inFlight.end(candidate.id)
         }
+    }
+
+    private suspend fun uploadImageAndCheckpoint(candidate: OutgoingImageEnvelope): String? {
+        val localPath = candidate.localPath
+            ?: error("Image file is not available")
+        val uploadedImageJson = matrixClientService.uploadImageForEvent(
+            roomId = candidate.roomId,
+            localPath = localPath,
+            mimeType = candidate.mimeType,
+            sizeBytes = candidate.sizeBytes,
+            width = candidate.width,
+            height = candidate.height
+        )
+        currentCoroutineContext().ensureActive()
+        val didCheckpoint = localCacheRepository.markOutgoingImageUploadAccepted(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            envelopeId = candidate.id,
+            uploadedImageJson = uploadedImageJson
+        )
+        if (!didCheckpoint) {
+            Log.d(TAG, "outbox image upload skipped envelope=${candidate.id}")
+            return null
+        }
+        currentCoroutineContext().ensureActive()
+        OutgoingOutboxDebugHooks.crashAfterImageUploadCheckpointIfRequested(
+            context = appContext,
+            envelopeId = candidate.id,
+            transactionId = candidate.transactionId
+        )
+        Log.d(
+            TAG,
+            "outbox image uploaded envelope=${candidate.id} bytes=${uploadedImageJson.length}"
+        )
+        return uploadedImageJson
     }
 
     private suspend fun sendRedactionIfEligible(

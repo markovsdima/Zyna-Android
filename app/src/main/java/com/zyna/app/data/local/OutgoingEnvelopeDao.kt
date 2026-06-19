@@ -186,6 +186,28 @@ interface OutgoingEnvelopeDao {
     @Query(
         """
         UPDATE outgoing_envelopes
+        SET imageUploadedJson = :uploadedImageJson,
+            imageUploadedAtMillis = :updatedAtMillis,
+            failureMessage = NULL,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND id = :id
+            AND kind = 'IMAGE'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+        """
+    )
+    suspend fun markImageUploadAccepted(
+        userId: String,
+        roomId: String,
+        id: String,
+        uploadedImageJson: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE outgoing_envelopes
         SET transportState = 'SENT',
             eventId = :eventId,
             failureMessage = NULL,

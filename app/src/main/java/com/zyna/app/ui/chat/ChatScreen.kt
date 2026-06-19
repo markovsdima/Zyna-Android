@@ -62,6 +62,7 @@ fun ChatScreen(
     canLoadOlder: Boolean,
     canLoadNewer: Boolean,
     isAtLiveEdge: Boolean,
+    scrollToLiveEdgeRequested: Boolean,
     errorMessage: String?,
     isSendingMessage: Boolean = false,
     sendErrorMessage: String? = null,
@@ -72,6 +73,7 @@ fun ChatScreen(
     onBack: () -> Unit,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
+    onJumpToLiveEdge: () -> Unit,
     onSendMessage: (String) -> Boolean = { false },
     onReplyToMessage: (MatrixReplyInfo) -> Unit = {},
     onReplyHeaderClicked: (String) -> Unit = {},
@@ -87,7 +89,8 @@ fun ChatScreen(
         eventId: String?,
         canEstablishBaseline: Boolean
     ) -> Unit = { _, _, _ -> },
-    onJumpTargetConsumed: (String) -> Unit = {}
+    onJumpTargetConsumed: (String) -> Unit = {},
+    onScrollToLiveEdgeConsumed: () -> Unit = {}
 ) {
     val glassPalette = chatGlassPalette()
     val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
@@ -148,6 +151,7 @@ fun ChatScreen(
                 canLoadOlder = canLoadOlder,
                 canLoadNewer = canLoadNewer,
                 isAtLiveEdge = isAtLiveEdge,
+                scrollToLiveEdgeRequested = scrollToLiveEdgeRequested,
                 isSendingMessage = isSendingMessage,
                 sendErrorMessage = sendErrorMessage,
                 sendErrorColor = sendErrorColor,
@@ -157,6 +161,7 @@ fun ChatScreen(
                 palette = glassPalette,
                 onLoadOlder = onLoadOlder,
                 onLoadNewer = onLoadNewer,
+                onJumpToLiveEdge = onJumpToLiveEdge,
                 onSendMessage = onSendMessage,
                 onReplyToMessage = onReplyToMessage,
                 onReplyHeaderClicked = onReplyHeaderClicked,
@@ -169,6 +174,7 @@ fun ChatScreen(
                 onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
                 onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
                 onJumpTargetConsumed = onJumpTargetConsumed,
+                onScrollToLiveEdgeConsumed = onScrollToLiveEdgeConsumed,
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(innerPadding)
@@ -187,6 +193,7 @@ private fun ChatMessageList(
     canLoadOlder: Boolean,
     canLoadNewer: Boolean,
     isAtLiveEdge: Boolean,
+    scrollToLiveEdgeRequested: Boolean,
     isSendingMessage: Boolean,
     sendErrorMessage: String?,
     sendErrorColor: Int,
@@ -196,6 +203,7 @@ private fun ChatMessageList(
     palette: GlassPalette,
     onLoadOlder: () -> Unit,
     onLoadNewer: () -> Unit,
+    onJumpToLiveEdge: () -> Unit,
     onSendMessage: (String) -> Boolean,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
     onReplyHeaderClicked: (String) -> Unit,
@@ -212,6 +220,7 @@ private fun ChatMessageList(
         canEstablishBaseline: Boolean
     ) -> Unit,
     onJumpTargetConsumed: (String) -> Unit,
+    onScrollToLiveEdgeConsumed: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val messageTheme = MessageRenderTheme(
@@ -236,6 +245,7 @@ private fun ChatMessageList(
             )
             chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.onLoadNewerMessages = onLoadNewer
+            chatLayout.onScrollToLiveEdge = onJumpToLiveEdge
             chatLayout.onReplyToMessage = { target ->
                 onReplyToMessage(target.toMatrixReplyInfo())
             }
@@ -260,9 +270,16 @@ private fun ChatMessageList(
             chatLayout.setPalette(palette)
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder && !isLoading && jumpTargetEventId == null,
-                canLoadNewer = canLoadNewer && !isLoading && jumpTargetEventId == null
+                canLoadOlder = canLoadOlder &&
+                    !isLoading &&
+                    jumpTargetEventId == null &&
+                    !scrollToLiveEdgeRequested,
+                canLoadNewer = canLoadNewer &&
+                    !isLoading &&
+                    jumpTargetEventId == null &&
+                    !scrollToLiveEdgeRequested
             )
+            chatLayout.setLiveEdgeState(isAtLiveEdge)
             chatLayout.setEmptyState(messages.isEmpty(), isLoading)
             chatLayout.setComposerState(
                 isSending = isSendingMessage,
@@ -275,6 +292,7 @@ private fun ChatMessageList(
             chatLayout.setPalette(palette)
             chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.onLoadNewerMessages = onLoadNewer
+            chatLayout.onScrollToLiveEdge = onJumpToLiveEdge
             chatLayout.onReplyToMessage = { target ->
                 onReplyToMessage(target.toMatrixReplyInfo())
             }
@@ -298,9 +316,16 @@ private fun ChatMessageList(
             chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
             chatLayout.setPaginationState(
                 isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder && !isLoading && jumpTargetEventId == null,
-                canLoadNewer = canLoadNewer && !isLoading && jumpTargetEventId == null
+                canLoadOlder = canLoadOlder &&
+                    !isLoading &&
+                    jumpTargetEventId == null &&
+                    !scrollToLiveEdgeRequested,
+                canLoadNewer = canLoadNewer &&
+                    !isLoading &&
+                    jumpTargetEventId == null &&
+                    !scrollToLiveEdgeRequested
             )
+            chatLayout.setLiveEdgeState(isAtLiveEdge)
             chatLayout.setEmptyState(messages.isEmpty(), isLoading)
             chatLayout.setComposerState(
                 isSending = isSendingMessage,
@@ -342,6 +367,9 @@ private fun ChatMessageList(
             }
             val shouldApplyJumpTarget = jumpTargetPosition != null &&
                 windowChangeOrigin == TimelineWindowChangeOrigin.JUMP
+            val shouldApplyScrollToLiveEdge = scrollToLiveEdgeRequested &&
+                windowChangeOrigin == TimelineWindowChangeOrigin.JUMP &&
+                displayedMessages.isNotEmpty()
             val visibleCenterPosition = layoutManager?.visibleCenterAdapterPosition()
             val jumpDistance = jumpTargetPosition?.let { targetPosition ->
                 abs(targetPosition - (visibleCenterPosition ?: targetPosition))
@@ -365,6 +393,15 @@ private fun ChatMessageList(
                 )
             } else null
             val didBeginTeleport = teleportDirection?.let(chatLayout::beginSnapshotTeleport) == true
+            val didBeginLiveEdgeTeleport = if (
+                shouldApplyScrollToLiveEdge &&
+                !wasEmpty &&
+                !didBeginTeleport
+            ) {
+                chatLayout.beginSnapshotTeleport(ChatTeleportDirection.TO_NEWER)
+            } else {
+                false
+            }
             if (jumpTargetEventId != null) {
                 logChatTeleport(
                     "ui update origin=$windowChangeOrigin " +
@@ -378,10 +415,30 @@ private fun ChatMessageList(
                         "direction=$teleportDirection didBegin=$didBeginTeleport"
                 )
             }
+            if (scrollToLiveEdgeRequested) {
+                logChatTeleport(
+                    "live ui update origin=$windowChangeOrigin " +
+                        "shouldApply=$shouldApplyScrollToLiveEdge " +
+                        "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
+                        "firstVisible=$firstVisiblePosition didBegin=$didBeginLiveEdgeTeleport"
+                )
+            }
             adapter.messageTheme = messageTheme
             adapter.submitList(displayedMessages) {
                 if (displayedMessages.isNotEmpty()) {
-                    if (jumpTargetEventId != null && jumpTargetPosition != null && shouldApplyJumpTarget) {
+                    if (shouldApplyScrollToLiveEdge) {
+                        recyclerView.stopScroll()
+                        chatLayout.scrollToBottom(animated = false)
+                        if (didBeginLiveEdgeTeleport) {
+                            recyclerView.runAfterNextPreDraw {
+                                chatLayout.completeSnapshotTeleport {
+                                    onScrollToLiveEdgeConsumed()
+                                }
+                            }
+                        } else {
+                            onScrollToLiveEdgeConsumed()
+                        }
+                    } else if (jumpTargetEventId != null && jumpTargetPosition != null && shouldApplyJumpTarget) {
                         logChatTeleport(
                             "commit scroll targetPosition=$jumpTargetPosition " +
                                 "didBegin=$didBeginTeleport childCount=${recyclerView.childCount}"

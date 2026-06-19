@@ -49,6 +49,7 @@ class MainActivity : ComponentActivity() {
                     onCloseChat = appViewModel::closeChat,
                     onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
                     onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
+                    onJumpToChatLiveEdge = appViewModel::jumpToChatLiveEdge,
                     onSendChatMessage = appViewModel::sendChatMessage,
                     onReplyToMessage = appViewModel::setChatReplyTarget,
                     onReplyHeaderClicked = appViewModel::jumpToChatEvent,
@@ -61,6 +62,7 @@ class MainActivity : ComponentActivity() {
                     onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
                     onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
                     onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
+                    onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
                     onLogout = appViewModel::logout
                 )
             }
@@ -147,6 +149,7 @@ fun AppPreview() {
             onCloseChat = {},
             onLoadOlderChatMessages = {},
             onLoadNewerChatMessages = {},
+            onJumpToChatLiveEdge = {},
             onSendChatMessage = { false },
             onReplyToMessage = {},
             onReplyHeaderClicked = {},
@@ -159,6 +162,7 @@ fun AppPreview() {
             onDebugMarkOutgoingEnvelopeFailed = {},
             onVisibleReadReceiptCandidate = { _, _, _ -> },
             onChatJumpTargetConsumed = {},
+            onChatScrollToLiveEdgeConsumed = {},
             onLogout = {}
         )
     }

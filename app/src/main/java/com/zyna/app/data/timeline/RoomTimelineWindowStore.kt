@@ -269,6 +269,20 @@ class RoomTimelineWindowStore(
         } == true
     }
 
+    suspend fun jumpToLiveEdge(): Boolean {
+        val snapshot = localCacheRepository.latestRoomTimelineWindowSnapshot(
+            userId = userId,
+            roomId = roomId,
+            limit = initialLimit
+        )
+        pendingOrigin = TimelineWindowChangeOrigin.JUMP
+        pendingFlushSummary = null
+        applySnapshotState(snapshot, keepLiveEdge = true)
+        didExpandOlder = false
+        didFillInitialWindow = snapshot.messages.size >= initialLimit
+        return snapshot.messages.isNotEmpty()
+    }
+
     private suspend fun initializeBoundsFromCache(): TimelineWindowBounds? {
         val snapshot = localCacheRepository.latestRoomTimelineWindowSnapshot(
             userId = userId,

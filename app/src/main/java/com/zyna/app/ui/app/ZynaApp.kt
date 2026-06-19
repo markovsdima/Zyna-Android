@@ -20,6 +20,7 @@ fun ZynaApp(
     onCloseChat: () -> Unit,
     onLoadOlderChatMessages: () -> Unit,
     onLoadNewerChatMessages: () -> Unit,
+    onJumpToChatLiveEdge: () -> Unit,
     onSendChatMessage: (String) -> Boolean,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
     onReplyHeaderClicked: (String) -> Unit,
@@ -36,6 +37,7 @@ fun ZynaApp(
         canEstablishBaseline: Boolean
     ) -> Unit,
     onChatJumpTargetConsumed: (String) -> Unit,
+    onChatScrollToLiveEdgeConsumed: () -> Unit,
     onLogout: () -> Unit
 ) {
     when (val route = state.route) {
@@ -67,6 +69,7 @@ fun ZynaApp(
             canLoadOlder = state.canLoadOlderChatMessages,
             canLoadNewer = state.canLoadNewerChatMessages,
             isAtLiveEdge = state.isChatAtLiveEdge,
+            scrollToLiveEdgeRequested = state.chatScrollToLiveEdgeRequested,
             errorMessage = state.chatErrorMessage,
             isSendingMessage = state.isSendingChatMessage,
             sendErrorMessage = state.chatSendErrorMessage,
@@ -77,6 +80,7 @@ fun ZynaApp(
             onBack = onCloseChat,
             onLoadOlder = onLoadOlderChatMessages,
             onLoadNewer = onLoadNewerChatMessages,
+            onJumpToLiveEdge = onJumpToChatLiveEdge,
             onSendMessage = onSendChatMessage,
             onReplyToMessage = onReplyToMessage,
             onReplyHeaderClicked = onReplyHeaderClicked,
@@ -88,7 +92,8 @@ fun ZynaApp(
             onRedactMessage = onRedactMessage,
             onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
             onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
-            onJumpTargetConsumed = onChatJumpTargetConsumed
+            onJumpTargetConsumed = onChatJumpTargetConsumed,
+            onScrollToLiveEdgeConsumed = onChatScrollToLiveEdgeConsumed
         )
     }
 }

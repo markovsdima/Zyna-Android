@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.Rect
 import android.os.Build
 import android.os.Looper
@@ -16,6 +17,7 @@ import android.util.AttributeSet
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewTreeObserver
 import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
@@ -50,6 +52,7 @@ class GlassChatLayout @JvmOverloads constructor(
     val inputBar = GlassInputBarView(context, glassController)
     var onLoadOlderMessages: () -> Unit = {}
     var onLoadNewerMessages: () -> Unit = {}
+    var onScrollToLiveEdge: () -> Unit = {}
     var onRetryOutgoingEnvelope: (String) -> Unit = {}
     var onDiscardOutgoingEnvelope: (String) -> Unit = {}
     internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
@@ -78,6 +81,10 @@ class GlassChatLayout @JvmOverloads constructor(
     private var isLoadingOlderMessages = false
     private var canLoadOlderMessages = false
     private var canLoadNewerMessages = false
+    private var isAtLiveEdge = true
+    private var isScrollToLiveButtonVisible = false
+    private var isScrollToLiveButtonActionPending = false
+    private var hasScrollToLiveButtonStableViewport = false
     private var prefetchCheckPosted = false
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
@@ -86,6 +93,7 @@ class GlassChatLayout @JvmOverloads constructor(
     private var teleportSnapshotBitmap: Bitmap? = null
     private var teleportAnimator: ValueAnimator? = null
     private var teleportDirection = ChatTeleportDirection.TO_OLDER
+    private var scrollToLiveButtonAnimator: ValueAnimator? = null
     private var hardwareBackdropCapture: HardwareBufferChatCapture? = null
     private var hardwareBackdropCaptureScheduled = false
     private var hardwareBackdropCaptureRequiresFreshImage = false
@@ -128,6 +136,10 @@ class GlassChatLayout @JvmOverloads constructor(
         vulkanGlassAdaptiveRenderScheduled = false
         renderVulkanGlassAdaptiveTransitionFrame()
     }
+    private val scrollToLiveButtonPendingResetRunnable = Runnable {
+        isScrollToLiveButtonActionPending = false
+        updateScrollToLiveButtonVisibility()
+    }
     private val teleportTimeoutRunnable = Runnable {
         cancelSnapshotTeleport()
     }
@@ -146,6 +158,25 @@ class GlassChatLayout @JvmOverloads constructor(
         setOverlayEnabled(BuildConfig.DEBUG && ENABLE_VULKAN_CHAT_OVERLAY)
         onBackdropStats = { stats ->
             handleVulkanGlassBackdropStats(stats)
+        }
+    }
+    private val scrollToLiveButton = ScrollToLiveButtonView(context).apply {
+        alpha = 0f
+        visibility = GONE
+        setPalette(palette)
+        setOnClickListener {
+            isScrollToLiveButtonActionPending = true
+            removeCallbacks(scrollToLiveButtonPendingResetRunnable)
+            postDelayed(
+                scrollToLiveButtonPendingResetRunnable,
+                SCROLL_TO_LIVE_BUTTON_PENDING_TIMEOUT_MS
+            )
+            setScrollToLiveButtonVisible(visible = false, animated = true)
+            if (isAtLiveEdge) {
+                scrollToBottom(animated = true)
+            } else {
+                onScrollToLiveEdge()
+            }
         }
     }
     private val contextMenuLayer = MessageContextMenuLayer(context, glassController).apply {
@@ -174,6 +205,7 @@ class GlassChatLayout @JvmOverloads constructor(
                     glassController.invalidateBackdrop()
                     scheduleVulkanGlassBackdropCapture(VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS)
                     maybeLoadOlderMessages()
+                    updateScrollToLiveButtonVisibility()
                     scheduleVisibleReadReceiptCandidateEvaluation()
                 }
 
@@ -190,6 +222,7 @@ class GlassChatLayout @JvmOverloads constructor(
                     if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                         maybeLoadOlderMessages()
                     }
+                    updateScrollToLiveButtonVisibility()
                     scheduleVisibleReadReceiptCandidateEvaluation()
                 }
             })
@@ -201,6 +234,7 @@ class GlassChatLayout @JvmOverloads constructor(
         addView(emptyView)
         addView(composerErrorView)
         addView(inputBar)
+        addView(scrollToLiveButton)
         addView(contextMenuLayer)
         inputBar.setVulkanGlassBackgroundEnabled(isVulkanChatInputGlassEnabled())
 
@@ -242,10 +276,13 @@ class GlassChatLayout @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         cancelSnapshotTeleport()
+        scrollToLiveButtonAnimator?.cancel()
+        scrollToLiveButtonAnimator = null
         detachRecyclerDrawListener()
         removeCallbacks(readReceiptCandidateEvaluationRunnable)
         removeCallbacks(hardwareBackdropCaptureRunnable)
         removeCallbacks(vulkanGlassAdaptiveRenderRunnable)
+        removeCallbacks(scrollToLiveButtonPendingResetRunnable)
         hardwareBackdropCaptureScheduled = false
         hardwareBackdropCaptureRequiresFreshImage = false
         vulkanGlassAdaptiveRenderScheduled = false
@@ -288,6 +325,7 @@ class GlassChatLayout @JvmOverloads constructor(
         emptyView.setTextColor(newPalette.hint)
         inputBar.setPalette(newPalette)
         contextMenuLayer.setPalette(newPalette)
+        scrollToLiveButton.setPalette(newPalette)
         glassController.invalidateBackdrop()
         scheduleVulkanGlassBackdropCapture()
     }
@@ -295,6 +333,7 @@ class GlassChatLayout @JvmOverloads constructor(
     fun setEmptyState(isEmpty: Boolean, isLoading: Boolean) {
         emptyView.text = if (isLoading) "Loading messages" else "No messages"
         emptyView.visibility = if (isEmpty) VISIBLE else GONE
+        updateScrollToLiveButtonVisibility()
     }
 
     fun setPaginationState(
@@ -305,6 +344,16 @@ class GlassChatLayout @JvmOverloads constructor(
         isLoadingOlderMessages = isLoadingOlder
         canLoadOlderMessages = canLoadOlder
         canLoadNewerMessages = canLoadNewer
+        updateScrollToLiveButtonVisibility()
+    }
+
+    fun setLiveEdgeState(isLiveEdge: Boolean) {
+        if (isAtLiveEdge == isLiveEdge) {
+            updateScrollToLiveButtonVisibility()
+            return
+        }
+        isAtLiveEdge = isLiveEdge
+        updateScrollToLiveButtonVisibility()
     }
 
     fun setComposerState(isSending: Boolean, errorMessage: String?, errorColor: Int) {
@@ -473,8 +522,10 @@ class GlassChatLayout @JvmOverloads constructor(
         if (!didBegin) {
             isContextGestureActive = false
             setContextScrollLocked(false)
+            updateScrollToLiveButtonVisibility()
             return false
         }
+        updateScrollToLiveButtonVisibility()
         post { updateVulkanGlassRects() }
         return true
     }
@@ -494,6 +545,7 @@ class GlassChatLayout @JvmOverloads constructor(
         }
         isContextMenuShowing = true
         recyclerView.importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        updateScrollToLiveButtonVisibility()
         post { updateVulkanGlassRects() }
         return true
     }
@@ -505,6 +557,7 @@ class GlassChatLayout @JvmOverloads constructor(
             if (!isContextMenuShowing) {
                 contextMenuLayer.dismiss(animated = true)
                 setContextScrollLocked(false)
+                updateScrollToLiveButtonVisibility()
             }
         }
     }
@@ -515,6 +568,7 @@ class GlassChatLayout @JvmOverloads constructor(
             if (!isContextGestureActive) {
                 setContextScrollLocked(false)
             }
+            updateScrollToLiveButtonVisibility()
             post { updateVulkanGlassRects() }
             return
         }
@@ -524,6 +578,7 @@ class GlassChatLayout @JvmOverloads constructor(
             setContextScrollLocked(false)
         }
         contextMenuLayer.dismiss(animated)
+        updateScrollToLiveButtonVisibility()
         post { updateVulkanGlassRects() }
     }
 
@@ -588,10 +643,25 @@ class GlassChatLayout @JvmOverloads constructor(
             return
         }
         if (animated) {
-            recyclerView.smoothScrollToPosition(0)
+            val firstVisibleItem = chatLayoutManager.findFirstVisibleItemPosition()
+            val shouldTeleport = firstVisibleItem != RecyclerView.NO_POSITION &&
+                firstVisibleItem > SCROLL_TO_LIVE_SMOOTH_MAX_DISTANCE
+            if (shouldTeleport) {
+                val didBeginTeleport = beginSnapshotTeleport(ChatTeleportDirection.TO_NEWER)
+                recyclerView.stopScroll()
+                recyclerView.scrollToPosition(0)
+                if (didBeginTeleport) {
+                    runAfterRecyclerPreDraw {
+                        completeSnapshotTeleport()
+                    }
+                }
+            } else {
+                recyclerView.smoothScrollToPosition(0)
+            }
         } else {
             recyclerView.scrollToPosition(0)
         }
+        updateScrollToLiveButtonVisibility(animated = false)
         glassController.invalidateBackdrop()
         scheduleVulkanGlassBackdropCapture()
     }
@@ -624,6 +694,11 @@ class GlassChatLayout @JvmOverloads constructor(
             MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
         )
+        val scrollToLiveButtonSize = SCROLL_TO_LIVE_BUTTON_SIZE_DP.dpToPx(density)
+        scrollToLiveButton.measure(
+            MeasureSpec.makeMeasureSpec(scrollToLiveButtonSize, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(scrollToLiveButtonSize, MeasureSpec.EXACTLY)
+        )
 
         setMeasuredDimension(width, height)
     }
@@ -647,6 +722,7 @@ class GlassChatLayout @JvmOverloads constructor(
             inputBar.bottom
         )
         val contentBottom = layoutComposerError(inputTop, width)
+        layoutScrollToLiveButton(contentBottom, width)
 
         val emptyWidth = emptyView.measuredWidth
         val emptyHeight = emptyView.measuredHeight
@@ -659,6 +735,7 @@ class GlassChatLayout @JvmOverloads constructor(
         contextMenuLayer.layout(0, 0, width, height)
         glassController.invalidateRegions()
         updateVulkanGlassRects()
+        updateScrollToLiveButtonVisibility(animated = false)
         scheduleVisibleReadReceiptCandidateEvaluation(READ_RECEIPT_CONTENT_UPDATE_DELAY_MS)
     }
 
@@ -1250,6 +1327,7 @@ class GlassChatLayout @JvmOverloads constructor(
         if (!isContextGestureActive && !isContextMenuShowing) {
             setContextScrollLocked(false)
         }
+        updateScrollToLiveButtonVisibility()
         invalidateGlassContent()
     }
 
@@ -1262,6 +1340,25 @@ class GlassChatLayout @JvmOverloads constructor(
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
         )
         snapshotView.layout(recyclerView.left, recyclerView.top, recyclerView.right, recyclerView.bottom)
+    }
+
+    private fun runAfterRecyclerPreDraw(action: () -> Unit) {
+        val observer = recyclerView.viewTreeObserver
+        observer.addOnPreDrawListener(
+            object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    val currentObserver = recyclerView.viewTreeObserver
+                    if (currentObserver.isAlive) {
+                        currentObserver.removeOnPreDrawListener(this)
+                    } else {
+                        observer.removeOnPreDrawListener(this)
+                    }
+                    action()
+                    return true
+                }
+            }
+        )
+        recyclerView.invalidate()
     }
 
     private fun layoutComposerError(inputTop: Int, width: Int): Int {
@@ -1282,6 +1379,22 @@ class GlassChatLayout @JvmOverloads constructor(
         return errorTop
     }
 
+    private fun layoutScrollToLiveButton(contentBottom: Int, width: Int) {
+        val buttonWidth = scrollToLiveButton.measuredWidth
+        val buttonHeight = scrollToLiveButton.measuredHeight
+        if (buttonWidth <= 0 || buttonHeight <= 0) {
+            return
+        }
+
+        val bottomGap = SCROLL_TO_LIVE_BUTTON_BOTTOM_GAP_DP.dpToPx(density)
+        val centerX = inputBar.left + inputBar.sendButtonCenterX()
+        val left = (centerX - buttonWidth / 2).coerceIn(0, (width - buttonWidth).coerceAtLeast(0))
+        val right = left + buttonWidth
+        val bottom = (contentBottom - bottomGap).coerceAtLeast(buttonHeight)
+        val top = bottom - buttonHeight
+        scrollToLiveButton.layout(left, top, right, bottom)
+    }
+
     private fun updateRecyclerPadding(contentBottom: Int) {
         val horizontal = 12.dpToPx(density)
         val top = 12.dpToPx(density)
@@ -1294,6 +1407,150 @@ class GlassChatLayout @JvmOverloads constructor(
         ) {
             recyclerView.setPadding(horizontal, top, horizontal, bottom)
         }
+    }
+
+    private fun updateScrollToLiveButtonVisibility(animated: Boolean = true) {
+        setScrollToLiveButtonVisible(shouldShowScrollToLiveButton(), animated)
+    }
+
+    private fun shouldShowScrollToLiveButton(): Boolean {
+        if (
+            isContextGestureActive ||
+            isContextMenuShowing ||
+            teleportSnapshotView != null ||
+            teleportAnimator != null
+        ) {
+            return false
+        }
+
+        val itemCount = recyclerView.adapter?.itemCount ?: 0
+        if (itemCount == 0) {
+            isScrollToLiveButtonActionPending = false
+            hasScrollToLiveButtonStableViewport = false
+            removeCallbacks(scrollToLiveButtonPendingResetRunnable)
+            return false
+        }
+        val firstVisibleItem = chatLayoutManager.findFirstVisibleItemPosition()
+        if (firstVisibleItem == RecyclerView.NO_POSITION) {
+            return false
+        }
+        val isViewportAtLiveEdge = firstVisibleItem != RecyclerView.NO_POSITION &&
+            firstVisibleItem <= LIVE_EDGE_VISIBLE_THRESHOLD
+        if (!hasScrollToLiveButtonStableViewport) {
+            if (isAtLiveEdge && !isViewportAtLiveEdge) {
+                return false
+            }
+            hasScrollToLiveButtonStableViewport = true
+        }
+        if (isScrollToLiveButtonActionPending) {
+            if (isAtLiveEdge && isViewportAtLiveEdge) {
+                isScrollToLiveButtonActionPending = false
+                removeCallbacks(scrollToLiveButtonPendingResetRunnable)
+            } else {
+                return false
+            }
+        }
+
+        if (!isAtLiveEdge) {
+            return true
+        }
+
+        return !isViewportAtLiveEdge
+    }
+
+    private fun setScrollToLiveButtonVisible(visible: Boolean, animated: Boolean) {
+        if (isScrollToLiveButtonVisible == visible && scrollToLiveButton.visibility != GONE) {
+            return
+        }
+        if (!visible && !isScrollToLiveButtonVisible && scrollToLiveButton.visibility == GONE) {
+            return
+        }
+
+        isScrollToLiveButtonVisible = visible
+        scrollToLiveButtonAnimator?.cancel()
+        scrollToLiveButtonAnimator = null
+
+        if (!animated) {
+            scrollToLiveButton.alpha = if (visible) 1f else 0f
+            scrollToLiveButton.visibility = if (visible) VISIBLE else GONE
+            return
+        }
+
+        if (visible) {
+            scrollToLiveButton.visibility = VISIBLE
+        }
+        val targetAlpha = if (visible) 1f else 0f
+        scrollToLiveButtonAnimator = ValueAnimator.ofFloat(scrollToLiveButton.alpha, targetAlpha).apply {
+            duration = SCROLL_TO_LIVE_BUTTON_FADE_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animation ->
+                scrollToLiveButton.alpha = animation.animatedValue as Float
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    scrollToLiveButtonAnimator = null
+                    if (!visible) {
+                        scrollToLiveButton.visibility = GONE
+                    }
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    scrollToLiveButtonAnimator = null
+                }
+            })
+            start()
+        }
+    }
+}
+
+private class ScrollToLiveButtonView(context: Context) : View(context) {
+    private val density = resources.displayMetrics.density
+    private var palette = defaultPalette()
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1f.dpToPx(density)
+    }
+    private val glyphPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        strokeWidth = 2.2f.dpToPx(density)
+    }
+
+    init {
+        isClickable = true
+        isFocusable = true
+        setWillNotDraw(false)
+        elevation = 8.dpToPx(density).toFloat()
+        contentDescription = "Scroll to latest messages"
+    }
+
+    fun setPalette(newPalette: GlassPalette) {
+        palette = newPalette
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val centerX = width / 2f
+        val centerY = height / 2f
+        val radius = min(width, height) / 2f - 1f.dpToPx(density)
+
+        fillPaint.color = palette.glassTintStrong
+        canvas.drawCircle(centerX, centerY, radius, fillPaint)
+
+        strokePaint.color = palette.stroke
+        canvas.drawCircle(centerX, centerY, radius, strokePaint)
+
+        glyphPaint.color = palette.text
+        val halfWidth = 6.5f.dpToPx(density)
+        val topY = centerY - 3f.dpToPx(density)
+        val bottomY = centerY + 4f.dpToPx(density)
+        canvas.drawLine(centerX - halfWidth, topY, centerX, bottomY, glyphPaint)
+        canvas.drawLine(centerX, bottomY, centerX + halfWidth, topY, glyphPaint)
     }
 }
 
@@ -1408,6 +1665,12 @@ private const val VULKAN_GLASS_PERF_LOG_WINDOW_NANOS = 1_000_000_000L
 private const val LOAD_OLDER_THRESHOLD = 240
 private const val NEWER_LOAD_THRESHOLD = 16
 private const val OLDER_PREFETCH_TARGET_ITEMS = 1_000
+private const val LIVE_EDGE_VISIBLE_THRESHOLD = 1
+private const val SCROLL_TO_LIVE_SMOOTH_MAX_DISTANCE = 8
+private const val SCROLL_TO_LIVE_BUTTON_SIZE_DP = 44
+private const val SCROLL_TO_LIVE_BUTTON_BOTTOM_GAP_DP = 12
+private const val SCROLL_TO_LIVE_BUTTON_FADE_MS = 160L
+private const val SCROLL_TO_LIVE_BUTTON_PENDING_TIMEOUT_MS = 4_000L
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
 

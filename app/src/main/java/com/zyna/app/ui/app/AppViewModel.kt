@@ -59,7 +59,8 @@ data class AppUiState(
     val chatSendErrorMessage: String? = null,
     val chatReplyTarget: MatrixReplyInfo? = null,
     val chatEditTarget: MatrixEditTarget? = null,
-    val chatJumpTargetEventId: String? = null
+    val chatJumpTargetEventId: String? = null,
+    val chatScrollToLiveEdgeRequested: Boolean = false
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -181,6 +182,11 @@ class AppViewModel(
                             null
                         } else {
                             current.chatJumpTargetEventId
+                        },
+                        chatScrollToLiveEdgeRequested = if (shouldClearChat) {
+                            false
+                        } else {
+                            current.chatScrollToLiveEdgeRequested
                         }
                     )
                 }
@@ -320,7 +326,8 @@ class AppViewModel(
                     chatSendErrorMessage = null,
                     chatReplyTarget = null,
                     chatEditTarget = null,
-                    chatJumpTargetEventId = null
+                    chatJumpTargetEventId = null,
+                    chatScrollToLiveEdgeRequested = false
                 )
             }
 
@@ -359,7 +366,8 @@ class AppViewModel(
                 chatSendErrorMessage = null,
                 chatReplyTarget = null,
                 chatEditTarget = null,
-                chatJumpTargetEventId = null
+                chatJumpTargetEventId = null,
+                chatScrollToLiveEdgeRequested = false
             )
         }
     }
@@ -931,6 +939,75 @@ class AppViewModel(
         }
     }
 
+    fun jumpToChatLiveEdge() {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val state = _uiState.value
+        val userId = state.matrixState.userIdOrNull() ?: return
+        if (chatPaginationJob?.isActive == true) {
+            logTeleport("live cancels activePagination")
+            chatPaginationJob?.cancel()
+            chatPaginationJob = null
+        }
+
+        _uiState.update {
+            if (!it.isRouteForRoom(userId, route.roomId)) {
+                it
+            } else it.copy(
+                isLoadingOlderChatMessages = true,
+                chatSendErrorMessage = null,
+                chatJumpTargetEventId = null,
+                chatScrollToLiveEdgeRequested = true
+            )
+        }
+        resetReadReceiptTracking()
+
+        chatPaginationJob = viewModelScope.launch {
+            try {
+                val timelineStore = chatTimelineWindowStore
+                    ?.takeIf { it.matches(userId, route.roomId) }
+                val didJump = timelineStore?.jumpToLiveEdge() == true
+                logTeleport(
+                    "live final didJump=$didJump " +
+                        "canOlder=${timelineStore?.canLoadOlderFromCache} " +
+                        "canNewer=${timelineStore?.canLoadNewerFromCache} live=${timelineStore?.isAtLiveEdge}"
+                )
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        canLoadOlderChatMessages = timelineStore?.canLoadOlderFromCache ?: true,
+                        canLoadNewerChatMessages = false,
+                        isChatAtLiveEdge = true,
+                        chatScrollToLiveEdgeRequested = didJump
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to jump to live edge", error)
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        chatScrollToLiveEdgeRequested = false
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearChatScrollToLiveEdgeRequest() {
+        _uiState.update {
+            if (it.chatScrollToLiveEdgeRequested) {
+                it.copy(chatScrollToLiveEdgeRequested = false)
+            } else {
+                it
+            }
+        }
+    }
+
     fun updateVisibleReadReceiptCandidate(
         roomId: String,
         eventId: String?,
@@ -1059,7 +1136,12 @@ class AppViewModel(
                 canLoadNewerChatMessages = if (resetMessages) false else it.canLoadNewerChatMessages,
                 isChatAtLiveEdge = if (resetMessages) true else it.isChatAtLiveEdge,
                 chatErrorMessage = null,
-                chatJumpTargetEventId = if (resetMessages) null else it.chatJumpTargetEventId
+                chatJumpTargetEventId = if (resetMessages) null else it.chatJumpTargetEventId,
+                chatScrollToLiveEdgeRequested = if (resetMessages) {
+                    false
+                } else {
+                    it.chatScrollToLiveEdgeRequested
+                }
             )
         }
         chatCacheJob = viewModelScope.launch {

@@ -222,6 +222,13 @@ class GlassInputBarView @JvmOverloads constructor(
         applyForegroundColors()
     }
 
+    internal fun sendButtonCenterX(): Int {
+        if (sendButton.width > 0) {
+            return sendButton.left + sendButton.width / 2
+        }
+        return measuredWidth - horizontalPadding - buttonSize / 2
+    }
+
     fun setVulkanGlassBackgroundEnabled(enabled: Boolean) {
         if (vulkanGlassBackgroundEnabled == enabled) {
             return

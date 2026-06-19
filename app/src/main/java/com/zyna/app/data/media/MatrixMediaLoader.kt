@@ -105,6 +105,10 @@ class MatrixMediaLoader(
         targetWidthPx: Int,
         targetHeightPx: Int
     ): Bitmap? {
+        imageInfo.localPath?.takeIf { it.isNotBlank() }?.let { path ->
+            return decodeLocalBitmap(path, targetWidthPx, targetHeightPx)
+        }
+
         val bytes = imageInfo.thumbnailSourceJson
             ?.let { sourceJson ->
                 runMediaLoad { matrixClientService.loadMediaContent(sourceJson) }
@@ -123,6 +127,26 @@ class MatrixMediaLoader(
             return null
         }
         return decodeBitmap(bytes, targetWidthPx, targetHeightPx)
+    }
+
+    private fun decodeLocalBitmap(
+        path: String,
+        targetWidthPx: Int,
+        targetHeightPx: Int
+    ): Bitmap? {
+        val bounds = BitmapFactory.Options().apply {
+            inJustDecodeBounds = true
+        }
+        BitmapFactory.decodeFile(path, bounds)
+        val decodeOptions = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize(
+                sourceWidth = bounds.outWidth,
+                sourceHeight = bounds.outHeight,
+                targetWidth = targetWidthPx,
+                targetHeight = targetHeightPx
+            )
+        }
+        return BitmapFactory.decodeFile(path, decodeOptions)
     }
 
     private suspend fun runMediaLoad(block: suspend () -> ByteArray): ByteArray? {
@@ -176,7 +200,7 @@ class MatrixMediaLoader(
     }
 
     private fun cacheKey(imageInfo: MatrixImageInfo): String {
-        return imageInfo.thumbnailSourceJson ?: imageInfo.sourceJson
+        return imageInfo.localPath ?: imageInfo.thumbnailSourceJson ?: imageInfo.sourceJson
     }
 
     private object NoopCloseable : AutoCloseable {

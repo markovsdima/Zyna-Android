@@ -145,7 +145,8 @@ data class MatrixImageInfo(
     val height: Int?,
     val caption: String?,
     val mimeType: String?,
-    val blurhash: String?
+    val blurhash: String?,
+    val localPath: String? = null
 )
 
 data class MatrixMediaGroupItem(
@@ -547,6 +548,54 @@ class MatrixClientService(
         )
     }
 
+    suspend fun sendImageMessage(
+        roomId: String,
+        localPath: String,
+        mimeType: String,
+        sizeBytes: Long,
+        width: Int,
+        height: Int,
+        caption: String?,
+        transactionId: String,
+        zynaAttributesJson: String?
+    ): String = withContext(Dispatchers.IO) {
+        val imageFile = File(localPath)
+        require(imageFile.isFile) { "Image file is not available" }
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val normalizedCaption = caption.normalizedMessageCaption()
+        val zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson)
+        val plainCaption = normalizedCaption
+            ?: ZERO_WIDTH_SPACE.takeUnless { zynaAttributes.isEmpty }
+        val formattedCaption = formattedMediaCaption(
+            caption = normalizedCaption,
+            attributes = zynaAttributes
+        )
+        val uploadedImageJson = room.uploadImageForEvent(
+            originalFilePath = imageFile.absolutePath,
+            thumbnailFilePath = null,
+            originalMimetype = mimeType.ifBlank { "image/jpeg" },
+            originalSize = sizeBytes.takeIf { it > 0L }
+                ?.toULong()
+                ?: imageFile.length().coerceAtLeast(1L).toULong(),
+            originalWidth = width.coerceAtLeast(1).toULong(),
+            originalHeight = height.coerceAtLeast(1).toULong(),
+            thumbnailMimetype = null,
+            thumbnailSize = null,
+            thumbnailWidth = null,
+            thumbnailHeight = null,
+            blurhash = null
+        )
+
+        room.sendUploadedImageWithTransactionIdReturningEventId(
+            uploadedImageJson = uploadedImageJson,
+            transactionId = transactionId,
+            caption = plainCaption,
+            formattedCaption = formattedCaption,
+            replyEventId = null
+        )
+    }
+
     suspend fun sendTextEdit(
         roomId: String,
         eventId: String,
@@ -847,6 +896,23 @@ class MatrixClientService(
         return ZynaHtmlCodec.encode(
             userHtml = html,
             attributes = ZynaMessageAttributes(forwardedFrom = forwardedFrom)
+        )
+    }
+
+    private fun formattedMediaCaption(
+        caption: String?,
+        attributes: ZynaMessageAttributes
+    ): String? {
+        if (caption == null && attributes.isEmpty) {
+            return null
+        }
+
+        val userHtml = caption
+            ?.let { ZynaHtmlCodec.escapeForHtmlAttribute(it).htmlLineBreaks() }
+            ?: ZERO_WIDTH_SPACE
+        return ZynaHtmlCodec.encode(
+            userHtml = userHtml,
+            attributes = attributes
         )
     }
 
@@ -1184,6 +1250,7 @@ class MatrixClientService(
         const val ROOM_LIST_LIVE_PAGE_SIZE = 512
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
+        const val ZERO_WIDTH_SPACE = "\u200B"
     }
 }
 

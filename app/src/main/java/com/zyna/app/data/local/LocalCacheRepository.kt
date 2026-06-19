@@ -1,5 +1,6 @@
 package com.zyna.app.data.local
 
+import android.content.Context
 import androidx.room.withTransaction
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixImageInfo
@@ -9,12 +10,16 @@ import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.messaging.ZynaHtmlCodec
+import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
 import com.zyna.app.data.outgoing.OutgoingEditEnvelope
+import com.zyna.app.data.outgoing.OutgoingImageEnvelope
+import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingTextEnvelope
 import com.zyna.app.data.outgoing.OutgoingTransportState
+import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -26,7 +31,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
 class LocalCacheRepository(
-    private val database: ZynaDatabase
+    private val database: ZynaDatabase,
+    private val context: Context
 ) {
     private val roomDao = database.cachedRoomDao()
     private val messageDao = database.cachedTimelineMessageDao()
@@ -405,7 +411,65 @@ class LocalCacheRepository(
                     replySenderDisplayName = replyInfo?.senderDisplayName,
                     replyBody = replyInfo?.body,
                     forwardedFrom = forwardedFrom,
+                    imageLocalPath = null,
+                    imageMimeType = null,
+                    imageWidth = null,
+                    imageHeight = null,
+                    imageSizeBytes = null,
+                    imageCaption = null,
+                    zynaAttributesJson = null,
                     body = body,
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    failureMessage = null
+                )
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
+    suspend fun createOutgoingImageEnvelope(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        transactionId: String,
+        localPath: String,
+        mimeType: String,
+        width: Int,
+        height: Int,
+        sizeBytes: Long,
+        caption: String?,
+        zynaAttributes: ZynaMessageAttributes
+    ) {
+        val now = System.currentTimeMillis()
+        val normalizedCaption = caption.normalizedMessageCaption()
+        database.withTransaction {
+            outgoingDao.upsertEnvelope(
+                OutgoingEnvelopeEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = envelopeId,
+                    kind = OutgoingEnvelopeKind.IMAGE.name,
+                    transportState = OutgoingTransportState.QUEUED.name,
+                    transactionId = transactionId,
+                    eventId = null,
+                    targetEventId = null,
+                    targetTransactionId = null,
+                    targetBody = null,
+                    targetContentType = null,
+                    replyEventId = null,
+                    replySenderId = null,
+                    replySenderDisplayName = null,
+                    replyBody = null,
+                    forwardedFrom = null,
+                    imageLocalPath = localPath,
+                    imageMimeType = mimeType,
+                    imageWidth = width,
+                    imageHeight = height,
+                    imageSizeBytes = sizeBytes,
+                    imageCaption = normalizedCaption,
+                    zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
+                    body = normalizedCaption ?: "Photo",
                     createdAtMillis = now,
                     updatedAtMillis = now,
                     failureMessage = null
@@ -443,6 +507,13 @@ class LocalCacheRepository(
                     replySenderDisplayName = null,
                     replyBody = null,
                     forwardedFrom = null,
+                    imageLocalPath = null,
+                    imageMimeType = null,
+                    imageWidth = null,
+                    imageHeight = null,
+                    imageSizeBytes = null,
+                    imageCaption = null,
+                    zynaAttributesJson = null,
                     body = "",
                     createdAtMillis = now,
                     updatedAtMillis = now,
@@ -569,14 +640,14 @@ class LocalCacheRepository(
         }
     }
 
-    suspend fun retryFailedOutgoingTextEnvelope(
+    suspend fun retryFailedOutgoingMessageEnvelope(
         userId: String,
         roomId: String,
         envelopeId: String
     ): Boolean {
         val now = System.currentTimeMillis()
         return database.withTransaction {
-            val didRetry = outgoingDao.markFailedTextEnvelopeQueued(
+            val didRetry = outgoingDao.markFailedMessageEnvelopeQueued(
                 userId = userId,
                 roomId = roomId,
                 id = envelopeId,
@@ -589,14 +660,14 @@ class LocalCacheRepository(
         }
     }
 
-    suspend fun debugMarkOutgoingTextEnvelopeFailed(
+    suspend fun debugMarkOutgoingMessageEnvelopeFailed(
         userId: String,
         roomId: String,
         envelopeId: String
     ): Boolean {
         val now = System.currentTimeMillis()
         return database.withTransaction {
-            val didMark = outgoingDao.debugMarkActiveTextEnvelopeFailed(
+            val didMark = outgoingDao.debugMarkActiveMessageEnvelopeFailed(
                 userId = userId,
                 roomId = roomId,
                 id = envelopeId,
@@ -610,18 +681,18 @@ class LocalCacheRepository(
         }
     }
 
-    suspend fun discardFailedOutgoingTextEnvelope(
+    suspend fun discardFailedOutgoingMessageEnvelope(
         userId: String,
         roomId: String,
         envelopeId: String
     ): Boolean {
         return database.withTransaction {
-            val envelope = outgoingDao.failedTextEnvelope(
+            val envelope = outgoingDao.failedMessageEnvelope(
                 userId = userId,
                 roomId = roomId,
                 id = envelopeId
             )
-            val didDelete = outgoingDao.deleteFailedTextEnvelope(
+            val didDelete = outgoingDao.deleteFailedMessageEnvelope(
                 userId = userId,
                 roomId = roomId,
                 id = envelopeId
@@ -631,6 +702,7 @@ class LocalCacheRepository(
                 if (hiddenIds.isNotEmpty()) {
                     messageDao.deleteMessagesByIds(userId, roomId, hiddenIds)
                 }
+                deleteLocalFiles(listOfNotNull(envelope.imageLocalPath))
                 updateRoomPreview(userId, roomId, System.currentTimeMillis())
             }
             didDelete
@@ -647,6 +719,18 @@ class LocalCacheRepository(
             envelopeIds.mapNotNull { id -> outgoingDao.textDispatchCandidate(userId, id) }
         }
         return entities.mapNotNull { it.toOutgoingTextEnvelopeOrNull() }
+    }
+
+    suspend fun outgoingImageDispatchCandidates(
+        userId: String,
+        envelopeIds: Set<String>? = null
+    ): List<OutgoingImageEnvelope> {
+        val entities = if (envelopeIds == null) {
+            outgoingDao.imageDispatchCandidates(userId)
+        } else {
+            envelopeIds.mapNotNull { id -> outgoingDao.imageDispatchCandidate(userId, id) }
+        }
+        return entities.mapNotNull { it.toOutgoingImageEnvelopeOrNull() }
     }
 
     suspend fun outgoingRedactionDispatchCandidates(
@@ -782,6 +866,20 @@ class LocalCacheRepository(
             roomDao.clearAllRooms()
             outgoingDao.clearAllEnvelopes()
         }
+        cleanupOrphanOutgoingMediaFiles()
+    }
+
+    suspend fun cleanupOrphanOutgoingMediaFiles() = withContext(Dispatchers.IO) {
+        val mediaDir = File(context.filesDir, OutgoingMediaStorage.DIRECTORY_NAME)
+        val files = mediaDir.listFiles()?.filter { it.isFile }.orEmpty()
+        if (files.isEmpty()) return@withContext
+
+        val activePaths = outgoingDao.activeImageLocalPaths().toSet()
+        files.forEach { file ->
+            if (file.absolutePath !in activePaths) {
+                runCatching { file.delete() }
+            }
+        }
     }
 
     private fun CachedRoomEntity.toRoomSummary(): MatrixRoomSummary {
@@ -907,6 +1005,11 @@ class LocalCacheRepository(
             roomId = roomId,
             eventIds = eventIds
         )
+        val imageLocalPaths = outgoingDao.imageLocalPathsForEventIds(
+            userId = userId,
+            roomId = roomId,
+            eventIds = eventIds
+        )
         outgoingDao.retireByEventIds(
             userId = userId,
             roomId = roomId,
@@ -916,6 +1019,7 @@ class LocalCacheRepository(
         if (transactionIds.isNotEmpty()) {
             messageDao.deleteMessagesByIds(userId, roomId, transactionIds)
         }
+        deleteLocalFiles(imageLocalPaths)
     }
 
     private suspend fun updateRoomPreview(
@@ -995,25 +1099,55 @@ class LocalCacheRepository(
     }
 
     private fun OutgoingEnvelopeEntity.toChatMessageOrNull(): MatrixChatMessage? {
-        if (kind != OutgoingEnvelopeKind.TEXT.name) return null
         val state = transportState.toOutgoingTransportState()
 
-        return MatrixChatMessage(
-            id = "outgoing:$id",
-            eventId = eventId,
-            transactionId = transactionId,
-            sender = userId,
-            body = body,
-            timestampMillis = createdAtMillis,
-            isOwn = true,
-            contentType = MatrixMessageContentType.TEXT,
-            deliveryState = state.toOutgoingDeliveryState(),
-            replyInfo = replyInfoOrNull(),
-            forwardedFrom = forwardedFrom,
-            outgoingEnvelopeId = id,
-            canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
-            canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
-        )
+        return when (kind) {
+            OutgoingEnvelopeKind.TEXT.name -> MatrixChatMessage(
+                id = "outgoing:$id",
+                eventId = eventId,
+                transactionId = transactionId,
+                sender = userId,
+                body = body,
+                timestampMillis = createdAtMillis,
+                isOwn = true,
+                contentType = MatrixMessageContentType.TEXT,
+                deliveryState = state.toOutgoingDeliveryState(),
+                replyInfo = replyInfoOrNull(),
+                forwardedFrom = forwardedFrom,
+                outgoingEnvelopeId = id,
+                canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
+                canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
+            )
+            OutgoingEnvelopeKind.IMAGE.name -> {
+                val localPath = imageLocalPath?.takeIf { it.isNotBlank() } ?: return null
+                MatrixChatMessage(
+                    id = "outgoing:$id",
+                    eventId = eventId,
+                    transactionId = transactionId,
+                    sender = userId,
+                    body = imageCaption ?: "Photo",
+                    timestampMillis = createdAtMillis,
+                    isOwn = true,
+                    contentType = MatrixMessageContentType.IMAGE,
+                    imageInfo = MatrixImageInfo(
+                        sourceJson = "local:$localPath",
+                        thumbnailSourceJson = null,
+                        width = imageWidth,
+                        height = imageHeight,
+                        caption = imageCaption,
+                        mimeType = imageMimeType,
+                        blurhash = null,
+                        localPath = localPath
+                    ),
+                    zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson),
+                    deliveryState = state.toOutgoingDeliveryState(),
+                    outgoingEnvelopeId = id,
+                    canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
+                    canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
+                )
+            }
+            else -> null
+        }
     }
 
     private suspend fun markCachedMessageRedacted(
@@ -1072,6 +1206,13 @@ class LocalCacheRepository(
         }
     }
 
+    private fun deleteLocalFiles(paths: List<String>) {
+        paths.asSequence()
+            .filter { it.isNotBlank() }
+            .distinct()
+            .forEach { path -> runCatching { File(path).delete() } }
+    }
+
     private fun OutgoingEnvelopeEntity.toOutgoingTextEnvelopeOrNull(): OutgoingTextEnvelope? {
         if (kind != OutgoingEnvelopeKind.TEXT.name) return null
 
@@ -1085,6 +1226,29 @@ class LocalCacheRepository(
             body = body,
             replyInfo = replyInfoOrNull(),
             forwardedFrom = forwardedFrom,
+            createdAtMillis = createdAtMillis,
+            failureMessage = failureMessage
+        )
+    }
+
+    private fun OutgoingEnvelopeEntity.toOutgoingImageEnvelopeOrNull(): OutgoingImageEnvelope? {
+        if (kind != OutgoingEnvelopeKind.IMAGE.name) return null
+        val localPath = imageLocalPath?.takeIf { it.isNotBlank() } ?: return null
+
+        return OutgoingImageEnvelope(
+            userId = userId,
+            roomId = roomId,
+            id = id,
+            transportState = transportState.toOutgoingTransportState(),
+            transactionId = transactionId,
+            eventId = eventId,
+            localPath = localPath,
+            mimeType = imageMimeType?.takeIf { it.isNotBlank() } ?: "image/jpeg",
+            width = imageWidth?.takeIf { it > 0 } ?: 1,
+            height = imageHeight?.takeIf { it > 0 } ?: 1,
+            sizeBytes = imageSizeBytes?.takeIf { it > 0L } ?: 0L,
+            caption = imageCaption,
+            zynaAttributesJson = zynaAttributesJson,
             createdAtMillis = createdAtMillis,
             failureMessage = failureMessage
         )

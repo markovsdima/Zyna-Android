@@ -59,6 +59,29 @@ interface OutgoingEnvelopeDao {
         """
         SELECT * FROM outgoing_envelopes
         WHERE userId = :userId
+            AND kind = 'IMAGE'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+        ORDER BY createdAtMillis ASC, id ASC
+        """
+    )
+    suspend fun imageDispatchCandidates(userId: String): List<OutgoingEnvelopeEntity>
+
+    @Query(
+        """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND id = :id
+            AND kind = 'IMAGE'
+            AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
+        LIMIT 1
+        """
+    )
+    suspend fun imageDispatchCandidate(userId: String, id: String): OutgoingEnvelopeEntity?
+
+    @Query(
+        """
+        SELECT * FROM outgoing_envelopes
+        WHERE userId = :userId
             AND kind = 'REDACTION'
             AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
             AND targetEventId IS NOT NULL
@@ -93,6 +116,30 @@ interface OutgoingEnvelopeDao {
         roomId: String,
         eventIds: List<String>
     ): List<String>
+
+    @Query(
+        """
+        SELECT imageLocalPath FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND eventId IN (:eventIds)
+            AND imageLocalPath IS NOT NULL
+        """
+    )
+    suspend fun imageLocalPathsForEventIds(
+        userId: String,
+        roomId: String,
+        eventIds: List<String>
+    ): List<String>
+
+    @Query(
+        """
+        SELECT imageLocalPath FROM outgoing_envelopes
+        WHERE imageLocalPath IS NOT NULL
+            AND transportState != 'RETIRED'
+        """
+    )
+    suspend fun activeImageLocalPaths(): List<String>
 
     @Upsert
     suspend fun upsertEnvelope(envelope: OutgoingEnvelopeEntity)
@@ -184,11 +231,11 @@ interface OutgoingEnvelopeDao {
         WHERE userId = :userId
             AND roomId = :roomId
             AND id = :id
-            AND kind = 'TEXT'
+            AND kind IN ('TEXT', 'IMAGE')
             AND transportState IN ('QUEUED', 'SENDING', 'RETRYING')
         """
     )
-    suspend fun debugMarkActiveTextEnvelopeFailed(
+    suspend fun debugMarkActiveMessageEnvelopeFailed(
         userId: String,
         roomId: String,
         id: String,
@@ -205,11 +252,11 @@ interface OutgoingEnvelopeDao {
         WHERE userId = :userId
             AND roomId = :roomId
             AND id = :id
-            AND kind = 'TEXT'
+            AND kind IN ('TEXT', 'IMAGE')
             AND transportState = 'FAILED'
         """
     )
-    suspend fun markFailedTextEnvelopeQueued(
+    suspend fun markFailedMessageEnvelopeQueued(
         userId: String,
         roomId: String,
         id: String,
@@ -222,11 +269,11 @@ interface OutgoingEnvelopeDao {
         WHERE userId = :userId
             AND roomId = :roomId
             AND id = :id
-            AND kind = 'TEXT'
+            AND kind IN ('TEXT', 'IMAGE')
             AND transportState = 'FAILED'
         """
     )
-    suspend fun deleteFailedTextEnvelope(
+    suspend fun deleteFailedMessageEnvelope(
         userId: String,
         roomId: String,
         id: String
@@ -238,12 +285,12 @@ interface OutgoingEnvelopeDao {
         WHERE userId = :userId
             AND roomId = :roomId
             AND id = :id
-            AND kind = 'TEXT'
+            AND kind IN ('TEXT', 'IMAGE')
             AND transportState = 'FAILED'
         LIMIT 1
         """
     )
-    suspend fun failedTextEnvelope(
+    suspend fun failedMessageEnvelope(
         userId: String,
         roomId: String,
         id: String

@@ -17,7 +17,12 @@ import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.messaging.CaptionMode
+import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.data.messaging.MediaGroupInfo
+import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
+import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -114,6 +119,10 @@ class AppViewModel(
 
     init {
         outgoingOutboxService.start(viewModelScope)
+
+        viewModelScope.launch {
+            runCatching { localCacheRepository.cleanupOrphanOutgoingMediaFiles() }
+        }
 
         viewModelScope.launch {
             matrixClientService.state.collect { matrixState ->
@@ -493,6 +502,87 @@ class AppViewModel(
         return true
     }
 
+    fun sendPhotoMessages(draft: OutgoingPhotoDraft): Boolean {
+        val route = _uiState.value.route as? AppRoute.Chat ?: return false
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
+        val items = draft.items.filter { it.localPath.isNotBlank() }
+        if (items.isEmpty() || _uiState.value.isSendingChatMessage) {
+            return false
+        }
+
+        val groupId = "photo-group:${UUID.randomUUID()}"
+        val shouldWriteMediaGroup = items.size > 1 ||
+            draft.captionPlacement != CaptionPlacement.BOTTOM ||
+            draft.layoutOverride != null
+
+        _uiState.update {
+            if (!it.isRouteForRoom(route.roomId)) {
+                it
+            } else it.copy(
+                isSendingChatMessage = true,
+                chatSendErrorMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                items.forEachIndexed { index, item ->
+                    val envelopeId = "image:${UUID.randomUUID()}"
+                    val transactionId = matrixClientService.prepareTransactionId()
+                    val attributes = if (shouldWriteMediaGroup) {
+                        ZynaMessageAttributes(
+                            mediaGroup = MediaGroupInfo(
+                                id = groupId,
+                                index = index,
+                                total = items.size,
+                                captionMode = CaptionMode.REPLICATED,
+                                captionPlacement = draft.captionPlacement,
+                                layoutOverride = draft.layoutOverride.takeIf { items.size > 1 }
+                            )
+                        )
+                    } else {
+                        ZynaMessageAttributes()
+                    }
+                    localCacheRepository.createOutgoingImageEnvelope(
+                        userId = userId,
+                        roomId = route.roomId,
+                        envelopeId = envelopeId,
+                        transactionId = transactionId,
+                        localPath = item.localPath,
+                        mimeType = item.mimeType,
+                        width = item.width,
+                        height = item.height,
+                        sizeBytes = item.sizeBytes,
+                        caption = draft.caption,
+                        zynaAttributes = attributes
+                    )
+                }
+                outgoingOutboxService.kick(reason = "new-images")
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isSendingChatMessage = false,
+                        chatSendErrorMessage = null
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isSendingChatMessage = false,
+                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
+                    )
+                }
+            }
+        }
+
+        return true
+    }
+
     fun setChatReplyTarget(replyInfo: MatrixReplyInfo) {
         val route = _uiState.value.route as? AppRoute.Chat ?: return
         if (replyInfo.eventId.isBlank()) {
@@ -596,7 +686,7 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                val didRetry = localCacheRepository.retryFailedOutgoingTextEnvelope(
+                val didRetry = localCacheRepository.retryFailedOutgoingMessageEnvelope(
                     userId = userId,
                     roomId = route.roomId,
                     envelopeId = envelopeId
@@ -631,7 +721,7 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                val didDiscard = localCacheRepository.discardFailedOutgoingTextEnvelope(
+                val didDiscard = localCacheRepository.discardFailedOutgoingMessageEnvelope(
                     userId = userId,
                     roomId = route.roomId,
                     envelopeId = envelopeId
@@ -714,7 +804,7 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                localCacheRepository.debugMarkOutgoingTextEnvelopeFailed(
+                localCacheRepository.debugMarkOutgoingMessageEnvelopeFailed(
                     userId = userId,
                     roomId = route.roomId,
                     envelopeId = envelopeId

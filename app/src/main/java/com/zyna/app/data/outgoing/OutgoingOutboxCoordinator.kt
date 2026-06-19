@@ -152,6 +152,10 @@ class OutgoingOutboxService(
             userId = userId,
             envelopeIds = envelopeIds
         )
+        val imageCandidates = localCacheRepository.outgoingImageDispatchCandidates(
+            userId = userId,
+            envelopeIds = envelopeIds
+        )
         val redactionCandidates = localCacheRepository.outgoingRedactionDispatchCandidates(
             userId = userId,
             envelopeIds = envelopeIds
@@ -159,7 +163,12 @@ class OutgoingOutboxService(
         val editCandidates = localCacheRepository.outgoingEditDispatchCandidates(
             userId = userId
         )
-        if (textCandidates.isEmpty() && redactionCandidates.isEmpty() && editCandidates.isEmpty()) {
+        if (
+            textCandidates.isEmpty() &&
+            imageCandidates.isEmpty() &&
+            redactionCandidates.isEmpty() &&
+            editCandidates.isEmpty()
+        ) {
             Log.d(TAG, "outbox scan reason=$reason count=0")
             return
         }
@@ -167,6 +176,7 @@ class OutgoingOutboxService(
         Log.d(
             TAG,
             "outbox scan reason=$reason text=${textCandidates.size} " +
+                "images=${imageCandidates.size} " +
                 "redactions=${redactionCandidates.size} edits=${editCandidates.size}"
         )
         for (candidate in textCandidates) {
@@ -175,6 +185,13 @@ class OutgoingOutboxService(
                 return
             }
             sendTextIfEligible(candidate, reason)
+        }
+        for (candidate in imageCandidates) {
+            currentCoroutineContext().ensureActive()
+            if (!canScan()) {
+                return
+            }
+            sendImageIfEligible(candidate, reason)
         }
         for (candidate in redactionCandidates) {
             currentCoroutineContext().ensureActive()
@@ -236,6 +253,59 @@ class OutgoingOutboxService(
             throw error
         } catch (error: Throwable) {
             completeFailure(candidate, error)
+        } finally {
+            inFlight.end(candidate.id)
+        }
+    }
+
+    private suspend fun sendImageIfEligible(candidate: OutgoingImageEnvelope, reason: String) {
+        if (!inFlight.begin(candidate.id)) {
+            return
+        }
+
+        try {
+            when (val decision = attemptDecision(candidate.transportState, candidate.id)) {
+                AttemptDecision.Send -> Unit
+                is AttemptDecision.Wait -> {
+                    Log.d(
+                        TAG,
+                        "outbox image wait reason=$reason envelope=${candidate.id} " +
+                            "state=${candidate.transportState} delayMillis=${decision.delayMillis}"
+                    )
+                    scheduleWake(decision.delayMillis, reason = "delayed-$reason")
+                    return
+                }
+                AttemptDecision.Skip -> return
+            }
+
+            localCacheRepository.markOutgoingDispatchStarted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id
+            )
+            val eventId = matrixClientService.sendImageMessage(
+                roomId = candidate.roomId,
+                localPath = candidate.localPath,
+                mimeType = candidate.mimeType,
+                sizeBytes = candidate.sizeBytes,
+                width = candidate.width,
+                height = candidate.height,
+                caption = candidate.caption,
+                transactionId = candidate.transactionId,
+                zynaAttributesJson = candidate.zynaAttributesJson
+            )
+            retryBackoff.clear(candidate.id)
+            localCacheRepository.markOutgoingDispatchAccepted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id,
+                eventId = eventId
+            )
+            Log.d(TAG, "outbox image sent envelope=${candidate.id} event=$eventId")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            completeImageFailure(candidate, error)
         } finally {
             inFlight.end(candidate.id)
         }
@@ -373,6 +443,37 @@ class OutgoingOutboxService(
             )
         )
         Log.w(TAG, "outbox failed envelope=${candidate.id}", error)
+    }
+
+    private suspend fun completeImageFailure(candidate: OutgoingImageEnvelope, error: Throwable) {
+        val failureMessage = error.message ?: error.javaClass.simpleName
+        if (error.isRetryableTransportError()) {
+            localCacheRepository.markOutgoingDispatchRetrying(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id,
+                failureMessage = failureMessage
+            )
+            val delayMillis = retryBackoff.scheduleRetry(candidate.id)
+            scheduleWake(delayMillis, reason = "retryable-image-failure")
+            Log.d(TAG, "outbox image retrying envelope=${candidate.id} delayMillis=$delayMillis")
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        localCacheRepository.markOutgoingDispatchFailed(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            envelopeId = candidate.id,
+            failureMessage = failureMessage
+        )
+        _sendFailures.tryEmit(
+            OutgoingOutboxFailure(
+                roomId = candidate.roomId,
+                message = failureMessage
+            )
+        )
+        Log.w(TAG, "outbox image failed envelope=${candidate.id}", error)
     }
 
     private suspend fun completeRedactionFailure(

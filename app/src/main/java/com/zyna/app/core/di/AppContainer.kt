@@ -21,7 +21,8 @@ class AppContainer(context: Context) {
         passphraseStore = localDatabasePassphraseStore
     )
     val localCacheRepository = LocalCacheRepository(
-        database = database
+        database = database,
+        context = appContext
     )
     val matrixClientService = MatrixClientService(
         context = appContext,

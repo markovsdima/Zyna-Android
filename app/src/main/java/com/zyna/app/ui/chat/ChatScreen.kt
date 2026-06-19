@@ -81,6 +81,7 @@ fun ChatScreen(
     onLoadNewer: () -> Unit,
     onJumpToLiveEdge: () -> Unit,
     onSendMessage: (String) -> Boolean = { false },
+    onAttachPhotos: () -> Unit = {},
     onReplyToMessage: (MatrixReplyInfo) -> Unit = {},
     onReplyHeaderClicked: (String) -> Unit = {},
     onCancelReply: () -> Unit = {},
@@ -173,6 +174,7 @@ fun ChatScreen(
                 onLoadNewer = onLoadNewer,
                 onJumpToLiveEdge = onJumpToLiveEdge,
                 onSendMessage = onSendMessage,
+                onAttachPhotos = onAttachPhotos,
                 onReplyToMessage = onReplyToMessage,
                 onReplyHeaderClicked = onReplyHeaderClicked,
                 onCancelReply = onCancelReply,
@@ -219,6 +221,7 @@ private fun ChatMessageList(
     onLoadNewer: () -> Unit,
     onJumpToLiveEdge: () -> Unit,
     onSendMessage: (String) -> Boolean,
+    onAttachPhotos: () -> Unit,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
     onReplyHeaderClicked: (String) -> Unit,
     onCancelReply: () -> Unit,
@@ -282,6 +285,7 @@ private fun ChatMessageList(
                 }
             }
             chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.inputBar.onAttachClicked = onAttachPhotos
             chatLayout.inputBar.onPreviewCancelled = {
                 if (forwardTarget != null) onCancelForward() else onCancelReply()
             }
@@ -337,6 +341,7 @@ private fun ChatMessageList(
                 }
             }
             chatLayout.inputBar.onSendMessage = onSendMessage
+            chatLayout.inputBar.onAttachClicked = onAttachPhotos
             chatLayout.inputBar.onPreviewCancelled = {
                 if (forwardTarget != null) onCancelForward() else onCancelReply()
             }

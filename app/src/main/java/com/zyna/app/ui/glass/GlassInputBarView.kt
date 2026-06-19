@@ -92,6 +92,7 @@ class GlassInputBarView @JvmOverloads constructor(
     }
 
     var onSendMessage: (String) -> Boolean = { false }
+    var onAttachClicked: () -> Unit = {}
     var onPreviewCancelled: () -> Unit = {}
     var onEditCancelled: () -> Unit = {}
     var allowEmptySend: Boolean = false
@@ -136,6 +137,7 @@ class GlassInputBarView @JvmOverloads constructor(
             }
         }
         sendButton.setOnClickListener { sendDraft() }
+        attachButton.setOnClickListener { onAttachClicked() }
         previewCancel.setOnClickListener {
             if (editPreview != null) {
                 onEditCancelled()

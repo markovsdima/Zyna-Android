@@ -41,19 +41,29 @@ class MatrixMediaLoader(
         return memoryCache.get(cacheKey(imageInfo))
     }
 
+    fun cachedImage(
+        imageInfo: MatrixImageInfo,
+        targetWidthPx: Int,
+        targetHeightPx: Int,
+        quality: MatrixMediaImageQuality
+    ): Bitmap? {
+        return memoryCache.get(memoryCacheKey(imageInfo, targetWidthPx, targetHeightPx, quality))
+    }
+
     fun loadImage(
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
         targetHeightPx: Int,
+        quality: MatrixMediaImageQuality = MatrixMediaImageQuality.CELL,
         onLoaded: (Bitmap?) -> Unit
     ): AutoCloseable {
-        val key = cacheKey(imageInfo)
+        val key = memoryCacheKey(imageInfo, targetWidthPx, targetHeightPx, quality)
         if (memoryCache.get(key) != null) {
             return NoopCloseable
         }
 
         val waiter = scope.launch {
-            val bitmap = deferredFor(key, imageInfo, targetWidthPx, targetHeightPx).await()
+            val bitmap = deferredFor(key, imageInfo, targetWidthPx, targetHeightPx, quality).await()
             withContext(Dispatchers.Main.immediate) {
                 onLoaded(bitmap)
             }
@@ -78,7 +88,8 @@ class MatrixMediaLoader(
         key: String,
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
-        targetHeightPx: Int
+        targetHeightPx: Int,
+        quality: MatrixMediaImageQuality
     ): Deferred<Bitmap?> {
         memoryCache.get(key)?.let { bitmap ->
             return CompletableDeferred(bitmap)
@@ -91,7 +102,7 @@ class MatrixMediaLoader(
             inFlight[key]?.let { return it }
 
             val deferred = scope.async {
-                val bitmap = loadBitmap(imageInfo, targetWidthPx, targetHeightPx)
+                val bitmap = loadBitmap(imageInfo, targetWidthPx, targetHeightPx, quality)
                 if (bitmap != null) {
                     memoryCache.put(key, bitmap)
                 }
@@ -112,13 +123,19 @@ class MatrixMediaLoader(
     private suspend fun loadBitmap(
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
-        targetHeightPx: Int
+        targetHeightPx: Int,
+        quality: MatrixMediaImageQuality
     ): Bitmap? {
         imageInfo.localPath?.takeIf { it.isNotBlank() }?.let { path ->
             return decodeLocalBitmap(path, targetWidthPx, targetHeightPx)
         }
 
-        val bytes = loadRemoteBytes(imageInfo, targetWidthPx, targetHeightPx)
+        val bytes = loadRemoteBytes(
+            imageInfo = imageInfo,
+            targetWidthPx = targetWidthPx,
+            targetHeightPx = targetHeightPx,
+            quality = quality
+        )
 
         if (bytes == null) {
             Log.w(TAG, "Failed to load image media")
@@ -130,9 +147,15 @@ class MatrixMediaLoader(
     private suspend fun loadRemoteBytes(
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
-        targetHeightPx: Int
+        targetHeightPx: Int,
+        quality: MatrixMediaImageQuality
     ): ByteArray? {
-        val requests = remoteMediaRequests(imageInfo, targetWidthPx, targetHeightPx)
+        val requests = remoteMediaRequests(
+            imageInfo = imageInfo,
+            targetWidthPx = targetWidthPx,
+            targetHeightPx = targetHeightPx,
+            quality = quality
+        )
         requests.forEach { request ->
             diskCache.read(request.cacheKey)?.let { bytes ->
                 return bytes
@@ -150,39 +173,45 @@ class MatrixMediaLoader(
     private fun remoteMediaRequests(
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
-        targetHeightPx: Int
+        targetHeightPx: Int,
+        quality: MatrixMediaImageQuality
     ): List<MediaBytesRequest> {
         val width = targetWidthPx.coerceAtLeast(1)
         val height = targetHeightPx.coerceAtLeast(1)
+        val fullContentRequest = MediaBytesRequest(
+            cacheKey = contentDiskCacheKey(imageInfo.sourceJson),
+            load = { matrixClientService.loadMediaContent(imageInfo.sourceJson) }
+        )
+        val serverThumbnailRequest = MediaBytesRequest(
+            cacheKey = "thumbnail:$width:$height:${imageInfo.sourceJson}",
+            load = {
+                matrixClientService.loadMediaThumbnail(
+                    sourceJson = imageInfo.sourceJson,
+                    width = width,
+                    height = height
+                )
+            }
+        )
         return buildList {
-            imageInfo.thumbnailSourceJson
-                ?.takeIf { it.isNotBlank() }
-                ?.let { sourceJson ->
-                    add(
-                        MediaBytesRequest(
-                            cacheKey = contentDiskCacheKey(sourceJson),
-                            load = { matrixClientService.loadMediaContent(sourceJson) }
-                        )
-                    )
+            when (quality) {
+                MatrixMediaImageQuality.CELL -> {
+                    imageInfo.thumbnailSourceJson
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { sourceJson ->
+                            add(
+                                MediaBytesRequest(
+                                    cacheKey = contentDiskCacheKey(sourceJson),
+                                    load = { matrixClientService.loadMediaContent(sourceJson) }
+                                )
+                            )
+                        }
+                    add(serverThumbnailRequest)
+                    add(fullContentRequest)
                 }
-            add(
-                MediaBytesRequest(
-                    cacheKey = "thumbnail:$width:$height:${imageInfo.sourceJson}",
-                    load = {
-                        matrixClientService.loadMediaThumbnail(
-                            sourceJson = imageInfo.sourceJson,
-                            width = width,
-                            height = height
-                        )
-                    }
-                )
-            )
-            add(
-                MediaBytesRequest(
-                    cacheKey = contentDiskCacheKey(imageInfo.sourceJson),
-                    load = { matrixClientService.loadMediaContent(imageInfo.sourceJson) }
-                )
-            )
+                MatrixMediaImageQuality.VIEWER -> {
+                    add(fullContentRequest)
+                }
+            }
         }
     }
 
@@ -292,6 +321,19 @@ class MatrixMediaLoader(
         return imageInfo.localPath ?: imageInfo.thumbnailSourceJson ?: imageInfo.sourceJson
     }
 
+    private fun memoryCacheKey(
+        imageInfo: MatrixImageInfo,
+        targetWidthPx: Int,
+        targetHeightPx: Int,
+        quality: MatrixMediaImageQuality
+    ): String {
+        return when (quality) {
+            MatrixMediaImageQuality.CELL -> cacheKey(imageInfo)
+            MatrixMediaImageQuality.VIEWER ->
+                "viewer:${targetWidthPx.coerceAtLeast(1)}x${targetHeightPx.coerceAtLeast(1)}:${cacheKey(imageInfo)}"
+        }
+    }
+
     private fun contentDiskCacheKey(sourceJson: String): String {
         return "content:$sourceJson"
     }
@@ -316,4 +358,9 @@ class MatrixMediaLoader(
                 .toInt()
         }
     }
+}
+
+enum class MatrixMediaImageQuality {
+    CELL,
+    VIEWER
 }

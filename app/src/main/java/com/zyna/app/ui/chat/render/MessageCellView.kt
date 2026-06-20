@@ -16,6 +16,9 @@ import android.util.Log
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.ui.chat.viewer.PhotoViewerItem
+import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
+import com.zyna.app.ui.chat.viewer.PhotoViewerSource
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -23,7 +26,7 @@ import kotlin.math.roundToInt
 internal class MessageCellView(
     context: Context,
     private val imageLoader: MatrixMediaLoader? = null
-) : View(context) {
+) : View(context), PhotoViewerSource {
     private val density = resources.displayMetrics.density
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val contextCancelDistance = touchSlop * 2f
@@ -55,6 +58,7 @@ internal class MessageCellView(
     private var isContextMenuOpened = false
     private var isContextMenuSourceHidden = false
     private var isDrawingContextMenuCopy = false
+    private var isPhotoTapCandidate = false
     private var replyHeaderTapEventId: String? = null
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
@@ -64,6 +68,10 @@ internal class MessageCellView(
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuGestureEvent: ((action: Int, rawX: Float, rawY: Float) -> Unit)? = null
     var onReplyHeaderClicked: ((eventId: String) -> Unit)? = null
+    var onPhotoViewerRequested: ((request: PhotoViewerOpenRequest) -> Unit)? = null
+
+    override val isPhotoViewerSourceAvailable: Boolean
+        get() = isAttachedToWindow && isShown
 
     private val beginContextMenuPreviewRunnable = Runnable {
         beginContextMenuPreview()
@@ -191,6 +199,7 @@ internal class MessageCellView(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                isPhotoTapCandidate = photoViewerRequestAt(event.x, event.y) != null
                 replyHeaderTapEventId = replyHeaderEventIdAt(event.x, event.y)
                 if (hitTest(event.x, event.y) == MessageHitTarget.BUBBLE && renderModel != null) {
                     downTouchX = event.x
@@ -208,6 +217,9 @@ internal class MessageCellView(
                 if (replyHeaderTapEventId != null && movedPastTouchSlop(event.x, event.y)) {
                     replyHeaderTapEventId = null
                 }
+                if (isPhotoTapCandidate && movedPastTouchSlop(event.x, event.y)) {
+                    isPhotoTapCandidate = false
+                }
                 if (isContextMenuCandidate && !isContextMenuPreviewing && movedPastTouchSlop(event.x, event.y)) {
                     cancelContextMenuCandidate()
                 }
@@ -223,6 +235,7 @@ internal class MessageCellView(
             MotionEvent.ACTION_UP,
             MotionEvent.ACTION_CANCEL -> {
                 val wasContextMenuGesture = isContextMenuPreviewing || isContextMenuOpened
+                val wasPhotoTapCandidate = isPhotoTapCandidate
                 val replyHeaderClickEventId = if (
                     event.actionMasked == MotionEvent.ACTION_UP &&
                     !wasContextMenuGesture &&
@@ -248,6 +261,18 @@ internal class MessageCellView(
                     onReplyHeaderClicked?.invoke(replyHeaderClickEventId)
                     performClick()
                     return true
+                }
+                if (
+                    event.actionMasked == MotionEvent.ACTION_UP &&
+                    wasPhotoTapCandidate &&
+                    !movedPastTouchSlop(event.x, event.y)
+                ) {
+                    val request = photoViewerRequestAt(event.x, event.y)
+                    if (request != null) {
+                        onPhotoViewerRequested?.invoke(request)
+                        performClick()
+                        return true
+                    }
                 }
             }
         }
@@ -313,6 +338,15 @@ internal class MessageCellView(
         out.set(currentLayout.bubbleRect)
         out.offset(screenLocation[0].toFloat(), screenLocation[1].toFloat())
         return true
+    }
+
+    override fun photoSourceBoundsInScreen(itemId: String): RectF? {
+        val currentLayout = layout ?: return null
+        val model = renderModel ?: return null
+        return photoHitTargets(currentLayout, model)
+            .firstOrNull { hit -> hit.item.id == itemId }
+            ?.boundsInView
+            ?.let(::viewRectToScreen)
     }
 
     fun setContextMenuSourceHidden(hidden: Boolean) {
@@ -487,6 +521,7 @@ internal class MessageCellView(
         isContextMenuCandidate = false
         isContextMenuPreviewing = false
         isContextMenuOpened = false
+        isPhotoTapCandidate = false
         replyHeaderTapEventId = null
     }
 
@@ -562,6 +597,90 @@ internal class MessageCellView(
         )
     }
 
+    private fun photoViewerRequestAt(x: Float, y: Float): PhotoViewerOpenRequest? {
+        val currentLayout = layout ?: return null
+        val model = renderModel ?: return null
+        val targets = photoHitTargets(currentLayout, model)
+        val hit = targets.firstOrNull { target -> target.boundsInView.contains(x, y) }
+            ?: return null
+        val selectedIndex = targets.indexOf(hit).takeIf { it >= 0 } ?: return null
+        return PhotoViewerOpenRequest(
+            source = this,
+            messageId = model.id,
+            items = targets.map { it.item },
+            selectedIndex = selectedIndex,
+            sourceBoundsInScreen = viewRectToScreen(hit.boundsInView),
+            sourceCornerRadiusPx = PHOTO_SOURCE_CORNER_RADIUS_DP.dpToPx(density).toFloat()
+        )
+    }
+
+    private fun photoHitTargets(
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel
+    ): List<PhotoHitTarget> {
+        return when (val content = model.content) {
+            is MessageContent.Image -> {
+                val imageLayout = currentLayout.contentLayout as? ImageMessageLayout
+                    ?: return emptyList()
+                val bounds = RectF(
+                    currentLayout.contentLeft.toFloat(),
+                    (currentLayout.contentTop + imageLayout.imageY).toFloat(),
+                    (currentLayout.contentLeft + imageLayout.imageWidth).toFloat(),
+                    (currentLayout.contentTop + imageLayout.imageY + imageLayout.imageHeight).toFloat()
+                )
+                listOf(
+                    PhotoHitTarget(
+                        item = PhotoViewerItem(
+                            id = model.eventId ?: model.id,
+                            imageInfo = content.imageInfo,
+                            caption = content.caption
+                        ),
+                        boundsInView = bounds
+                    )
+                )
+            }
+            is MessageContent.PhotoGroup -> {
+                val groupLayout = currentLayout.contentLayout as? PhotoGroupMessageLayout
+                    ?: return emptyList()
+                val mediaBounds = RectF(
+                    currentLayout.contentLeft.toFloat(),
+                    (currentLayout.contentTop + groupLayout.mediaY).toFloat(),
+                    (currentLayout.contentLeft + groupLayout.mediaWidth).toFloat(),
+                    (currentLayout.contentTop + groupLayout.mediaY + groupLayout.mediaHeight).toFloat()
+                )
+                val frames = PhotoGroupLayout.frames(
+                    bounds = mediaBounds,
+                    itemCount = groupLayout.items.size,
+                    layoutOverride = groupLayout.layoutOverride,
+                    spacingPx = PHOTO_GROUP_SPACING_DP.dpToPx(density)
+                )
+                val visibleCount = PhotoGroupLayout.visibleItemCount(groupLayout.items.size)
+                val overflowFrame = frames.getOrNull(visibleCount - 1)
+                groupLayout.items.mapIndexedNotNull { index, groupItem ->
+                    val frame = frames.getOrNull(index)
+                        ?: overflowFrame
+                        ?: return@mapIndexedNotNull null
+                    PhotoHitTarget(
+                        item = PhotoViewerItem(
+                            id = groupItem.eventId ?: groupItem.transactionId ?: groupItem.messageId,
+                            imageInfo = groupItem.imageInfo,
+                            caption = groupItem.imageInfo.caption ?: content.caption
+                        ),
+                        boundsInView = RectF(frame)
+                    )
+                }
+            }
+            else -> emptyList()
+        }
+    }
+
+    private fun viewRectToScreen(rect: RectF): RectF {
+        getLocationOnScreen(screenLocation)
+        return RectF(rect).apply {
+            offset(screenLocation[0].toFloat(), screenLocation[1].toFloat())
+        }
+    }
+
     private fun rendererFor(content: MessageContent): MessageContentRenderer {
         return contentRenderers.firstOrNull { it.supports(content) }
             ?: error("No renderer registered for ${content::class.java.simpleName}")
@@ -631,6 +750,11 @@ private data class MessageCellLayout(
     val contentLayout: MessageContentLayout
 )
 
+private data class PhotoHitTarget(
+    val item: PhotoViewerItem,
+    val boundsInView: RectF
+)
+
 internal data class MessageContextMenuRequest(
     val cell: MessageCellView,
     val message: MessageRenderModel,
@@ -652,6 +776,8 @@ private const val BUBBLE_HIGHLIGHT_MAX_ALPHA = 72
 private const val BUBBLE_HIGHLIGHT_RAMP_UP_FRACTION = 0.16f
 private const val BUBBLE_HIGHLIGHT_HOLD_FRACTION = 0.42f
 private const val CONTEXT_MENU_BUBBLE_LOG_TAG = "ZynaBubbleLog"
+private const val PHOTO_SOURCE_CORNER_RADIUS_DP = 10
+private const val PHOTO_GROUP_SPACING_DP = 2
 
 private fun MessageContent.debugSummary(): String {
     return when (this) {

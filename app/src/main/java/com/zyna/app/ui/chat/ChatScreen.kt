@@ -14,6 +14,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
@@ -39,6 +44,7 @@ import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageForwardPreview
+import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
@@ -47,6 +53,7 @@ import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
+import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -103,96 +110,124 @@ fun ChatScreen(
 ) {
     val glassPalette = chatGlassPalette()
     val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                navigationIcon = {
-                    TextButton(onClick = onBack) {
-                        Text("Back")
+    var photoViewerRequest by remember { mutableStateOf<PhotoViewerOpenRequest?>(null) }
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = {
+                        TextButton(onClick = onBack) {
+                            Text("Back")
+                        }
+                    },
+                    title = {
+                        Column {
+                            Text(
+                                text = roomName,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = roomId,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    },
+                    actions = {
+                        TextButton(
+                            onClick = onRefresh,
+                            enabled = !isLoading
+                        ) {
+                            Text(if (isLoading) "Loading" else "Refresh")
+                        }
                     }
-                },
-                title = {
-                    Column {
-                        Text(
-                            text = roomName,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = roomId,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                },
-                actions = {
-                    TextButton(
-                        onClick = onRefresh,
-                        enabled = !isLoading
-                    ) {
-                        Text(if (isLoading) "Loading" else "Refresh")
-                    }
-                }
-            )
-        }
-    ) { innerPadding ->
-        when {
-            errorMessage != null -> Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-                    .padding(24.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = errorMessage,
-                    color = MaterialTheme.colorScheme.error
                 )
             }
-            else -> ChatMessageList(
-                messages = messages,
-                roomId = roomId,
-                windowChangeOrigin = windowChangeOrigin,
-                isLoading = isLoading,
-                isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder,
-                canLoadNewer = canLoadNewer,
-                isAtLiveEdge = isAtLiveEdge,
-                scrollToLiveEdgeRequested = scrollToLiveEdgeRequested,
-                isSendingMessage = isSendingMessage,
-                sendErrorMessage = sendErrorMessage,
-                sendErrorColor = sendErrorColor,
-                replyTarget = replyTarget,
-                editTarget = editTarget,
-                forwardTarget = forwardTarget,
-                matrixMediaLoader = matrixMediaLoader,
-                jumpTargetEventId = jumpTargetEventId,
-                palette = glassPalette,
-                onLoadOlder = onLoadOlder,
-                onLoadNewer = onLoadNewer,
-                onJumpToLiveEdge = onJumpToLiveEdge,
-                onSendMessage = onSendMessage,
-                onAttachPhotos = onAttachPhotos,
-                onReplyToMessage = onReplyToMessage,
-                onReplyHeaderClicked = onReplyHeaderClicked,
-                onCancelReply = onCancelReply,
-                onEditMessage = onEditMessage,
-                onCancelEdit = onCancelEdit,
-                onForwardMessage = onForwardMessage,
-                onCancelForward = onCancelForward,
-                onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
-                onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
-                onRedactMessage = onRedactMessage,
-                onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
-                onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
-                onJumpTargetConsumed = onJumpTargetConsumed,
-                onScrollToLiveEdgeConsumed = onScrollToLiveEdgeConsumed,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(innerPadding)
-            )
+        ) { innerPadding ->
+            when {
+                errorMessage != null -> Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = errorMessage,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+                else -> ChatMessageList(
+                    messages = messages,
+                    roomId = roomId,
+                    windowChangeOrigin = windowChangeOrigin,
+                    isLoading = isLoading,
+                    isLoadingOlder = isLoadingOlder,
+                    canLoadOlder = canLoadOlder,
+                    canLoadNewer = canLoadNewer,
+                    isAtLiveEdge = isAtLiveEdge,
+                    scrollToLiveEdgeRequested = scrollToLiveEdgeRequested,
+                    isSendingMessage = isSendingMessage,
+                    sendErrorMessage = sendErrorMessage,
+                    sendErrorColor = sendErrorColor,
+                    replyTarget = replyTarget,
+                    editTarget = editTarget,
+                    forwardTarget = forwardTarget,
+                    matrixMediaLoader = matrixMediaLoader,
+                    jumpTargetEventId = jumpTargetEventId,
+                    palette = glassPalette,
+                    onLoadOlder = onLoadOlder,
+                    onLoadNewer = onLoadNewer,
+                    onJumpToLiveEdge = onJumpToLiveEdge,
+                    onSendMessage = onSendMessage,
+                    onAttachPhotos = onAttachPhotos,
+                    onReplyToMessage = onReplyToMessage,
+                    onReplyHeaderClicked = onReplyHeaderClicked,
+                    onPhotoViewerRequested = { request ->
+                        photoViewerRequest = request
+                    },
+                    onCancelReply = onCancelReply,
+                    onEditMessage = onEditMessage,
+                    onCancelEdit = onCancelEdit,
+                    onForwardMessage = onForwardMessage,
+                    onCancelForward = onCancelForward,
+                    onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
+                    onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
+                    onRedactMessage = onRedactMessage,
+                    onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
+                    onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
+                    onJumpTargetConsumed = onJumpTargetConsumed,
+                    onScrollToLiveEdgeConsumed = onScrollToLiveEdgeConsumed,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                )
+            }
+        }
+
+        val viewerRequest = photoViewerRequest
+        if (viewerRequest != null && matrixMediaLoader != null) {
+            key(viewerRequest) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { context ->
+                        PhotoViewerLayer(context, matrixMediaLoader).apply {
+                            onDismissed = {
+                                photoViewerRequest = null
+                            }
+                            open(viewerRequest)
+                        }
+                    },
+                    update = { layer ->
+                        layer.onDismissed = {
+                            photoViewerRequest = null
+                        }
+                    }
+                )
+            }
         }
     }
 }
@@ -224,6 +259,7 @@ private fun ChatMessageList(
     onAttachPhotos: () -> Unit,
     onReplyToMessage: (MatrixReplyInfo) -> Unit,
     onReplyHeaderClicked: (String) -> Unit,
+    onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
     onCancelReply: () -> Unit,
     onEditMessage: (MatrixEditTarget) -> Unit,
     onCancelEdit: () -> Unit,
@@ -261,7 +297,8 @@ private fun ChatMessageList(
                 onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
                 onContextMenuRequested = chatLayout::showMessageContextMenu,
                 onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
-                onReplyHeaderClicked = onReplyHeaderClicked
+                onReplyHeaderClicked = onReplyHeaderClicked,
+                onPhotoViewerRequested = onPhotoViewerRequested
             )
             chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.onLoadNewerMessages = onLoadNewer
@@ -377,6 +414,7 @@ private fun ChatMessageList(
             adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
             adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
             adapter.onReplyHeaderClicked = onReplyHeaderClicked
+            adapter.onPhotoViewerRequested = onPhotoViewerRequested
             adapter.matrixMediaLoader = matrixMediaLoader
             val displayedMessages = messages
                 .asReversed()
@@ -746,7 +784,8 @@ private class ChatMessageAdapter(
     var onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
-    var onReplyHeaderClicked: (String) -> Unit
+    var onReplyHeaderClicked: (String) -> Unit,
+    var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
     init {
         setHasStableIds(true)
@@ -767,7 +806,8 @@ private class ChatMessageAdapter(
             onContextMenuPreviewRequested = onContextMenuPreviewRequested,
             onContextMenuRequested = onContextMenuRequested,
             onContextMenuGestureEvent = onContextMenuGestureEvent,
-            onReplyHeaderClicked = onReplyHeaderClicked
+            onReplyHeaderClicked = onReplyHeaderClicked,
+            onPhotoViewerRequested = onPhotoViewerRequested
         )
     }
 }
@@ -791,12 +831,14 @@ private class ChatMessageViewHolder(
         onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
-        onReplyHeaderClicked: (String) -> Unit
+        onReplyHeaderClicked: (String) -> Unit,
+        onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit
     ) {
         messageView.onContextMenuPreviewRequested = onContextMenuPreviewRequested
         messageView.onContextMenuRequested = onContextMenuRequested
         messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
         messageView.onReplyHeaderClicked = onReplyHeaderClicked
+        messageView.onPhotoViewerRequested = onPhotoViewerRequested
         messageView.bind(message, theme)
     }
 }

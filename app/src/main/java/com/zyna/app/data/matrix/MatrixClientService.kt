@@ -579,7 +579,12 @@ class MatrixClientService(
         caption: String?,
         transactionId: String,
         zynaAttributesJson: String?,
-        blurhash: String? = null
+        blurhash: String? = null,
+        thumbnailLocalPath: String? = null,
+        thumbnailMimeType: String? = null,
+        thumbnailSizeBytes: Long? = null,
+        thumbnailWidth: Int? = null,
+        thumbnailHeight: Int? = null
     ): String = withContext(Dispatchers.IO) {
         val uploadedImageJson = uploadImageForEvent(
             roomId = roomId,
@@ -588,7 +593,12 @@ class MatrixClientService(
             sizeBytes = sizeBytes,
             width = width,
             height = height,
-            blurhash = blurhash
+            blurhash = blurhash,
+            thumbnailLocalPath = thumbnailLocalPath,
+            thumbnailMimeType = thumbnailMimeType,
+            thumbnailSizeBytes = thumbnailSizeBytes,
+            thumbnailWidth = thumbnailWidth,
+            thumbnailHeight = thumbnailHeight
         )
         sendUploadedImageMessage(
             roomId = roomId,
@@ -606,27 +616,46 @@ class MatrixClientService(
         sizeBytes: Long,
         width: Int,
         height: Int,
-        blurhash: String? = null
+        blurhash: String? = null,
+        thumbnailLocalPath: String? = null,
+        thumbnailMimeType: String? = null,
+        thumbnailSizeBytes: Long? = null,
+        thumbnailWidth: Int? = null,
+        thumbnailHeight: Int? = null
     ): String = withContext(Dispatchers.IO) {
         val imageFile = File(localPath)
         require(imageFile.isFile) { "Image file is not available" }
+        val thumbnailFile = thumbnailLocalPath
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isFile }
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         val mediaBlurhash = blurhash?.takeIf { it.isNotBlank() }
+            ?: thumbnailFile?.absolutePath?.let { path -> BlurHashCodec.encodeFile(path) }
             ?: BlurHashCodec.encodeFile(imageFile.absolutePath)
         room.uploadImageForEvent(
             originalFilePath = imageFile.absolutePath,
-            thumbnailFilePath = null,
+            thumbnailFilePath = thumbnailFile?.absolutePath,
             originalMimetype = mimeType.ifBlank { "image/jpeg" },
             originalSize = sizeBytes.takeIf { it > 0L }
                 ?.toULong()
                 ?: imageFile.length().coerceAtLeast(1L).toULong(),
             originalWidth = width.coerceAtLeast(1).toULong(),
             originalHeight = height.coerceAtLeast(1).toULong(),
-            thumbnailMimetype = null,
-            thumbnailSize = null,
-            thumbnailWidth = null,
-            thumbnailHeight = null,
+            thumbnailMimetype = thumbnailFile?.let {
+                thumbnailMimeType?.takeIf { it.isNotBlank() } ?: "image/jpeg"
+            },
+            thumbnailSize = thumbnailFile?.let {
+                (thumbnailSizeBytes?.takeIf { it > 0L } ?: thumbnailFile.length().coerceAtLeast(1L))
+                    .toULong()
+            },
+            thumbnailWidth = thumbnailFile?.let {
+                thumbnailWidth?.takeIf { it > 0 }?.toULong()
+            },
+            thumbnailHeight = thumbnailFile?.let {
+                thumbnailHeight?.takeIf { it > 0 }?.toULong()
+            },
             blurhash = mediaBlurhash
         )
     }

@@ -31,6 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.zyna.app.data.matrix.MatrixClientState
+import com.zyna.app.data.outgoing.OutgoingImagePreprocessor
 import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingOutboxDebugHooks
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
@@ -155,24 +156,29 @@ class MainActivity : ComponentActivity() {
                                 isPreparingPhotos = true
                                 photoEditorError = null
                                 coroutineScope.launch {
+                                    var processedItems: List<OutgoingPhotoDraftItem> = emptyList()
                                     try {
+                                        processedItems = processOutgoingPhotoItems(result.items)
                                         val draft = OutgoingPhotoDraft(
-                                            items = result.items,
+                                            items = processedItems,
                                             caption = result.caption,
                                             captionPlacement = result.captionPlacement,
                                             layoutOverride = result.layoutOverride
                                         )
                                         val didSend = appViewModel.sendPhotoMessages(draft)
                                         if (didSend) {
+                                            deletePhotoItems(result.items)
                                             photoEditorItems = emptyList()
                                             photoEditorError = null
                                         } else {
-                                            deletePhotoItems(draft.items)
+                                            deletePhotoItems(processedItems)
                                             photoEditorError = "Could not send photos"
                                         }
                                     } catch (error: CancellationException) {
+                                        deletePhotoItems(processedItems)
                                         throw error
                                     } catch (error: Throwable) {
+                                        deletePhotoItems(processedItems)
                                         photoEditorError = error.message ?: error.javaClass.simpleName
                                     } finally {
                                         isPreparingPhotos = false
@@ -244,7 +250,13 @@ class MainActivity : ComponentActivity() {
                     mimeType = mimeType,
                     width = dimensions.first,
                     height = dimensions.second,
-                    sizeBytes = outputFile.length()
+                    sizeBytes = outputFile.length(),
+                    thumbnailLocalPath = null,
+                    thumbnailMimeType = null,
+                    thumbnailWidth = null,
+                    thumbnailHeight = null,
+                    thumbnailSizeBytes = null,
+                    blurhash = null
                 )
             }
         } catch (error: Throwable) {
@@ -253,8 +265,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private suspend fun processOutgoingPhotoItems(
+        items: List<OutgoingPhotoDraftItem>
+    ): List<OutgoingPhotoDraftItem> = withContext(Dispatchers.IO) {
+        val outputDir = File(filesDir, OutgoingMediaStorage.DIRECTORY_NAME).apply {
+            mkdirs()
+        }
+        val processedItems = mutableListOf<OutgoingPhotoDraftItem>()
+        try {
+            items.map { item ->
+                OutgoingImagePreprocessor.processFile(
+                    file = File(item.localPath),
+                    outputDir = outputDir
+                ).also { processed ->
+                    processedItems += processed
+                }
+            }
+        } catch (error: Throwable) {
+            deletePhotoItems(processedItems)
+            throw error
+        }
+    }
+
     private fun deletePhotoItems(items: List<OutgoingPhotoDraftItem>) {
-        items.forEach { item -> File(item.localPath).delete() }
+        items.flatMap { item -> item.localFiles() }
+            .forEach { file -> file.delete() }
     }
 
     private fun String.fileExtension(): String {
@@ -283,10 +318,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             if (sourceWidth > 0 && sourceHeight > 0) {
-                return Pair(
-                    sourceWidth,
-                    sourceHeight
-                )
+                return Pair(sourceWidth, sourceHeight)
             }
         }
 
@@ -329,6 +361,13 @@ class MainActivity : ComponentActivity() {
 private fun MotionEvent.isInsideView(view: View): Boolean {
     val bounds = Rect()
     return view.getGlobalVisibleRect(bounds) && bounds.contains(rawX.toInt(), rawY.toInt())
+}
+
+private fun OutgoingPhotoDraftItem.localFiles(): List<File> {
+    return listOfNotNull(
+        localPath.takeIf { it.isNotBlank() },
+        thumbnailLocalPath?.takeIf { it.isNotBlank() }
+    ).distinct().map(::File)
 }
 
 private inline fun <reified T : View> View.findAncestor(): T? {

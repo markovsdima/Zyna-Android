@@ -417,6 +417,11 @@ class LocalCacheRepository(
                     imageWidth = null,
                     imageHeight = null,
                     imageSizeBytes = null,
+                    imageThumbnailLocalPath = null,
+                    imageThumbnailMimeType = null,
+                    imageThumbnailWidth = null,
+                    imageThumbnailHeight = null,
+                    imageThumbnailSizeBytes = null,
                     imageCaption = null,
                     zynaAttributesJson = null,
                     imageSourceJson = null,
@@ -444,6 +449,12 @@ class LocalCacheRepository(
         width: Int,
         height: Int,
         sizeBytes: Long,
+        thumbnailLocalPath: String?,
+        thumbnailMimeType: String?,
+        thumbnailWidth: Int?,
+        thumbnailHeight: Int?,
+        thumbnailSizeBytes: Long?,
+        blurhash: String?,
         caption: String?,
         zynaAttributes: ZynaMessageAttributes
     ) {
@@ -473,11 +484,16 @@ class LocalCacheRepository(
                     imageWidth = width,
                     imageHeight = height,
                     imageSizeBytes = sizeBytes,
+                    imageThumbnailLocalPath = thumbnailLocalPath,
+                    imageThumbnailMimeType = thumbnailMimeType,
+                    imageThumbnailWidth = thumbnailWidth,
+                    imageThumbnailHeight = thumbnailHeight,
+                    imageThumbnailSizeBytes = thumbnailSizeBytes,
                     imageCaption = normalizedCaption,
                     zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
                     imageSourceJson = null,
                     imageThumbnailSourceJson = null,
-                    imageBlurhash = null,
+                    imageBlurhash = blurhash,
                     imageUploadedJson = null,
                     imageUploadedAtMillis = null,
                     body = normalizedCaption ?: "Photo",
@@ -525,6 +541,11 @@ class LocalCacheRepository(
                     imageWidth = image.width,
                     imageHeight = image.height,
                     imageSizeBytes = null,
+                    imageThumbnailLocalPath = null,
+                    imageThumbnailMimeType = null,
+                    imageThumbnailWidth = null,
+                    imageThumbnailHeight = null,
+                    imageThumbnailSizeBytes = null,
                     imageCaption = normalizedCaption,
                     zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
                     imageSourceJson = image.sourceJson,
@@ -575,6 +596,11 @@ class LocalCacheRepository(
                     imageWidth = null,
                     imageHeight = null,
                     imageSizeBytes = null,
+                    imageThumbnailLocalPath = null,
+                    imageThumbnailMimeType = null,
+                    imageThumbnailWidth = null,
+                    imageThumbnailHeight = null,
+                    imageThumbnailSizeBytes = null,
                     imageCaption = null,
                     zynaAttributesJson = null,
                     imageSourceJson = null,
@@ -792,7 +818,12 @@ class LocalCacheRepository(
                 if (hiddenIds.isNotEmpty()) {
                     messageDao.deleteMessagesByIds(userId, roomId, hiddenIds)
                 }
-                deleteLocalFiles(listOfNotNull(envelope.imageLocalPath))
+                deleteLocalFiles(
+                    listOfNotNull(
+                        envelope.imageLocalPath,
+                        envelope.imageThumbnailLocalPath
+                    )
+                )
                 updateRoomPreview(userId, roomId, System.currentTimeMillis())
             }
             didDelete
@@ -1345,6 +1376,11 @@ class LocalCacheRepository(
             width = imageWidth?.takeIf { it > 0 } ?: 1,
             height = imageHeight?.takeIf { it > 0 } ?: 1,
             sizeBytes = imageSizeBytes?.takeIf { it > 0L } ?: 0L,
+            thumbnailLocalPath = imageThumbnailLocalPath?.takeIf { it.isNotBlank() },
+            thumbnailMimeType = imageThumbnailMimeType?.takeIf { it.isNotBlank() },
+            thumbnailWidth = imageThumbnailWidth?.takeIf { it > 0 },
+            thumbnailHeight = imageThumbnailHeight?.takeIf { it > 0 },
+            thumbnailSizeBytes = imageThumbnailSizeBytes?.takeIf { it > 0L },
             caption = imageCaption,
             zynaAttributesJson = zynaAttributesJson,
             sourceJson = sourceJson,

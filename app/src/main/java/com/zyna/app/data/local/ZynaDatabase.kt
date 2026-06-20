@@ -16,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class
     ],
-    version = 14,
+    version = 15,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -59,7 +59,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_10_11,
                     MIGRATION_11_12,
                     MIGRATION_12_13,
-                    MIGRATION_13_14
+                    MIGRATION_13_14,
+                    MIGRATION_14_15
                 )
                 .build()
         }
@@ -272,6 +273,16 @@ abstract class ZynaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageSourceJson TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageThumbnailSourceJson TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageBlurhash TEXT")
+            }
+        }
+
+        private val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageThumbnailLocalPath TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageThumbnailMimeType TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageThumbnailWidth INTEGER")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageThumbnailHeight INTEGER")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN imageThumbnailSizeBytes INTEGER")
             }
         }
     }

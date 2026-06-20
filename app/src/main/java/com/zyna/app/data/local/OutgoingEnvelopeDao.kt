@@ -124,6 +124,12 @@ interface OutgoingEnvelopeDao {
             AND roomId = :roomId
             AND eventId IN (:eventIds)
             AND imageLocalPath IS NOT NULL
+        UNION
+        SELECT imageThumbnailLocalPath FROM outgoing_envelopes
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND eventId IN (:eventIds)
+            AND imageThumbnailLocalPath IS NOT NULL
         """
     )
     suspend fun imageLocalPathsForEventIds(
@@ -136,6 +142,10 @@ interface OutgoingEnvelopeDao {
         """
         SELECT imageLocalPath FROM outgoing_envelopes
         WHERE imageLocalPath IS NOT NULL
+            AND transportState != 'RETIRED'
+        UNION
+        SELECT imageThumbnailLocalPath FROM outgoing_envelopes
+        WHERE imageThumbnailLocalPath IS NOT NULL
             AND transportState != 'RETIRED'
         """
     )

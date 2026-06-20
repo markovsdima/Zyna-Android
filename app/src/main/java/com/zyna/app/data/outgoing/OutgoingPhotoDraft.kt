@@ -8,7 +8,13 @@ data class OutgoingPhotoDraftItem(
     val mimeType: String,
     val width: Int,
     val height: Int,
-    val sizeBytes: Long
+    val sizeBytes: Long,
+    val thumbnailLocalPath: String?,
+    val thumbnailMimeType: String?,
+    val thumbnailWidth: Int?,
+    val thumbnailHeight: Int?,
+    val thumbnailSizeBytes: Long?,
+    val blurhash: String?
 )
 
 data class OutgoingPhotoDraft(

@@ -600,6 +600,12 @@ class AppViewModel(
                         width = item.width,
                         height = item.height,
                         sizeBytes = item.sizeBytes,
+                        thumbnailLocalPath = item.thumbnailLocalPath,
+                        thumbnailMimeType = item.thumbnailMimeType,
+                        thumbnailWidth = item.thumbnailWidth,
+                        thumbnailHeight = item.thumbnailHeight,
+                        thumbnailSizeBytes = item.thumbnailSizeBytes,
+                        blurhash = item.blurhash,
                         caption = draft.caption,
                         zynaAttributes = attributes
                     )

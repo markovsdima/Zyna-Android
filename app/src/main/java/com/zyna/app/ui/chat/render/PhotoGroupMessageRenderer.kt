@@ -256,7 +256,11 @@ internal class PhotoGroupMessageRenderer(
         val save = canvas.save()
         canvas.clipPath(tilePath)
         canvas.drawRect(frame, placeholderPaint)
-        val bitmap = imageLoader?.cachedImage(imageInfo)
+        val bitmap = imageLoader?.cachedPreviewImage(
+            imageInfo = imageInfo,
+            targetWidthPx = frame.width().roundToInt().coerceAtLeast(1),
+            targetHeightPx = frame.height().roundToInt().coerceAtLeast(1)
+        )
         if (bitmap != null && !bitmap.isRecycled) {
             srcRect.setCenterCrop(
                 bitmap = bitmap,

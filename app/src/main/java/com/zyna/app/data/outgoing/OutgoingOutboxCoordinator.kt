@@ -345,7 +345,8 @@ class OutgoingOutboxService(
             mimeType = candidate.mimeType,
             sizeBytes = candidate.sizeBytes,
             width = candidate.width,
-            height = candidate.height
+            height = candidate.height,
+            blurhash = candidate.blurhash
         )
         currentCoroutineContext().ensureActive()
         val didCheckpoint = localCacheRepository.markOutgoingImageUploadAccepted(

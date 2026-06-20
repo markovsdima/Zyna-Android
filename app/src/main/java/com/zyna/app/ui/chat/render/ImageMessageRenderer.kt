@@ -212,7 +212,11 @@ internal class ImageMessageRenderer(
         val save = canvas.save()
         canvas.clipPath(imagePath)
         canvas.drawRect(imageDstRect, placeholderPaint)
-        val bitmap = imageLoader?.cachedImage(layout.imageInfo)
+        val bitmap = imageLoader?.cachedPreviewImage(
+            imageInfo = layout.imageInfo,
+            targetWidthPx = layout.imageWidth,
+            targetHeightPx = layout.imageHeight
+        )
         if (bitmap != null && !bitmap.isRecycled) {
             imageSrcRect.setCenterCrop(
                 bitmap = bitmap,

@@ -41,6 +41,17 @@ class MatrixMediaLoader(
         return memoryCache.get(cacheKey(imageInfo))
     }
 
+    fun cachedPreviewImage(
+        imageInfo: MatrixImageInfo,
+        targetWidthPx: Int,
+        targetHeightPx: Int
+    ): Bitmap? {
+        cachedImage(imageInfo)?.let { return it }
+        val blurHashKey = blurHashMemoryCacheKey(imageInfo, targetWidthPx, targetHeightPx)
+            ?: return null
+        return memoryCache.get(blurHashKey)
+    }
+
     fun cachedImage(
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
@@ -63,6 +74,13 @@ class MatrixMediaLoader(
         }
 
         val waiter = scope.launch {
+            if (quality == MatrixMediaImageQuality.CELL) {
+                decodeBlurHashPreview(imageInfo, targetWidthPx, targetHeightPx)?.let { preview ->
+                    withContext(Dispatchers.Main.immediate) {
+                        onLoaded(preview)
+                    }
+                }
+            }
             val bitmap = deferredFor(key, imageInfo, targetWidthPx, targetHeightPx, quality).await()
             withContext(Dispatchers.Main.immediate) {
                 onLoaded(bitmap)
@@ -268,6 +286,29 @@ class MatrixMediaLoader(
             ?.scaleDownToFill(targetWidthPx, targetHeightPx)
     }
 
+    private fun decodeBlurHashPreview(
+        imageInfo: MatrixImageInfo,
+        targetWidthPx: Int,
+        targetHeightPx: Int
+    ): Bitmap? {
+        val key = blurHashMemoryCacheKey(imageInfo, targetWidthPx, targetHeightPx)
+            ?: return null
+        memoryCache.get(key)?.let { return it }
+        val preview = BlurHashCodec.decodeToBitmap(
+            blurHash = imageInfo.blurhash,
+            targetWidthPx = targetWidthPx,
+            targetHeightPx = targetHeightPx
+        ) ?: return null
+        synchronized(lock) {
+            memoryCache.get(key)?.let { cached ->
+                preview.recycle()
+                return cached
+            }
+            memoryCache.put(key, preview)
+        }
+        return preview
+    }
+
     private fun Bitmap.scaleDownToFill(targetWidthPx: Int, targetHeightPx: Int): Bitmap {
         if (targetWidthPx <= 0 || targetHeightPx <= 0 || width <= 0 || height <= 0) {
             return this
@@ -332,6 +373,15 @@ class MatrixMediaLoader(
             MatrixMediaImageQuality.VIEWER ->
                 "viewer:${targetWidthPx.coerceAtLeast(1)}x${targetHeightPx.coerceAtLeast(1)}:${cacheKey(imageInfo)}"
         }
+    }
+
+    private fun blurHashMemoryCacheKey(
+        imageInfo: MatrixImageInfo,
+        targetWidthPx: Int,
+        targetHeightPx: Int
+    ): String? {
+        val blurHash = imageInfo.blurhash?.takeIf { it.isNotBlank() } ?: return null
+        return "blurhash:${targetWidthPx.coerceAtLeast(1)}x${targetHeightPx.coerceAtLeast(1)}:$blurHash"
     }
 
     private fun contentDiskCacheKey(sourceJson: String): String {

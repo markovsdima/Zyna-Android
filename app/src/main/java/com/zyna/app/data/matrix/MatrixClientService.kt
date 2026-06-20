@@ -2,6 +2,7 @@ package com.zyna.app.data.matrix
 
 import android.content.Context
 import android.util.Log
+import com.zyna.app.data.media.BlurHashCodec
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.local.TimelineFlushSummary
@@ -577,7 +578,8 @@ class MatrixClientService(
         height: Int,
         caption: String?,
         transactionId: String,
-        zynaAttributesJson: String?
+        zynaAttributesJson: String?,
+        blurhash: String? = null
     ): String = withContext(Dispatchers.IO) {
         val uploadedImageJson = uploadImageForEvent(
             roomId = roomId,
@@ -585,7 +587,8 @@ class MatrixClientService(
             mimeType = mimeType,
             sizeBytes = sizeBytes,
             width = width,
-            height = height
+            height = height,
+            blurhash = blurhash
         )
         sendUploadedImageMessage(
             roomId = roomId,
@@ -602,12 +605,15 @@ class MatrixClientService(
         mimeType: String,
         sizeBytes: Long,
         width: Int,
-        height: Int
+        height: Int,
+        blurhash: String? = null
     ): String = withContext(Dispatchers.IO) {
         val imageFile = File(localPath)
         require(imageFile.isFile) { "Image file is not available" }
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val mediaBlurhash = blurhash?.takeIf { it.isNotBlank() }
+            ?: BlurHashCodec.encodeFile(imageFile.absolutePath)
         room.uploadImageForEvent(
             originalFilePath = imageFile.absolutePath,
             thumbnailFilePath = null,
@@ -621,7 +627,7 @@ class MatrixClientService(
             thumbnailSize = null,
             thumbnailWidth = null,
             thumbnailHeight = null,
-            blurhash = null
+            blurhash = mediaBlurhash
         )
     }
 

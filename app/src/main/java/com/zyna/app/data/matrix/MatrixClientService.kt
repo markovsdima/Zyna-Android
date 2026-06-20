@@ -2,6 +2,8 @@ package com.zyna.app.data.matrix
 
 import android.content.Context
 import android.util.Log
+import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
@@ -35,8 +37,12 @@ import org.matrix.rustcomponents.sdk.ClientSessionDelegate
 import org.matrix.rustcomponents.sdk.EmbeddedEventDetails
 import org.matrix.rustcomponents.sdk.EventOrTransactionId
 import org.matrix.rustcomponents.sdk.EventTimelineItem
+import org.matrix.rustcomponents.sdk.FormattedBody
+import org.matrix.rustcomponents.sdk.ImageInfo
+import org.matrix.rustcomponents.sdk.ImageMessageContent
 import org.matrix.rustcomponents.sdk.LatestEventValue
 import org.matrix.rustcomponents.sdk.MediaSource
+import org.matrix.rustcomponents.sdk.MessageFormat
 import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeContent
@@ -135,7 +141,21 @@ data class MatrixEditTarget(
 
 data class MatrixForwardTarget(
     val body: String,
-    val forwardedFrom: String?
+    val forwardedFrom: String?,
+    val caption: String? = null,
+    val imageItems: List<MatrixForwardImageItem> = emptyList(),
+    val captionPlacement: CaptionPlacement = CaptionPlacement.BOTTOM,
+    val layoutOverride: MediaGroupLayoutOverride? = null
+)
+
+data class MatrixForwardImageItem(
+    val sourceJson: String,
+    val thumbnailSourceJson: String?,
+    val width: Int?,
+    val height: Int?,
+    val caption: String?,
+    val mimeType: String?,
+    val blurhash: String?
 )
 
 data class MatrixImageInfo(
@@ -630,6 +650,56 @@ class MatrixClientService(
             formattedCaption = formattedCaption,
             replyEventId = null
         )
+    }
+
+    suspend fun sendForwardedImageMessage(
+        roomId: String,
+        image: MatrixForwardImageItem,
+        caption: String?,
+        transactionId: String,
+        zynaAttributesJson: String?
+    ): String = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val source = MediaSource.fromJson(image.sourceJson)
+        val thumbnailSource = image.thumbnailSourceJson
+            ?.takeIf { it.isNotBlank() }
+            ?.let { MediaSource.fromJson(it) }
+        val normalizedCaption = caption.normalizedMessageCaption()
+        val zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson)
+        val plainCaption = normalizedCaption
+            ?: ZERO_WIDTH_SPACE.takeUnless { zynaAttributes.isEmpty }
+        val formattedCaption = formattedMediaCaption(
+            caption = normalizedCaption,
+            attributes = zynaAttributes
+        )
+        val msgType = MessageType.Image(
+            ImageMessageContent(
+                filename = "image.jpg",
+                caption = plainCaption,
+                formattedCaption = formattedCaption?.let {
+                    FormattedBody(format = MessageFormat.Html, body = it)
+                },
+                source = source,
+                info = ImageInfo(
+                    height = image.height?.takeIf { it > 0 }?.toULong(),
+                    width = image.width?.takeIf { it > 0 }?.toULong(),
+                    mimetype = image.mimeType?.takeIf { it.isNotBlank() } ?: "image/jpeg",
+                    size = null,
+                    thumbnailInfo = null,
+                    thumbnailSource = thumbnailSource,
+                    blurhash = image.blurhash?.takeIf { it.isNotBlank() },
+                    isAnimated = null
+                )
+            )
+        )
+        msgType.use { messageType ->
+            room.sendMessageTypeWithTransactionIdReturningEventId(
+                msgType = messageType,
+                transactionId = transactionId,
+                replyEventId = null
+            )
+        }
     }
 
     suspend fun sendTextEdit(

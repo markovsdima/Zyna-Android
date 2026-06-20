@@ -425,7 +425,12 @@ class AppViewModel(
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
         val state = _uiState.value
         val forwardTarget = state.chatForwardTarget
-        val text = forwardTarget?.body?.trim() ?: body.trim()
+        val isForwardingMedia = forwardTarget?.imageItems?.isNotEmpty() == true
+        val text = if (isForwardingMedia) {
+            forwardTarget?.body?.trim().orEmpty().ifBlank { "Photo" }
+        } else {
+            forwardTarget?.body?.trim() ?: body.trim()
+        }
         if (text.isEmpty() || state.isSendingChatMessage) {
             return false
         }
@@ -463,6 +468,43 @@ class AppViewModel(
                     if (didPrepare) {
                         outgoingOutboxService.kick(reason = "new-edit")
                     }
+                } else if (isForwardingMedia) {
+                    val mediaForwardTarget = forwardTarget ?: return@launch
+                    val items = mediaForwardTarget.imageItems
+                    val groupId = "forwarded-photo-group:${UUID.randomUUID()}"
+                    val shouldWriteMediaGroup = items.size > 1 ||
+                        mediaForwardTarget.captionPlacement != CaptionPlacement.BOTTOM ||
+                        mediaForwardTarget.layoutOverride != null
+                    items.forEachIndexed { index, item ->
+                        val envelopeId = "image:${UUID.randomUUID()}"
+                        val transactionId = matrixClientService.prepareTransactionId()
+                        val attributes = ZynaMessageAttributes(
+                            forwardedFrom = mediaForwardTarget.forwardedFrom,
+                            mediaGroup = if (shouldWriteMediaGroup) {
+                                MediaGroupInfo(
+                                    id = groupId,
+                                    index = index,
+                                    total = items.size,
+                                    captionMode = CaptionMode.REPLICATED,
+                                    captionPlacement = mediaForwardTarget.captionPlacement,
+                                    layoutOverride = mediaForwardTarget.layoutOverride
+                                        .takeIf { items.size > 1 }
+                                )
+                            } else {
+                                null
+                            }
+                        )
+                        localCacheRepository.createOutgoingForwardedImageEnvelope(
+                            userId = userId,
+                            roomId = route.roomId,
+                            envelopeId = envelopeId,
+                            transactionId = transactionId,
+                            image = item,
+                            caption = mediaForwardTarget.caption,
+                            zynaAttributes = attributes
+                        )
+                    }
+                    outgoingOutboxService.kick(reason = "new-forwarded-images")
                 } else {
                     localCacheRepository.createOutgoingTextEnvelope(
                         userId = userId,
@@ -624,7 +666,7 @@ class AppViewModel(
     }
 
     fun startForwardMessage(target: MatrixForwardTarget) {
-        if (target.body.isBlank()) {
+        if (target.body.isBlank() && target.imageItems.isEmpty()) {
             return
         }
         _uiState.update { current ->

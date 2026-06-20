@@ -951,7 +951,11 @@ private fun MessageReplyPreview.toMatrixReplyInfo(): MatrixReplyInfo {
 private fun MessageForwardPreview.toMatrixForwardTarget(): MatrixForwardTarget {
     return MatrixForwardTarget(
         body = body,
-        forwardedFrom = forwardedFrom
+        forwardedFrom = forwardedFrom,
+        caption = caption,
+        imageItems = imageItems,
+        captionPlacement = captionPlacement,
+        layoutOverride = layoutOverride
     )
 }
 
@@ -999,11 +1003,18 @@ private fun MatrixChatMessage.redactionTargetMessageId(): String? {
 }
 
 private fun MatrixChatMessage.canForwardMessage(): Boolean {
-    return eventId != null &&
-        outgoingEnvelopeId == null &&
-        contentType == MatrixMessageContentType.TEXT &&
-        deliveryState == MatrixMessageDeliveryState.SENT &&
-        body.isNotBlank()
+    if (
+        eventId == null ||
+        outgoingEnvelopeId != null ||
+        deliveryState != MatrixMessageDeliveryState.SENT
+    ) {
+        return false
+    }
+    return when (contentType) {
+        MatrixMessageContentType.TEXT -> body.isNotBlank()
+        MatrixMessageContentType.IMAGE -> imageInfo?.sourceJson?.isNotBlank() == true
+        else -> false
+    }
 }
 
 private fun MatrixMessageDeliveryState.toRenderDeliveryState(): RenderDeliveryState {

@@ -1,5 +1,6 @@
 package com.zyna.app.ui.chat.render
 
+import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.messaging.CaptionPlacement
@@ -46,7 +47,11 @@ internal data class MessageReplyPreview(
 
 internal data class MessageForwardPreview(
     val body: String,
-    val forwardedFrom: String?
+    val forwardedFrom: String?,
+    val caption: String? = null,
+    val imageItems: List<MatrixForwardImageItem> = emptyList(),
+    val captionPlacement: CaptionPlacement = CaptionPlacement.BOTTOM,
+    val layoutOverride: MediaGroupLayoutOverride? = null
 )
 
 internal sealed interface MessageContent {

@@ -3,6 +3,7 @@ package com.zyna.app.data.local
 import android.content.Context
 import androidx.room.withTransaction
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixMessageContentType
@@ -418,6 +419,9 @@ class LocalCacheRepository(
                     imageSizeBytes = null,
                     imageCaption = null,
                     zynaAttributesJson = null,
+                    imageSourceJson = null,
+                    imageThumbnailSourceJson = null,
+                    imageBlurhash = null,
                     imageUploadedJson = null,
                     imageUploadedAtMillis = null,
                     body = body,
@@ -471,6 +475,61 @@ class LocalCacheRepository(
                     imageSizeBytes = sizeBytes,
                     imageCaption = normalizedCaption,
                     zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
+                    imageSourceJson = null,
+                    imageThumbnailSourceJson = null,
+                    imageBlurhash = null,
+                    imageUploadedJson = null,
+                    imageUploadedAtMillis = null,
+                    body = normalizedCaption ?: "Photo",
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    failureMessage = null
+                )
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
+    suspend fun createOutgoingForwardedImageEnvelope(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        transactionId: String,
+        image: MatrixForwardImageItem,
+        caption: String?,
+        zynaAttributes: ZynaMessageAttributes
+    ) {
+        val now = System.currentTimeMillis()
+        val normalizedCaption = caption.normalizedMessageCaption()
+        database.withTransaction {
+            outgoingDao.upsertEnvelope(
+                OutgoingEnvelopeEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = envelopeId,
+                    kind = OutgoingEnvelopeKind.IMAGE.name,
+                    transportState = OutgoingTransportState.QUEUED.name,
+                    transactionId = transactionId,
+                    eventId = null,
+                    targetEventId = null,
+                    targetTransactionId = null,
+                    targetBody = null,
+                    targetContentType = null,
+                    replyEventId = null,
+                    replySenderId = null,
+                    replySenderDisplayName = null,
+                    replyBody = null,
+                    forwardedFrom = null,
+                    imageLocalPath = null,
+                    imageMimeType = image.mimeType,
+                    imageWidth = image.width,
+                    imageHeight = image.height,
+                    imageSizeBytes = null,
+                    imageCaption = normalizedCaption,
+                    zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
+                    imageSourceJson = image.sourceJson,
+                    imageThumbnailSourceJson = image.thumbnailSourceJson,
+                    imageBlurhash = image.blurhash,
                     imageUploadedJson = null,
                     imageUploadedAtMillis = null,
                     body = normalizedCaption ?: "Photo",
@@ -518,6 +577,9 @@ class LocalCacheRepository(
                     imageSizeBytes = null,
                     imageCaption = null,
                     zynaAttributesJson = null,
+                    imageSourceJson = null,
+                    imageThumbnailSourceJson = null,
+                    imageBlurhash = null,
                     imageUploadedJson = null,
                     imageUploadedAtMillis = null,
                     body = "",
@@ -1147,7 +1209,11 @@ class LocalCacheRepository(
                 canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
             )
             OutgoingEnvelopeKind.IMAGE.name -> {
-                val localPath = imageLocalPath?.takeIf { it.isNotBlank() } ?: return null
+                val localPath = imageLocalPath?.takeIf { it.isNotBlank() }
+                val sourceJson = imageSourceJson?.takeIf { it.isNotBlank() }
+                    ?: localPath?.let { "local:$it" }
+                    ?: return null
+                val zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson)
                 MatrixChatMessage(
                     id = "outgoing:$id",
                     eventId = eventId,
@@ -1158,16 +1224,17 @@ class LocalCacheRepository(
                     isOwn = true,
                     contentType = MatrixMessageContentType.IMAGE,
                     imageInfo = MatrixImageInfo(
-                        sourceJson = "local:$localPath",
-                        thumbnailSourceJson = null,
+                        sourceJson = sourceJson,
+                        thumbnailSourceJson = imageThumbnailSourceJson,
                         width = imageWidth,
                         height = imageHeight,
                         caption = imageCaption,
                         mimeType = imageMimeType,
-                        blurhash = null,
+                        blurhash = imageBlurhash,
                         localPath = localPath
                     ),
-                    zynaAttributes = ZynaHtmlCodec.decodeAttributesJson(zynaAttributesJson),
+                    forwardedFrom = zynaAttributes.forwardedFrom,
+                    zynaAttributes = zynaAttributes,
                     deliveryState = state.toOutgoingDeliveryState(),
                     outgoingEnvelopeId = id,
                     canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
@@ -1263,7 +1330,8 @@ class LocalCacheRepository(
         if (kind != OutgoingEnvelopeKind.IMAGE.name) return null
         val localPath = imageLocalPath?.takeIf { it.isNotBlank() }
         val uploadedImageJson = imageUploadedJson?.takeIf { it.isNotBlank() }
-        if (localPath == null && uploadedImageJson == null) return null
+        val sourceJson = imageSourceJson?.takeIf { it.isNotBlank() }
+        if (localPath == null && uploadedImageJson == null && sourceJson == null) return null
 
         return OutgoingImageEnvelope(
             userId = userId,
@@ -1279,6 +1347,9 @@ class LocalCacheRepository(
             sizeBytes = imageSizeBytes?.takeIf { it > 0L } ?: 0L,
             caption = imageCaption,
             zynaAttributesJson = zynaAttributesJson,
+            sourceJson = sourceJson,
+            thumbnailSourceJson = imageThumbnailSourceJson?.takeIf { it.isNotBlank() },
+            blurhash = imageBlurhash?.takeIf { it.isNotBlank() },
             uploadedImageJson = uploadedImageJson,
             createdAtMillis = createdAtMillis,
             failureMessage = failureMessage

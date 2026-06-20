@@ -382,7 +382,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             ) {
                 add(MessageContextMenuAction.REPLY)
             }
-            if (message.forwardableText() != null) {
+            if (message.canShowForwardAction()) {
                 add(MessageContextMenuAction.FORWARD)
             }
             if (message.editInfo != null) {
@@ -765,11 +765,11 @@ private fun MessageRenderModel.copyableText(): String? {
     return text?.takeIf { it.isNotBlank() }
 }
 
-private fun MessageRenderModel.forwardableText(): String? {
+private fun MessageRenderModel.canShowForwardAction(): Boolean {
     if (!canForward || eventId.isNullOrBlank() || outgoingEnvelopeId != null) {
-        return null
+        return false
     }
-    return copyableText()
+    return content !is MessageContent.Redacted
 }
 
 private fun lerp(from: Float, to: Float, progress: Float): Float {

@@ -46,6 +46,9 @@ data class OutgoingImageEnvelope(
     val sizeBytes: Long,
     val caption: String?,
     val zynaAttributesJson: String?,
+    val sourceJson: String?,
+    val thumbnailSourceJson: String?,
+    val blurhash: String?,
     val uploadedImageJson: String?,
     val createdAtMillis: Long,
     val failureMessage: String?

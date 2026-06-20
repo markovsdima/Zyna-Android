@@ -6,6 +6,7 @@ import android.util.Log
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixClientState
+import com.zyna.app.data.matrix.MatrixForwardImageItem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -286,16 +287,26 @@ class OutgoingOutboxService(
                 roomId = candidate.roomId,
                 envelopeId = candidate.id
             )
-            val uploadedImageJson = candidate.uploadedImageJson
-                ?: uploadImageAndCheckpoint(candidate)
-                ?: return
-            val eventId = matrixClientService.sendUploadedImageMessage(
-                roomId = candidate.roomId,
-                uploadedImageJson = uploadedImageJson,
-                caption = candidate.caption,
-                transactionId = candidate.transactionId,
-                zynaAttributesJson = candidate.zynaAttributesJson
-            )
+            val eventId = if (candidate.sourceJson != null) {
+                matrixClientService.sendForwardedImageMessage(
+                    roomId = candidate.roomId,
+                    image = candidate.toForwardImageItem(),
+                    caption = candidate.caption,
+                    transactionId = candidate.transactionId,
+                    zynaAttributesJson = candidate.zynaAttributesJson
+                )
+            } else {
+                val uploadedImageJson = candidate.uploadedImageJson
+                    ?: uploadImageAndCheckpoint(candidate)
+                    ?: return
+                matrixClientService.sendUploadedImageMessage(
+                    roomId = candidate.roomId,
+                    uploadedImageJson = uploadedImageJson,
+                    caption = candidate.caption,
+                    transactionId = candidate.transactionId,
+                    zynaAttributesJson = candidate.zynaAttributesJson
+                )
+            }
             retryBackoff.clear(candidate.id)
             localCacheRepository.markOutgoingDispatchAccepted(
                 userId = candidate.userId,
@@ -311,6 +322,18 @@ class OutgoingOutboxService(
         } finally {
             inFlight.end(candidate.id)
         }
+    }
+
+    private fun OutgoingImageEnvelope.toForwardImageItem(): MatrixForwardImageItem {
+        return MatrixForwardImageItem(
+            sourceJson = sourceJson ?: error("Forwarded image source is not available"),
+            thumbnailSourceJson = thumbnailSourceJson,
+            width = width,
+            height = height,
+            caption = caption,
+            mimeType = mimeType,
+            blurhash = blurhash
+        )
     }
 
     private suspend fun uploadImageAndCheckpoint(candidate: OutgoingImageEnvelope): String? {

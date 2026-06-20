@@ -29,6 +29,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
@@ -1319,15 +1320,50 @@ class GlassChatLayout @JvmOverloads constructor(
         if (!canForward || content is MessageContent.Redacted || outgoingEnvelopeId != null) {
             return null
         }
-        val body = when (val currentContent = content) {
-            is MessageContent.Text -> currentContent.body
-            is MessageContent.Image -> return null
-            is MessageContent.PhotoGroup -> return null
+        return when (val currentContent = content) {
+            is MessageContent.Text -> {
+                val body = currentContent.body.takeIf { it.isNotBlank() } ?: return null
+                MessageForwardPreview(
+                    body = body,
+                    forwardedFrom = senderDisplayName?.takeIf { it.isNotBlank() }
+                )
+            }
+            is MessageContent.Image -> {
+                val caption = currentContent.caption.normalizedMessageCaption()
+                MessageForwardPreview(
+                    body = caption ?: "Photo",
+                    forwardedFrom = senderDisplayName?.takeIf { it.isNotBlank() },
+                    caption = caption,
+                    imageItems = listOf(currentContent.imageInfo.toForwardImageItem()),
+                    captionPlacement = currentContent.captionPlacement
+                )
+            }
+            is MessageContent.PhotoGroup -> {
+                val caption = currentContent.caption.normalizedMessageCaption()
+                MessageForwardPreview(
+                    body = caption ?: "Photo group",
+                    forwardedFrom = senderDisplayName?.takeIf { it.isNotBlank() },
+                    caption = caption,
+                    imageItems = currentContent.items.map { item ->
+                        item.imageInfo.toForwardImageItem()
+                    },
+                    captionPlacement = currentContent.captionPlacement,
+                    layoutOverride = currentContent.layoutOverride
+                )
+            }
             MessageContent.Redacted -> return null
-        }.takeIf { it.isNotBlank() } ?: return null
-        return MessageForwardPreview(
-            body = body,
-            forwardedFrom = senderDisplayName?.takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun com.zyna.app.data.matrix.MatrixImageInfo.toForwardImageItem(): MatrixForwardImageItem {
+        return MatrixForwardImageItem(
+            sourceJson = sourceJson,
+            thumbnailSourceJson = thumbnailSourceJson,
+            width = width,
+            height = height,
+            caption = caption.normalizedMessageCaption(),
+            mimeType = mimeType,
+            blurhash = blurhash
         )
     }
 

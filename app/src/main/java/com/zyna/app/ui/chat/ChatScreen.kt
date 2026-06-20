@@ -1,5 +1,6 @@
 package com.zyna.app.ui.chat
 
+import android.graphics.RectF
 import android.util.Log
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -35,6 +36,7 @@ import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
+import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
@@ -45,6 +47,7 @@ import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
+import com.zyna.app.ui.chat.render.PhotoGroupLayout
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
@@ -60,6 +63,7 @@ import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -305,6 +309,7 @@ private fun ChatMessageList(
                 onReplyHeaderClicked = onReplyHeaderClicked,
                 onPhotoViewerRequested = onPhotoViewerRequested
             )
+            chatLayout.recyclerView.addOnScrollListener(MediaPrefetchScrollListener)
             chatLayout.onLoadOlderMessages = onLoadOlder
             chatLayout.onLoadNewerMessages = onLoadNewer
             chatLayout.onScrollToLiveEdge = onJumpToLiveEdge
@@ -590,6 +595,9 @@ private fun ChatMessageList(
                 }
                 chatLayout.invalidateGlassContent()
                 chatLayout.prefetchOlderMessagesIfNeeded()
+                recyclerView.post {
+                    recyclerView.prefetchMediaAroundVisibleWindow()
+                }
                 chatLayout.scheduleVisibleReadReceiptCandidateEvaluation(
                     delayMillis = READ_RECEIPT_CONTENT_UPDATE_DELAY_MS
                 )
@@ -734,6 +742,31 @@ private fun RecyclerView.runAfterNextPreDraw(action: () -> Unit) {
     invalidate()
 }
 
+private object MediaPrefetchScrollListener : RecyclerView.OnScrollListener() {
+    override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+        recyclerView.prefetchMediaAroundVisibleWindow()
+    }
+
+    override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+        if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+            recyclerView.prefetchMediaAroundVisibleWindow()
+        }
+    }
+}
+
+private fun RecyclerView.prefetchMediaAroundVisibleWindow() {
+    val adapter = adapter as? ChatMessageAdapter ?: return
+    val layoutManager = layoutManager as? LinearLayoutManager ?: return
+    val firstVisiblePosition = layoutManager.findFirstVisibleItemPosition()
+    val lastVisiblePosition = layoutManager.findLastVisibleItemPosition()
+    adapter.prefetchMediaAround(
+        firstVisiblePosition = firstVisiblePosition,
+        lastVisiblePosition = lastVisiblePosition,
+        viewportWidthPx = (width - paddingLeft - paddingRight).coerceAtLeast(1),
+        density = resources.displayMetrics.density
+    )
+}
+
 private fun RecyclerView.findViewportAnchor(adapter: ChatMessageAdapter): ViewportAnchor? {
     val layoutManager = layoutManager ?: return null
     val viewportTop = paddingTop
@@ -767,6 +800,30 @@ private fun RecyclerView.findViewportAnchor(adapter: ChatMessageAdapter): Viewpo
     )
 }
 
+private data class MediaPrefetchTarget(
+    val widthPx: Int,
+    val heightPx: Int
+)
+
+private data class MediaPrefetchRequest(
+    val imageInfo: MatrixImageInfo,
+    val targetWidthPx: Int,
+    val targetHeightPx: Int
+)
+
+private fun mediaPrefetchTarget(viewportWidthPx: Int, density: Float): MediaPrefetchTarget {
+    val horizontalChrome = MEDIA_PREFETCH_HORIZONTAL_CHROME_DP.dpToPx(density)
+    val maxMediaWidth = MEDIA_PREFETCH_MAX_WIDTH_DP.dpToPx(density)
+    val maxMediaHeight = MEDIA_PREFETCH_MAX_HEIGHT_DP.dpToPx(density)
+    val width = (viewportWidthPx - horizontalChrome)
+        .coerceAtMost(maxMediaWidth)
+        .coerceAtLeast(1)
+    return MediaPrefetchTarget(
+        widthPx = width,
+        heightPx = maxMediaHeight.coerceAtLeast(1)
+    )
+}
+
 private fun RecyclerView.jumpTargetScrollOffset(): Int {
     val availableHeight = (height - paddingTop - paddingBottom).coerceAtLeast(0)
     return paddingTop + (availableHeight * JUMP_TARGET_VIEWPORT_FRACTION).toInt()
@@ -787,13 +844,23 @@ private fun chatGlassPalette(): GlassPalette {
 
 private class ChatMessageAdapter(
     var messageTheme: MessageRenderTheme,
-    var matrixMediaLoader: MatrixMediaLoader?,
+    matrixMediaLoader: MatrixMediaLoader?,
     var onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
     var onReplyHeaderClicked: (String) -> Unit,
     var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
+    private var lastMediaPrefetchWindowSignature: String? = null
+    private var lastMediaPrefetchSignature: String? = null
+    var matrixMediaLoader: MatrixMediaLoader? = matrixMediaLoader
+        set(value) {
+            if (field !== value) {
+                resetMediaPrefetchSignature()
+            }
+            field = value
+        }
+
     init {
         setHasStableIds(true)
     }
@@ -816,6 +883,68 @@ private class ChatMessageAdapter(
             onReplyHeaderClicked = onReplyHeaderClicked,
             onPhotoViewerRequested = onPhotoViewerRequested
         )
+    }
+
+    override fun onCurrentListChanged(
+        previousList: List<MatrixChatMessage>,
+        currentList: List<MatrixChatMessage>
+    ) {
+        resetMediaPrefetchSignature()
+    }
+
+    fun prefetchMediaAround(
+        firstVisiblePosition: Int,
+        lastVisiblePosition: Int,
+        viewportWidthPx: Int,
+        density: Float
+    ) {
+        val loader = matrixMediaLoader ?: return
+        if (
+            currentList.isEmpty() ||
+            firstVisiblePosition == RecyclerView.NO_POSITION ||
+            lastVisiblePosition == RecyclerView.NO_POSITION
+        ) {
+            return
+        }
+
+        val start = (min(firstVisiblePosition, lastVisiblePosition) - MEDIA_PREFETCH_ITEM_MARGIN)
+            .coerceAtLeast(0)
+        val end = (max(firstVisiblePosition, lastVisiblePosition) + MEDIA_PREFETCH_ITEM_MARGIN)
+            .coerceAtMost(currentList.lastIndex)
+        if (start > end) {
+            return
+        }
+
+        val target = mediaPrefetchTarget(viewportWidthPx, density)
+        val windowSignature = "$start:$end:${target.widthPx}x${target.heightPx}"
+        if (windowSignature == lastMediaPrefetchWindowSignature) {
+            return
+        }
+
+        val requests = (start..end)
+            .flatMap { position ->
+                currentList.getOrNull(position)
+                    ?.prefetchImageRequests(target = target, density = density)
+                    .orEmpty()
+            }
+        val signature = "$windowSignature:${requests.mediaSignature()}"
+        lastMediaPrefetchWindowSignature = windowSignature
+        if (signature == lastMediaPrefetchSignature) {
+            return
+        }
+        lastMediaPrefetchSignature = signature
+        requests.forEach { request ->
+            loader.prefetchImage(
+                imageInfo = request.imageInfo,
+                targetWidthPx = request.targetWidthPx,
+                targetHeightPx = request.targetHeightPx
+            )
+        }
+    }
+
+    private fun resetMediaPrefetchSignature() {
+        lastMediaPrefetchWindowSignature = null
+        lastMediaPrefetchSignature = null
     }
 }
 
@@ -904,6 +1033,113 @@ private fun MatrixChatMessage.renderContent(): MessageContent {
             ?: MessageContent.Text(body.ifBlank { "Photo" })
         else -> MessageContent.Text(body)
     }
+}
+
+private fun MatrixChatMessage.prefetchImageRequests(
+    target: MediaPrefetchTarget,
+    density: Float
+): List<MediaPrefetchRequest> {
+    val presentation = mediaGroupPresentation
+    if (presentation?.rendersCompositeBubble == true && presentation.items.isNotEmpty()) {
+        val visibleItems = presentation.items
+            .take(PhotoGroupLayout.visibleItemCount(presentation.items.size))
+        if (visibleItems.isEmpty()) {
+            return emptyList()
+        }
+
+        val mediaWidth = target.widthPx.coerceAtLeast(1)
+        val mediaHeight = photoGroupPrefetchHeight(
+            width = mediaWidth,
+            itemCount = presentation.items.size,
+            primaryAspectRatio = visibleItems.firstOrNull()?.imageInfo?.widthToHeightAspectRatio(),
+            density = density
+        )
+        val frames = PhotoGroupLayout.frames(
+            bounds = RectF(0f, 0f, mediaWidth.toFloat(), mediaHeight.toFloat()),
+            itemCount = presentation.items.size,
+            layoutOverride = presentation.layoutOverride,
+            spacingPx = MEDIA_PREFETCH_TILE_SPACING_DP.dpToPx(density)
+        )
+
+        return visibleItems.mapIndexedNotNull { index, item ->
+            val frame = frames.getOrNull(index) ?: return@mapIndexedNotNull null
+            MediaPrefetchRequest(
+                imageInfo = item.imageInfo,
+                targetWidthPx = frame.width().roundToInt().coerceAtLeast(1),
+                targetHeightPx = frame.height().roundToInt().coerceAtLeast(1)
+            )
+        }
+    }
+
+    return if (contentType == MatrixMessageContentType.IMAGE) {
+        imageInfo?.let { listOf(it.singleImagePrefetchRequest(target, density)) }.orEmpty()
+    } else {
+        emptyList()
+    }
+}
+
+private fun MatrixImageInfo.singleImagePrefetchRequest(
+    target: MediaPrefetchTarget,
+    density: Float
+): MediaPrefetchRequest {
+    val width = target.widthPx.coerceAtLeast(1)
+    val minHeight = MEDIA_PREFETCH_MIN_HEIGHT_DP.dpToPx(density)
+    val height = (width * heightToWidthRatio())
+        .roundToInt()
+        .coerceIn(min(minHeight, target.heightPx), target.heightPx)
+    return MediaPrefetchRequest(
+        imageInfo = this,
+        targetWidthPx = width,
+        targetHeightPx = height.coerceAtLeast(1)
+    )
+}
+
+private fun photoGroupPrefetchHeight(
+    width: Int,
+    itemCount: Int,
+    primaryAspectRatio: Float?,
+    density: Float
+): Int {
+    val resolvedCount = max(1, itemCount)
+    val rawHeight = when (resolvedCount) {
+        1 -> if (primaryAspectRatio != null && primaryAspectRatio > 0f) {
+            width / primaryAspectRatio
+        } else {
+            width * 0.78f
+        }
+        2 -> width * 0.74f
+        3 -> width * 0.82f
+        else -> width.toFloat()
+    }
+    val minHeight = MEDIA_PREFETCH_MIN_HEIGHT_DP.dpToPx(density)
+    val maxHeight = MEDIA_PREFETCH_MAX_HEIGHT_DP.dpToPx(density)
+    return rawHeight.roundToInt().coerceIn(min(minHeight, maxHeight), maxHeight)
+}
+
+private fun List<MediaPrefetchRequest>.mediaSignature(): Int {
+    return fold(1) { hash, request ->
+        val imageHash = request.imageInfo.prefetchIdentity().hashCode()
+        var nextHash = 31 * hash + imageHash
+        nextHash = 31 * nextHash + request.targetWidthPx
+        nextHash = 31 * nextHash + request.targetHeightPx
+        nextHash
+    }
+}
+
+private fun MatrixImageInfo.prefetchIdentity(): String {
+    return localPath ?: thumbnailSourceJson ?: sourceJson
+}
+
+private fun MatrixImageInfo.widthToHeightAspectRatio(): Float? {
+    val width = width?.takeIf { it > 0 } ?: return null
+    val height = height?.takeIf { it > 0 } ?: return null
+    return width.toFloat() / height.toFloat()
+}
+
+private fun MatrixImageInfo.heightToWidthRatio(): Float {
+    val sourceWidth = width?.takeIf { it > 0 } ?: 4
+    val sourceHeight = height?.takeIf { it > 0 } ?: 3
+    return (sourceHeight.toFloat() / sourceWidth.toFloat()).coerceIn(0.45f, 2.1f)
 }
 
 private fun MatrixChatMessage.editPreviewOrNull(): MessageEditPreview? {
@@ -1056,8 +1292,18 @@ private const val LOCAL_JUMP_SCROLL_MAX_DELAY_MS = 1_400L
 private const val LOCAL_JUMP_HIGHLIGHT_DELAY_MS = 80L
 private const val READ_RECEIPT_VISIBILITY_THRESHOLD = 0.6f
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
+private const val MEDIA_PREFETCH_ITEM_MARGIN = 8
+private const val MEDIA_PREFETCH_HORIZONTAL_CHROME_DP = 96
+private const val MEDIA_PREFETCH_MAX_WIDTH_DP = 320
+private const val MEDIA_PREFETCH_MIN_HEIGHT_DP = 128
+private const val MEDIA_PREFETCH_MAX_HEIGHT_DP = 390
+private const val MEDIA_PREFETCH_TILE_SPACING_DP = 2
 private const val FNV_64_OFFSET_BASIS = -3750763034362895579L
 private const val FNV_64_PRIME = 1099511628211L
+
+private fun Int.dpToPx(density: Float): Int {
+    return (this * density).roundToInt()
+}
 
 private fun MatrixChatMessage.isReadReceiptCandidate(): Boolean {
     return !isOwn && eventId != null && contentType != MatrixMessageContentType.REDACTED

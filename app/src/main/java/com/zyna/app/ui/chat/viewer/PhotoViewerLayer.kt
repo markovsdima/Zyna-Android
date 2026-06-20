@@ -154,7 +154,7 @@ internal class PhotoViewerLayer(
         selectedIndex = request.selectedIndex.coerceIn(0, request.items.lastIndex.coerceAtLeast(0))
         pageBitmaps.clear()
         request.items.forEach { item ->
-            imageLoader.cachedImage(item.imageInfo)?.let { cached ->
+            cachedPreviewBitmap(item)?.let { cached ->
                 pageBitmaps[item.id] = cached
             }
         }
@@ -597,6 +597,14 @@ internal class PhotoViewerLayer(
             invalidate()
             return
         }
+        if (bitmapItemId != item.id || bitmap?.isRecycled != false) {
+            cachedPreviewBitmap(item)?.let { preview ->
+                bitmap = preview
+                bitmapItemId = item.id
+                pageBitmaps[item.id] = preview
+                invalidate()
+            }
+        }
         imageLoadHandle = imageLoader.loadImage(
             imageInfo = item.imageInfo,
             targetWidthPx = targetWidth,
@@ -617,7 +625,7 @@ internal class PhotoViewerLayer(
 
     private fun adoptCurrentBitmapFromCache() {
         val item = currentItem()
-        val cached = pageBitmaps[item.id] ?: imageLoader.cachedImage(item.imageInfo)
+        val cached = pageBitmaps[item.id] ?: cachedPreviewBitmap(item)
         bitmap = cached
         bitmapItemId = item.id.takeIf { cached != null }
         if (cached != null) {
@@ -738,9 +746,30 @@ internal class PhotoViewerLayer(
             bitmap?.takeIf { !it.isRecycled }?.let { return it }
         }
         pageBitmaps[item.id]?.takeIf { !it.isRecycled }?.let { return it }
-        return imageLoader.cachedImage(item.imageInfo)
+        return cachedPreviewBitmap(item)
             ?.takeIf { !it.isRecycled }
             ?.also { pageBitmaps[item.id] = it }
+    }
+
+    private fun cachedPreviewBitmap(item: PhotoViewerItem): Bitmap? {
+        val request = openRequest
+        val targetWidth = targetRect
+            .takeIf { !it.isEmpty }
+            ?.width()
+            ?.roundToInt()
+            ?: request?.sourceBoundsInScreen?.width()?.roundToInt()
+            ?: width
+        val targetHeight = targetRect
+            .takeIf { !it.isEmpty }
+            ?.height()
+            ?.roundToInt()
+            ?: request?.sourceBoundsInScreen?.height()?.roundToInt()
+            ?: height
+        return imageLoader.cachedPreviewImage(
+            imageInfo = item.imageInfo,
+            targetWidthPx = targetWidth.coerceAtLeast(1),
+            targetHeightPx = targetHeight.coerceAtLeast(1)
+        )?.takeIf { !it.isRecycled }
     }
 
     private fun currentItem(): PhotoViewerItem {

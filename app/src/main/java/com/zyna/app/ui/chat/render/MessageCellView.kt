@@ -17,6 +17,7 @@ import android.util.Log
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixMediaGroupItem
+import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.ui.chat.viewer.PhotoViewerItem
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
@@ -66,6 +67,7 @@ internal class MessageCellView(
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
     private var imageLoadHandles: List<AutoCloseable> = emptyList()
+    private var imageLoadRequests: List<ImageLoadRequest> = emptyList()
     private val contextPhotoSelectionBounds = RectF()
     private val contextPhotoSelectionFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0x1AFFFFFF
@@ -104,8 +106,6 @@ internal class MessageCellView(
     private val horizontalChrome = 96.dpToPx(density)
     private val minTextMaxWidth = 180.dpToPx(density)
     private val maxTextMaxWidth = 520.dpToPx(density)
-    private val imageLoadTargetWidth = 320.dpToPx(density)
-    private val imageLoadTargetHeight = 390.dpToPx(density)
 
     init {
         isClickable = true
@@ -168,6 +168,7 @@ internal class MessageCellView(
         val nextLayout = buildLayout(width)
         layout = nextLayout
         setMeasuredDimension(width, nextLayout.height)
+        renderModel?.let { model -> startImageLoadIfNeeded(model) }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -746,18 +747,7 @@ internal class MessageCellView(
             is MessageContent.PhotoGroup -> {
                 val groupLayout = currentLayout.contentLayout as? PhotoGroupMessageLayout
                     ?: return emptyList()
-                val mediaBounds = RectF(
-                    currentLayout.contentLeft.toFloat(),
-                    (currentLayout.contentTop + groupLayout.mediaY).toFloat(),
-                    (currentLayout.contentLeft + groupLayout.mediaWidth).toFloat(),
-                    (currentLayout.contentTop + groupLayout.mediaY + groupLayout.mediaHeight).toFloat()
-                )
-                val frames = PhotoGroupLayout.frames(
-                    bounds = mediaBounds,
-                    itemCount = groupLayout.items.size,
-                    layoutOverride = groupLayout.layoutOverride,
-                    spacingPx = PHOTO_GROUP_SPACING_DP.dpToPx(density)
-                )
+                val frames = groupLayout.mediaFramesInView(currentLayout)
                 val visibleCount = PhotoGroupLayout.visibleItemCount(groupLayout.items.size)
                 val overflowFrame = frames.getOrNull(visibleCount - 1)
                 groupLayout.items.mapIndexedNotNull { index, groupItem ->
@@ -786,18 +776,7 @@ internal class MessageCellView(
     ): PhotoGroupContextSelection? {
         val content = model.content as? MessageContent.PhotoGroup ?: return null
         val groupLayout = currentLayout.contentLayout as? PhotoGroupMessageLayout ?: return null
-        val mediaBounds = RectF(
-            currentLayout.contentLeft.toFloat(),
-            (currentLayout.contentTop + groupLayout.mediaY).toFloat(),
-            (currentLayout.contentLeft + groupLayout.mediaWidth).toFloat(),
-            (currentLayout.contentTop + groupLayout.mediaY + groupLayout.mediaHeight).toFloat()
-        )
-        val frames = PhotoGroupLayout.frames(
-            bounds = mediaBounds,
-            itemCount = groupLayout.items.size,
-            layoutOverride = groupLayout.layoutOverride,
-            spacingPx = PHOTO_GROUP_SPACING_DP.dpToPx(density)
-        )
+        val frames = groupLayout.mediaFramesInView(currentLayout)
         val hitIndex = frames.indexOfFirst { frame -> frame.contains(x, y) }
             .takeIf { it >= 0 }
             ?: return null
@@ -828,21 +807,29 @@ internal class MessageCellView(
 
     private fun startImageLoadIfNeeded(model: MessageRenderModel) {
         val loader = imageLoader ?: return
-        val boundMessageId = model.id
-        val imageInfos = when (val content = model.content) {
-            is MessageContent.Image -> listOf(content.imageInfo)
-            is MessageContent.PhotoGroup -> content.items
-                .take(PhotoGroupLayout.visibleItemCount(content.items.size))
-                .map { it.imageInfo }
-            else -> emptyList()
+        val requests = imageLoadRequestsFor(model, layout)
+        if (requests == imageLoadRequests) {
+            return
         }
-        imageLoadHandles = imageInfos
-            .filter { loader.cachedImage(it) == null }
-            .map { imageInfo ->
+        closeImageLoadHandles()
+        imageLoadRequests = requests
+        if (requests.isEmpty()) {
+            return
+        }
+        val boundMessageId = model.id
+        val missingRequests = requests.filter {
+                !loader.hasCellImageCovering(
+                    imageInfo = it.imageInfo,
+                    targetWidthPx = it.targetWidthPx,
+                    targetHeightPx = it.targetHeightPx
+                )
+            }
+        imageLoadHandles = missingRequests
+            .map { request ->
                 loader.loadImage(
-                    imageInfo = imageInfo,
-                    targetWidthPx = imageLoadTargetWidth,
-                    targetHeightPx = imageLoadTargetHeight
+                    imageInfo = request.imageInfo,
+                    targetWidthPx = request.targetWidthPx,
+                    targetHeightPx = request.targetHeightPx
                 ) {
                     if (renderModel?.id == boundMessageId) {
                         invalidate()
@@ -854,6 +841,44 @@ internal class MessageCellView(
     private fun closeImageLoadHandles() {
         imageLoadHandles.forEach { it.close() }
         imageLoadHandles = emptyList()
+        imageLoadRequests = emptyList()
+    }
+
+    private fun imageLoadRequestsFor(
+        model: MessageRenderModel,
+        currentLayout: MessageCellLayout?
+    ): List<ImageLoadRequest> {
+        currentLayout ?: return emptyList()
+        return when (val content = model.content) {
+            is MessageContent.Image -> {
+                val imageLayout = currentLayout.contentLayout as? ImageMessageLayout
+                    ?: return emptyList()
+                listOf(
+                    ImageLoadRequest(
+                        imageInfo = content.imageInfo,
+                        targetWidthPx = imageLayout.imageWidth,
+                        targetHeightPx = imageLayout.imageHeight
+                    )
+                )
+            }
+            is MessageContent.PhotoGroup -> {
+                val groupLayout = currentLayout.contentLayout as? PhotoGroupMessageLayout
+                    ?: return emptyList()
+                val visibleCount = PhotoGroupLayout.visibleItemCount(groupLayout.items.size)
+                groupLayout.items
+                    .take(visibleCount)
+                    .mapIndexedNotNull { index, item ->
+                        val frame = groupLayout.mediaFrames.getOrNull(index)
+                            ?: return@mapIndexedNotNull null
+                        ImageLoadRequest(
+                            imageInfo = item.imageInfo,
+                            targetWidthPx = frame.width().roundToInt().coerceAtLeast(1),
+                            targetHeightPx = frame.height().roundToInt().coerceAtLeast(1)
+                        )
+                    }
+            }
+            else -> emptyList()
+        }
     }
 
     private fun maxBubbleWidth(width: Int): Int {
@@ -895,6 +920,12 @@ private data class PhotoHitTarget(
     val boundsInView: RectF
 )
 
+private data class ImageLoadRequest(
+    val imageInfo: MatrixImageInfo,
+    val targetWidthPx: Int,
+    val targetHeightPx: Int
+)
+
 internal data class MessageContextMenuRequest(
     val cell: MessageCellView,
     val message: MessageRenderModel,
@@ -926,7 +957,14 @@ private const val BUBBLE_HIGHLIGHT_RAMP_UP_FRACTION = 0.16f
 private const val BUBBLE_HIGHLIGHT_HOLD_FRACTION = 0.42f
 private const val CONTEXT_MENU_BUBBLE_LOG_TAG = "ZynaBubbleLog"
 private const val PHOTO_SOURCE_CORNER_RADIUS_DP = 10
-private const val PHOTO_GROUP_SPACING_DP = 2
+
+private fun PhotoGroupMessageLayout.mediaFramesInView(layout: MessageCellLayout): List<RectF> {
+    return mediaFrames.map { frame ->
+        RectF(frame).apply {
+            offset(layout.contentLeft.toFloat(), layout.contentTop.toFloat())
+        }
+    }
+}
 
 private fun MessageContent.debugSummary(): String {
     return when (this) {

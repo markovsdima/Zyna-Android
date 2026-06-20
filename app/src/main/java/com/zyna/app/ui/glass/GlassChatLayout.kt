@@ -714,14 +714,18 @@ class GlassChatLayout @JvmOverloads constructor(
     override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
         val width = right - left
         val height = bottom - top
-        recyclerView.layout(0, 0, width, height)
-        vulkanOverlay.layout(0, 0, width, height)
-        layoutTeleportSnapshot()
 
         val bottomInset = if (imeBottomInset > 0) imeBottomInset else navBottomInset
         val bottomMargin = 6.dpToPx(density)
         val inputTop = (height - bottomInset - bottomMargin - inputBar.measuredHeight)
             .coerceAtLeast(0)
+        val contentBottom = layoutComposerError(inputTop, width)
+        updateRecyclerPadding(contentBottom)
+
+        recyclerView.layout(0, 0, width, height)
+        vulkanOverlay.layout(0, 0, width, height)
+        layoutTeleportSnapshot()
+
         inputBar.layout(0, inputTop, width, inputTop + inputBar.measuredHeight)
         vulkanOverlay.setInputBarBounds(
             inputBar.left,
@@ -729,7 +733,6 @@ class GlassChatLayout @JvmOverloads constructor(
             inputBar.right,
             inputBar.bottom
         )
-        val contentBottom = layoutComposerError(inputTop, width)
         layoutScrollToLiveButton(contentBottom, width)
 
         val emptyWidth = emptyView.measuredWidth
@@ -739,7 +742,6 @@ class GlassChatLayout @JvmOverloads constructor(
         val emptyTop = ((availableBottom - emptyHeight) / 2).coerceAtLeast(0)
         emptyView.layout(emptyLeft, emptyTop, emptyLeft + emptyWidth, emptyTop + emptyHeight)
 
-        updateRecyclerPadding(contentBottom)
         contextMenuLayer.layout(0, 0, width, height)
         glassController.invalidateRegions()
         updateVulkanGlassRects()

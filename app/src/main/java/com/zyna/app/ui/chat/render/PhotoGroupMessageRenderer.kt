@@ -43,7 +43,6 @@ internal class PhotoGroupMessageRenderer(
     private val tileRadii = FloatArray(8)
     private val srcRect = Rect()
     private val dstRect = RectF()
-    private val mediaBounds = RectF()
 
     private val maxMediaWidth = 320.groupDpToPx(density)
     private val maxMediaHeight = 390.groupDpToPx(density)
@@ -144,6 +143,17 @@ internal class PhotoGroupMessageRenderer(
             paint = timePaint,
             width = mediaWidth
         )
+        val mediaFrames = PhotoGroupLayout.frames(
+            bounds = RectF(
+                0f,
+                mediaY.toFloat(),
+                mediaWidth.toFloat(),
+                (mediaY + mediaHeight).toFloat()
+            ),
+            itemCount = content.items.size,
+            layoutOverride = content.layoutOverride,
+            spacingPx = mediaSpacing
+        )
 
         return PhotoGroupMessageLayout(
             width = mediaWidth,
@@ -165,6 +175,7 @@ internal class PhotoGroupMessageRenderer(
             mediaY = mediaY,
             mediaWidth = mediaWidth,
             mediaHeight = mediaHeight,
+            mediaFrames = mediaFrames,
             hasHeader = forwardedLayout != null || replyLayout != null,
             timeLayout = timeLayout
         )
@@ -203,21 +214,9 @@ internal class PhotoGroupMessageRenderer(
     }
 
     private fun drawMedia(canvas: Canvas, layout: PhotoGroupMessageLayout) {
-        mediaBounds.set(
-            0f,
-            layout.mediaY.toFloat(),
-            layout.mediaWidth.toFloat(),
-            (layout.mediaY + layout.mediaHeight).toFloat()
-        )
-        val frames = PhotoGroupLayout.frames(
-            bounds = mediaBounds,
-            itemCount = layout.items.size,
-            layoutOverride = layout.layoutOverride,
-            spacingPx = mediaSpacing
-        )
         val visibleCount = PhotoGroupLayout.visibleItemCount(layout.items.size)
         for (index in 0 until visibleCount) {
-            val frame = frames.getOrNull(index) ?: continue
+            val frame = layout.mediaFrames.getOrNull(index) ?: continue
             val item = layout.items.getOrNull(index) ?: continue
             val roundedCorners = PhotoGroupLayout.roundedCorners(
                 index = index,
@@ -229,7 +228,7 @@ internal class PhotoGroupMessageRenderer(
         }
 
         val overflowCount = layout.items.size - visibleCount
-        val overflowFrame = frames.lastOrNull()
+        val overflowFrame = layout.mediaFrames.lastOrNull()
         if (overflowCount > 0 && overflowFrame != null) {
             canvas.drawRoundRect(
                 overflowFrame,
@@ -476,6 +475,7 @@ internal data class PhotoGroupMessageLayout(
     val mediaY: Int,
     val mediaWidth: Int,
     val mediaHeight: Int,
+    val mediaFrames: List<RectF>,
     val hasHeader: Boolean,
     val timeLayout: StaticLayout
 ) : MessageContentLayout

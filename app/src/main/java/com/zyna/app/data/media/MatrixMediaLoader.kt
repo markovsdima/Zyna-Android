@@ -3,18 +3,22 @@ package com.zyna.app.data.media
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Process
 import android.util.Log
 import android.util.LruCache
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixImageInfo
 import java.io.File
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -38,6 +42,18 @@ class MatrixMediaLoader(
     private val representativeCellKeys = mutableMapOf<String, String>()
     private val decodeSemaphore = Semaphore(MAX_PARALLEL_MEDIA_DECODES)
     private val prefetchDecodeSemaphore = Semaphore(MAX_PARALLEL_MEDIA_PREFETCH_DECODES)
+    private val decodeThreadCounter = AtomicInteger(0)
+    private val decodeDispatcher = Executors.newFixedThreadPool(MAX_PARALLEL_MEDIA_DECODES) { runnable ->
+        Thread(
+            {
+                runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) }
+                runnable.run()
+            },
+            "ZynaMediaDecode-${decodeThreadCounter.incrementAndGet()}"
+        ).apply {
+            isDaemon = true
+        }
+    }.asCoroutineDispatcher()
     private val memoryCache = object : LruCache<String, Bitmap>(memoryCacheSizeBytes()) {
         override fun sizeOf(key: String, value: Bitmap): Int {
             return value.byteCount
@@ -196,6 +212,7 @@ class MatrixMediaLoader(
 
     fun shutdown() {
         scope.cancel()
+        decodeDispatcher.close()
     }
 
     private fun deferredFor(
@@ -472,10 +489,18 @@ class MatrixMediaLoader(
     private suspend fun <T> withDecodePermit(isPrefetch: Boolean, block: () -> T): T {
         return if (isPrefetch) {
             prefetchDecodeSemaphore.withPermit {
-                decodeSemaphore.withPermit(block)
+                decodeSemaphore.withPermit {
+                    withContext(decodeDispatcher) {
+                        block()
+                    }
+                }
             }
         } else {
-            decodeSemaphore.withPermit(block)
+            decodeSemaphore.withPermit {
+                withContext(decodeDispatcher) {
+                    block()
+                }
+            }
         }
     }
 

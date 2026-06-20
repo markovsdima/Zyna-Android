@@ -18,6 +18,7 @@ import android.view.Surface
 import android.view.View
 import androidx.annotation.RequiresApi
 import java.io.Closeable
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * GPU-backed chat backdrop producer for the future Vulkan glass path.
@@ -286,14 +287,23 @@ internal class HardwareBufferChatCapture(
         val acquireNanos: Long,
         val hardwareBufferNanos: Long
     ) : Closeable {
+        private val closed = AtomicBoolean(false)
+
         override fun close() {
-            image.close()
+            if (!closed.compareAndSet(false, true)) {
+                return
+            }
+            try {
+                hardwareBuffer.close()
+            } finally {
+                image.close()
+            }
         }
     }
 
     private companion object {
         const val TAG = "ZynaHwBufferCapture"
-        const val MAX_IMAGES = 3
+        const val MAX_IMAGES = 4
         const val ENABLE_HARDWARE_BUFFER_CAPTURE_VERBOSE_TIMING = false
         val BUFFER_USAGE: Long =
             HardwareBuffer.USAGE_GPU_COLOR_OUTPUT or HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE

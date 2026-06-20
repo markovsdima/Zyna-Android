@@ -38,6 +38,7 @@ fun ZynaApp(
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
+    onRedactMessages: (List<String>) -> Unit,
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
     onVisibleReadReceiptCandidate: (
         roomId: String,
@@ -112,6 +113,7 @@ fun ZynaApp(
             onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
             onRedactMessage = onRedactMessage,
+            onRedactMessages = onRedactMessages,
             onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
             onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
             onJumpTargetConsumed = onChatJumpTargetConsumed,

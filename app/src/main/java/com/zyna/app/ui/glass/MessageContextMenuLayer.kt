@@ -26,11 +26,14 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.matrix.MatrixMediaGroupItem
+import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.PaintSplashTarget
+import com.zyna.app.ui.chat.render.PhotoGroupContextSelection
 import com.zyna.app.ui.chat.render.RenderDeliveryState
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -94,7 +97,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
 
     var onDismissRequested: () -> Unit = {}
     var onActionSelected: ((
-        message: MessageRenderModel,
+        request: MessageContextMenuRequest,
         action: MessageContextMenuAction
     ) -> Unit)? = null
 
@@ -221,6 +224,33 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     fun captureSelectedPaintSplashTarget(root: View): PaintSplashTarget? {
         val request = selectedRequest ?: return null
         return request.cell.capturePaintSplashTarget(root)
+    }
+
+    fun captureSelectedPhotoPaintSplashTarget(root: View): PaintSplashTarget? {
+        val request = selectedRequest ?: return null
+        val selection = request.photoGroupSelection
+            ?.takeIf { it.canDeletePhoto() }
+            ?: return null
+        return request.cell.capturePhotoGroupSelectionPaintSplashTarget(root, selection)
+    }
+
+    fun selectedPhotoRedactionMessageId(): String? {
+        return selectedRequest
+            ?.photoGroupSelection
+            ?.takeIf { it.canDeletePhoto() }
+            ?.item
+            ?.messageId
+    }
+
+    fun selectedPhotoGroupRedactionMessageIds(): List<String> {
+        val message = selectedRequest?.message ?: return emptyList()
+        val content = message.content as? MessageContent.PhotoGroup ?: return emptyList()
+        if (message.redactionTargetMessageId == null) {
+            return emptyList()
+        }
+        return content.items
+            .filter { it.canRedactGroupItem() }
+            .map { it.messageId }
     }
 
     internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
@@ -372,8 +402,18 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         drawSelectedCell(canvas)
     }
 
-    private fun buildMenu(message: MessageRenderModel) {
+    private fun buildMenu(request: MessageContextMenuRequest) {
         menuContainer.removeAllViews()
+        val message = request.message
+        val photoGroupContent = message.content as? MessageContent.PhotoGroup
+        val redactableGroupItems = if (message.redactionTargetMessageId != null) {
+            photoGroupContent
+                ?.items
+                ?.filter { it.canRedactGroupItem() }
+                .orEmpty()
+        } else {
+            emptyList()
+        }
         val actions = buildList {
             if (
                 message.eventId != null &&
@@ -391,7 +431,12 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             if (message.copyableText() != null) {
                 add(MessageContextMenuAction.COPY)
             }
-            if (message.redactionTargetMessageId != null) {
+            if (photoGroupContent != null && redactableGroupItems.isNotEmpty()) {
+                if (request.photoGroupSelection?.canDeletePhoto() == true) {
+                    add(MessageContextMenuAction.DELETE_PHOTO)
+                }
+                add(MessageContextMenuAction.DELETE_GROUP)
+            } else if (message.redactionTargetMessageId != null) {
                 add(MessageContextMenuAction.DELETE)
             }
             if (message.outgoingEnvelopeId != null && message.canRetryOutgoingEnvelope) {
@@ -413,14 +458,11 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             if (index > 0) {
                 menuContainer.addView(MenuDivider(context, palette))
             }
-            menuContainer.addView(createActionView(message, action))
+            menuContainer.addView(createActionView(action))
         }
     }
 
-    private fun createActionView(
-        message: MessageRenderModel,
-        action: MessageContextMenuAction
-    ): TextView {
+    private fun createActionView(action: MessageContextMenuAction): TextView {
         val selectableBackground = TypedValue()
         context.theme.resolveAttribute(
             android.R.attr.selectableItemBackground,
@@ -450,7 +492,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             tag = action
             contentDescription = action.title
             setOnClickListener {
-                onActionSelected?.invoke(message, action)
+                selectedRequest?.let { request ->
+                    onActionSelected?.invoke(request, action)
+                }
             }
         }
     }
@@ -556,10 +600,10 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
                 val actionView = findActionViewAt(rawX, rawY)
                 updateHoveredActionView(actionView)
                 val selectedAction = actionView?.tag as? MessageContextMenuAction
-                val message = selectedMessage
+                val request = selectedRequest
                 clearHoveredActionView()
-                if (message != null && selectedAction != null) {
-                    onActionSelected?.invoke(message, selectedAction)
+                if (request != null && selectedAction != null) {
+                    onActionSelected?.invoke(request, selectedAction)
                     true
                 } else {
                     false
@@ -642,7 +686,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         bubbleBoundsInScreen.set(request.bubbleBoundsInScreen)
         activationRawX = request.touchRawX
         activationRawY = request.touchRawY
-        buildMenu(request.message)
+        buildMenu(request)
         return menuContainer.childCount > 0
     }
 
@@ -716,6 +760,8 @@ internal enum class MessageContextMenuAction(
     FORWARD("Forward"),
     EDIT("Edit"),
     COPY("Copy"),
+    DELETE_PHOTO("Delete Photo", true),
+    DELETE_GROUP("Delete Group", true),
     DELETE("Delete", true),
     RETRY_SEND("Retry Send"),
     REMOVE_FAILED_SEND("Remove Failed Send", true),
@@ -770,6 +816,14 @@ private fun MessageRenderModel.canShowForwardAction(): Boolean {
         return false
     }
     return content !is MessageContent.Redacted
+}
+
+private fun PhotoGroupContextSelection.canDeletePhoto(): Boolean {
+    return !isOverflowTile && item.canRedactGroupItem()
+}
+
+private fun MatrixMediaGroupItem.canRedactGroupItem(): Boolean {
+    return !eventId.isNullOrBlank() && deliveryState == MatrixMessageDeliveryState.SENT
 }
 
 private fun lerp(from: Float, to: Float, progress: Float): Float {

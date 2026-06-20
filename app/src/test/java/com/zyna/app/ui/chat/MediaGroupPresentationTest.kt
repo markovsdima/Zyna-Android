@@ -102,6 +102,29 @@ class MediaGroupPresentationTest {
         assertEquals("Receiving photo 1 of 3", result.single().body)
     }
 
+    @Test
+    fun withMediaGroupPresentation_reflowsAfterDeletedGroupMember() {
+        val messages = listOf(
+            imageMessage(id = "newest", groupIndex = 2, total = 3, timestampMillis = 30),
+            redactedMessage(id = "deleted", groupIndex = 1, total = 3, timestampMillis = 20),
+            imageMessage(id = "oldest", groupIndex = 0, total = 3, timestampMillis = 10)
+        )
+
+        val result = messages.withMediaGroupPresentation(
+            hasNewerBoundary = false,
+            hasOlderBoundary = false
+        )
+
+        assertEquals(1, result.size)
+        assertEquals("newest", result.single().id)
+        val presentation = result.single().mediaGroupPresentation
+        requireNotNull(presentation)
+        assertTrue(presentation.rendersCompositeBubble)
+        assertEquals(2, presentation.totalHint)
+        assertNull(presentation.layoutOverride)
+        assertEquals(listOf("oldest", "newest"), presentation.items.map { it.messageId })
+    }
+
     private fun imageMessage(
         id: String,
         groupIndex: Int,
@@ -134,6 +157,32 @@ class MediaGroupPresentationTest {
                     total = total,
                     captionMode = CaptionMode.REPLICATED,
                     captionPlacement = captionPlacement
+                )
+            )
+        )
+    }
+
+    private fun redactedMessage(
+        id: String,
+        groupIndex: Int,
+        total: Int,
+        timestampMillis: Long
+    ): MatrixChatMessage {
+        return MatrixChatMessage(
+            id = id,
+            eventId = id,
+            sender = "@alice:example.org",
+            body = "Deleted message",
+            timestampMillis = timestampMillis,
+            isOwn = false,
+            contentType = MatrixMessageContentType.REDACTED,
+            zynaAttributes = ZynaMessageAttributes(
+                mediaGroup = MediaGroupInfo(
+                    id = "group-1",
+                    index = groupIndex,
+                    total = total,
+                    captionMode = CaptionMode.REPLICATED,
+                    captionPlacement = CaptionPlacement.BOTTOM
                 )
             )
         )

@@ -99,6 +99,9 @@ fun ChatScreen(
     onRetryOutgoingEnvelope: (String) -> Unit = {},
     onDiscardOutgoingEnvelope: (String) -> Unit = {},
     onRedactMessage: (String) -> Unit = {},
+    onRedactMessages: (List<String>) -> Unit = { messageIds ->
+        messageIds.forEach { messageId -> onRedactMessage(messageId) }
+    },
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {},
     onVisibleReadReceiptCandidate: (
         roomId: String,
@@ -197,6 +200,7 @@ fun ChatScreen(
                     onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
                     onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
                     onRedactMessage = onRedactMessage,
+                    onRedactMessages = onRedactMessages,
                     onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
                     onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
                     onJumpTargetConsumed = onJumpTargetConsumed,
@@ -268,6 +272,7 @@ private fun ChatMessageList(
     onRetryOutgoingEnvelope: (String) -> Unit,
     onDiscardOutgoingEnvelope: (String) -> Unit,
     onRedactMessage: (String) -> Unit,
+    onRedactMessages: (List<String>) -> Unit,
     onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
     onVisibleReadReceiptCandidate: (
         roomId: String,
@@ -315,6 +320,7 @@ private fun ChatMessageList(
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
+            chatLayout.onRedactMessages = onRedactMessages
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.onEvaluateVisibleReadReceiptCandidate = {
                 chatLayout.evaluateVisibleReadReceiptCandidate(isAtLiveEdge) { eventId, canEstablishBaseline ->
@@ -371,6 +377,7 @@ private fun ChatMessageList(
             chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
             chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
             chatLayout.onRedactMessage = onRedactMessage
+            chatLayout.onRedactMessages = onRedactMessages
             chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
             chatLayout.onEvaluateVisibleReadReceiptCandidate = {
                 chatLayout.evaluateVisibleReadReceiptCandidate(isAtLiveEdge) { eventId, canEstablishBaseline ->

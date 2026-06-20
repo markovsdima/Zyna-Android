@@ -16,6 +16,7 @@ import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixMessageContentType
+import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.messaging.CaptionMode
@@ -793,31 +794,50 @@ class AppViewModel(
     }
 
     fun redactMessage(messageId: String) {
+        redactMessages(listOf(messageId))
+    }
+
+    fun redactMessages(messageIds: List<String>) {
         val route = _uiState.value.route as? AppRoute.Chat ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-        val targetMessage = _uiState.value.chatMessages
-            .firstOrNull { it.id == messageId }
-            ?: return
-        if (
-            !targetMessage.isOwn ||
-            targetMessage.eventId == null ||
-            targetMessage.contentType == MatrixMessageContentType.REDACTED
-        ) {
+        val distinctMessageIds = messageIds
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        if (distinctMessageIds.isEmpty()) {
+            return
+        }
+        val targetMessagesById = _uiState.value.chatMessages.associateBy { it.id }
+        val targetMessages = distinctMessageIds
+            .mapNotNull { targetMessagesById[it] }
+            .filter { targetMessage ->
+                targetMessage.isOwn &&
+                    targetMessage.eventId != null &&
+                    targetMessage.contentType != MatrixMessageContentType.REDACTED &&
+                    targetMessage.deliveryState == MatrixMessageDeliveryState.SENT
+            }
+        if (targetMessages.isEmpty()) {
             return
         }
 
-        val envelopeId = "redaction:${UUID.randomUUID()}"
-        val transactionId = matrixClientService.prepareTransactionId()
         viewModelScope.launch {
             try {
-                val didCreate = localCacheRepository.createOutgoingRedactionEnvelope(
-                    userId = userId,
-                    roomId = route.roomId,
-                    envelopeId = envelopeId,
-                    transactionId = transactionId,
-                    targetMessage = targetMessage
-                )
-                if (!didCreate) {
+                val createdEnvelopeIds = mutableListOf<String>()
+                for (targetMessage in targetMessages) {
+                    val envelopeId = "redaction:${UUID.randomUUID()}"
+                    val transactionId = matrixClientService.prepareTransactionId()
+                    val didCreate = localCacheRepository.createOutgoingRedactionEnvelope(
+                        userId = userId,
+                        roomId = route.roomId,
+                        envelopeId = envelopeId,
+                        transactionId = transactionId,
+                        targetMessage = targetMessage
+                    )
+                    if (didCreate) {
+                        createdEnvelopeIds += envelopeId
+                    }
+                }
+                if (createdEnvelopeIds.isEmpty()) {
                     return@launch
                 }
                 _uiState.update {
@@ -826,8 +846,8 @@ class AppViewModel(
                     } else it.copy(chatSendErrorMessage = null)
                 }
                 outgoingOutboxService.kick(
-                    reason = "new-redaction",
-                    envelopeId = envelopeId
+                    reason = if (createdEnvelopeIds.size == 1) "new-redaction" else "new-redactions",
+                    envelopeId = createdEnvelopeIds.singleOrNull()
                 )
             } catch (error: CancellationException) {
                 throw error

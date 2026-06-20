@@ -6,6 +6,7 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.RectF
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -15,6 +16,7 @@ import android.view.animation.DecelerateInterpolator
 import android.util.Log
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.ui.chat.viewer.PhotoViewerItem
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
@@ -58,11 +60,24 @@ internal class MessageCellView(
     private var isContextMenuOpened = false
     private var isContextMenuSourceHidden = false
     private var isDrawingContextMenuCopy = false
+    private var drawsContextPhotoSelection = true
     private var isPhotoTapCandidate = false
     private var replyHeaderTapEventId: String? = null
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
     private var imageLoadHandles: List<AutoCloseable> = emptyList()
+    private val contextPhotoSelectionBounds = RectF()
+    private val contextPhotoSelectionFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0x1AFFFFFF
+        style = Paint.Style.FILL
+    }
+    private val contextPhotoSelectionStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xE6FFFFFF.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 2.dpToPx(density).toFloat()
+    }
+    private val contextPhotoSelectionRadius = 10.dpToPx(density).toFloat()
+    private var hasContextPhotoSelection = false
 
     var onContextMenuPreviewRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
@@ -187,6 +202,7 @@ internal class MessageCellView(
         canvas.translate(currentLayout.contentLeft.toFloat(), currentLayout.contentTop.toFloat())
         currentLayout.renderer.draw(canvas, currentLayout.contentLayout)
         canvas.restoreToCount(save)
+        drawContextPhotoSelection(canvas)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -319,12 +335,17 @@ internal class MessageCellView(
             ?.eventId
             ?.takeIf { it.isNotBlank() }
             ?: return null
-        val textLayout = currentLayout.contentLayout as? TextMessageLayout ?: return null
-        val replyLayout = textLayout.replyHeaderLayout ?: return null
+        val (replyLayout, replyY) = when (val contentLayout = currentLayout.contentLayout) {
+            is TextMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
+            is ImageMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
+            is PhotoGroupMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
+            else -> null to 0
+        }
+        val replyHeaderLayout = replyLayout ?: return null
         val left = currentLayout.contentLeft.toFloat()
-        val top = (currentLayout.contentTop + textLayout.replyY).toFloat()
-        val right = left + replyLayout.width
-        val bottom = top + replyLayout.height
+        val top = (currentLayout.contentTop + replyY).toFloat()
+        val right = left + replyHeaderLayout.width
+        val bottom = top + replyHeaderLayout.height
         return if (x >= left && x <= right && y >= top && y <= bottom) {
             replyEventId
         } else {
@@ -350,6 +371,9 @@ internal class MessageCellView(
     }
 
     fun setContextMenuSourceHidden(hidden: Boolean) {
+        if (!hidden) {
+            clearContextPhotoSelection()
+        }
         if (isContextMenuSourceHidden == hidden) {
             return
         }
@@ -359,49 +383,80 @@ internal class MessageCellView(
 
     fun drawForContextMenu(canvas: Canvas) {
         val wasDrawingContextMenuCopy = isDrawingContextMenuCopy
+        val wasDrawingContextSelection = drawsContextPhotoSelection
         isDrawingContextMenuCopy = true
+        drawsContextPhotoSelection = true
         try {
             draw(canvas)
         } finally {
             isDrawingContextMenuCopy = wasDrawingContextMenuCopy
+            drawsContextPhotoSelection = wasDrawingContextSelection
         }
     }
 
     fun capturePaintSplashTarget(root: View): PaintSplashTarget? {
+        return capturePaintSplashTarget(
+            root = root,
+            targetBoundsInView = null,
+            hideSource = {
+                setContextMenuSourceHidden(true)
+            }
+        )
+    }
+
+    fun capturePhotoGroupSelectionPaintSplashTarget(
+        root: View,
+        selection: PhotoGroupContextSelection
+    ): PaintSplashTarget? {
+        return capturePaintSplashTarget(
+            root = root,
+            targetBoundsInView = selection.boundsInView,
+            hideSource = {}
+        )
+    }
+
+    private fun capturePaintSplashTarget(
+        root: View,
+        targetBoundsInView: RectF?,
+        hideSource: () -> Unit
+    ): PaintSplashTarget? {
         val currentLayout = layout ?: return null
-        if (currentLayout.bubbleRect.width() <= 0f || currentLayout.bubbleRect.height() <= 0f) {
+        val targetBounds = targetBoundsInView ?: currentLayout.bubbleRect
+        if (targetBounds.width() <= 0f || targetBounds.height() <= 0f) {
             return null
         }
 
-        if (!bubbleBoundsInScreen(screenBubbleRect)) {
+        val screenBounds = viewRectToScreen(targetBounds)
+        if (screenBounds.width() <= 0f || screenBounds.height() <= 0f) {
             return null
         }
 
-        val bitmapWidth = currentLayout.bubbleRect.width().toInt().coerceAtLeast(1)
-        val bitmapHeight = currentLayout.bubbleRect.height().toInt().coerceAtLeast(1)
+        val bitmapWidth = targetBounds.width().toInt().coerceAtLeast(1)
+        val bitmapHeight = targetBounds.height().toInt().coerceAtLeast(1)
         val bitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
-        canvas.translate(-currentLayout.bubbleRect.left, -currentLayout.bubbleRect.top)
+        canvas.translate(-targetBounds.left, -targetBounds.top)
 
         val wasDrawingContextMenuCopy = isDrawingContextMenuCopy
+        val wasDrawingContextSelection = drawsContextPhotoSelection
         isDrawingContextMenuCopy = true
+        drawsContextPhotoSelection = false
         try {
             draw(canvas)
         } finally {
             isDrawingContextMenuCopy = wasDrawingContextMenuCopy
+            drawsContextPhotoSelection = wasDrawingContextSelection
         }
 
         val rootLocation = IntArray(2)
         root.getLocationOnScreen(rootLocation)
-        val boundsInRoot = RectF(screenBubbleRect)
+        val boundsInRoot = RectF(screenBounds)
         boundsInRoot.offset(-rootLocation[0].toFloat(), -rootLocation[1].toFloat())
 
         return PaintSplashTarget(
-            hideSource = {
-                setContextMenuSourceHidden(true)
-            },
+            hideSource = hideSource,
             bitmap = bitmap,
-            boundsInScreen = RectF(screenBubbleRect),
+            boundsInScreen = RectF(screenBounds),
             boundsInRoot = boundsInRoot
         )
     }
@@ -452,13 +507,25 @@ internal class MessageCellView(
         if (!bubbleBoundsInScreen(screenBubbleRect)) {
             return null
         }
+        val photoGroupSelection = photoGroupContextSelectionAt(
+            x = lastTouchX,
+            y = lastTouchY,
+            currentLayout = currentLayout,
+            model = model
+        )
+        setContextPhotoSelection(
+            photoGroupSelection
+                ?.takeUnless { it.isOverflowTile }
+                ?.boundsInView
+        )
         logContextMenuBubble(model, currentLayout)
         return MessageContextMenuRequest(
             cell = this,
             message = model,
             bubbleBoundsInScreen = RectF(screenBubbleRect),
             touchRawX = lastTouchRawX,
-            touchRawY = lastTouchRawY
+            touchRawY = lastTouchRawY,
+            photoGroupSelection = photoGroupSelection
         )
     }
 
@@ -523,6 +590,43 @@ internal class MessageCellView(
         isContextMenuOpened = false
         isPhotoTapCandidate = false
         replyHeaderTapEventId = null
+    }
+
+    private fun setContextPhotoSelection(boundsInView: RectF?) {
+        if (boundsInView == null) {
+            clearContextPhotoSelection()
+            return
+        }
+        contextPhotoSelectionBounds.set(boundsInView)
+        hasContextPhotoSelection = true
+        invalidate()
+    }
+
+    private fun clearContextPhotoSelection() {
+        if (!hasContextPhotoSelection) {
+            return
+        }
+        hasContextPhotoSelection = false
+        contextPhotoSelectionBounds.setEmpty()
+        invalidate()
+    }
+
+    private fun drawContextPhotoSelection(canvas: Canvas) {
+        if (!isDrawingContextMenuCopy || !drawsContextPhotoSelection || !hasContextPhotoSelection) {
+            return
+        }
+        canvas.drawRoundRect(
+            contextPhotoSelectionBounds,
+            contextPhotoSelectionRadius,
+            contextPhotoSelectionRadius,
+            contextPhotoSelectionFillPaint
+        )
+        canvas.drawRoundRect(
+            contextPhotoSelectionBounds,
+            contextPhotoSelectionRadius,
+            contextPhotoSelectionRadius,
+            contextPhotoSelectionStrokePaint
+        )
     }
 
     private fun buildLayout(width: Int): MessageCellLayout {
@@ -674,6 +778,42 @@ internal class MessageCellView(
         }
     }
 
+    private fun photoGroupContextSelectionAt(
+        x: Float,
+        y: Float,
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel
+    ): PhotoGroupContextSelection? {
+        val content = model.content as? MessageContent.PhotoGroup ?: return null
+        val groupLayout = currentLayout.contentLayout as? PhotoGroupMessageLayout ?: return null
+        val mediaBounds = RectF(
+            currentLayout.contentLeft.toFloat(),
+            (currentLayout.contentTop + groupLayout.mediaY).toFloat(),
+            (currentLayout.contentLeft + groupLayout.mediaWidth).toFloat(),
+            (currentLayout.contentTop + groupLayout.mediaY + groupLayout.mediaHeight).toFloat()
+        )
+        val frames = PhotoGroupLayout.frames(
+            bounds = mediaBounds,
+            itemCount = groupLayout.items.size,
+            layoutOverride = groupLayout.layoutOverride,
+            spacingPx = PHOTO_GROUP_SPACING_DP.dpToPx(density)
+        )
+        val hitIndex = frames.indexOfFirst { frame -> frame.contains(x, y) }
+            .takeIf { it >= 0 }
+            ?: return null
+        val visibleCount = PhotoGroupLayout.visibleItemCount(groupLayout.items.size)
+        val isOverflowTile = content.items.size > visibleCount && hitIndex == visibleCount - 1
+        val item = content.items.getOrNull(hitIndex) ?: return null
+        val boundsInView = RectF(frames[hitIndex])
+        return PhotoGroupContextSelection(
+            item = item,
+            itemIndex = hitIndex,
+            boundsInView = boundsInView,
+            boundsInScreen = viewRectToScreen(boundsInView),
+            isOverflowTile = isOverflowTile
+        )
+    }
+
     private fun viewRectToScreen(rect: RectF): RectF {
         getLocationOnScreen(screenLocation)
         return RectF(rect).apply {
@@ -760,7 +900,16 @@ internal data class MessageContextMenuRequest(
     val message: MessageRenderModel,
     val bubbleBoundsInScreen: RectF,
     val touchRawX: Float,
-    val touchRawY: Float
+    val touchRawY: Float,
+    val photoGroupSelection: PhotoGroupContextSelection? = null
+)
+
+internal data class PhotoGroupContextSelection(
+    val item: MatrixMediaGroupItem,
+    val itemIndex: Int,
+    val boundsInView: RectF,
+    val boundsInScreen: RectF,
+    val isOverflowTile: Boolean
 )
 
 internal data class PaintSplashTarget(

@@ -16,11 +16,16 @@ internal fun List<MatrixChatMessage>.withMediaGroupPresentation(
 ): List<MatrixChatMessage> {
     if (isEmpty()) return this
 
+    val deletedMediaGroupIds = redactedMediaGroupIds()
     val result = mutableListOf<MatrixChatMessage>()
     var index = 0
     while (index < size) {
         val firstMessage = this[index]
         val firstGroup = firstMessage.zynaAttributes.mediaGroup
+        if (firstMessage.isDeletedMediaGroupMember(deletedMediaGroupIds)) {
+            index += 1
+            continue
+        }
         if (firstMessage.contentType != MatrixMessageContentType.IMAGE || firstGroup == null) {
             result += firstMessage
             index += 1
@@ -29,27 +34,36 @@ internal fun List<MatrixChatMessage>.withMediaGroupPresentation(
 
         val runStart = index
         var runEnd = index
-        while (runEnd + 1 < size && sharesMediaGroup(this[runEnd], this[runEnd + 1])) {
+        while (runEnd + 1 < size && sharesMediaGroupTimeline(this[runEnd], this[runEnd + 1])) {
             runEnd += 1
         }
 
-        val sourceMessages = subList(runStart, runEnd + 1)
+        val runMessages = subList(runStart, runEnd + 1)
+        val sourceMessages = runMessages.filter { it.contentType == MatrixMessageContentType.IMAGE }
+        if (sourceMessages.isEmpty()) {
+            index = runEnd + 1
+            continue
+        }
         val sharesWithNewerBoundary = runStart == 0 && hasNewerBoundary
         val sharesWithOlderBoundary = runEnd == lastIndex && hasOlderBoundary
         val captionCollapse = groupCaptionCollapse(sourceMessages.map { it.imageInfo?.caption })
-        val canRenderComposite = canRenderCompleteMediaGroup(
+        val allowsDeletedReflow = firstGroup.id in deletedMediaGroupIds
+        val usesDeletedReflow = allowsDeletedReflow && sourceMessages.size < firstGroup.total
+        val canRenderComposite = canRenderMediaGroup(
             messages = sourceMessages,
             group = firstGroup,
             sharesWithNewerBoundary = sharesWithNewerBoundary,
             sharesWithOlderBoundary = sharesWithOlderBoundary,
-            canCollapseCaption = captionCollapse.canCollapse
+            canCollapseCaption = captionCollapse.canCollapse,
+            allowsDeletedReflow = allowsDeletedReflow
         )
-        val canRenderIncomingPlaceholder = canRenderIncomingMediaGroupPlaceholder(
-            messages = sourceMessages,
-            group = firstGroup,
-            sharesWithNewerBoundary = sharesWithNewerBoundary,
-            sharesWithOlderBoundary = sharesWithOlderBoundary
-        )
+        val canRenderIncomingPlaceholder = !allowsDeletedReflow &&
+            canRenderIncomingMediaGroupPlaceholder(
+                messages = sourceMessages,
+                group = firstGroup,
+                sharesWithNewerBoundary = sharesWithNewerBoundary,
+                sharesWithOlderBoundary = sharesWithOlderBoundary
+            )
         val carrierOffset = if (firstGroup.captionPlacement == CaptionPlacement.TOP) {
             sourceMessages.lastIndex
         } else {
@@ -65,10 +79,10 @@ internal fun List<MatrixChatMessage>.withMediaGroupPresentation(
                         result += message.copy(
                             mediaGroupPresentation = MatrixMediaGroupPresentation(
                                 id = firstGroup.id,
-                                totalHint = firstGroup.total,
+                                totalHint = if (usesDeletedReflow) items.size else firstGroup.total,
                                 caption = captionCollapse.caption,
                                 captionPlacement = firstGroup.captionPlacement,
-                                layoutOverride = firstGroup.layoutOverride,
+                                layoutOverride = if (usesDeletedReflow) null else firstGroup.layoutOverride,
                                 suppressIndividualCaption = captionCollapse.caption != null,
                                 items = items,
                                 rendersCompositeBubble = true,
@@ -109,17 +123,22 @@ internal fun List<MatrixChatMessage>.withMediaGroupPresentation(
     return result
 }
 
-private fun canRenderCompleteMediaGroup(
+private fun canRenderMediaGroup(
     messages: List<MatrixChatMessage>,
     group: MediaGroupInfo,
     sharesWithNewerBoundary: Boolean,
     sharesWithOlderBoundary: Boolean,
-    canCollapseCaption: Boolean
+    canCollapseCaption: Boolean,
+    allowsDeletedReflow: Boolean
 ): Boolean {
-    if (messages.size <= 1 || group.total != messages.size) return false
+    if (messages.size <= 1) return false
     if (sharesWithNewerBoundary || sharesWithOlderBoundary || !canCollapseCaption) return false
     val seenIndices = mediaGroupMemberIndicesOrNull(messages, group) ?: return false
-    return seenIndices.size == group.total &&
+    if (allowsDeletedReflow) {
+        return seenIndices.size == messages.size && messages.size < group.total
+    }
+    return group.total == messages.size &&
+        seenIndices.size == group.total &&
         seenIndices.minOrNull() == 0 &&
         seenIndices.maxOrNull() == group.total - 1
 }
@@ -177,13 +196,30 @@ private fun List<MatrixChatMessage>.mediaGroupItems(): List<MatrixMediaGroupItem
     }
 }
 
-private fun sharesMediaGroup(lhs: MatrixChatMessage, rhs: MatrixChatMessage): Boolean {
+private fun sharesMediaGroupTimeline(lhs: MatrixChatMessage, rhs: MatrixChatMessage): Boolean {
     val lhsGroup = lhs.zynaAttributes.mediaGroup ?: return false
     val rhsGroup = rhs.zynaAttributes.mediaGroup ?: return false
-    return lhs.contentType == MatrixMessageContentType.IMAGE &&
-        rhs.contentType == MatrixMessageContentType.IMAGE &&
+    return lhs.contentType.isMediaGroupTimelineMember() &&
+        rhs.contentType.isMediaGroupTimelineMember() &&
         lhs.sender == rhs.sender &&
         lhsGroup.id == rhsGroup.id
+}
+
+private fun List<MatrixChatMessage>.redactedMediaGroupIds(): Set<String> {
+    return mapNotNull { message ->
+        message.zynaAttributes.mediaGroup
+            ?.id
+            ?.takeIf { message.contentType == MatrixMessageContentType.REDACTED }
+    }.toSet()
+}
+
+private fun MatrixChatMessage.isDeletedMediaGroupMember(deletedMediaGroupIds: Set<String>): Boolean {
+    return contentType == MatrixMessageContentType.REDACTED &&
+        zynaAttributes.mediaGroup?.id in deletedMediaGroupIds
+}
+
+private fun MatrixMessageContentType.isMediaGroupTimelineMember(): Boolean {
+    return this == MatrixMessageContentType.IMAGE || this == MatrixMessageContentType.REDACTED
 }
 
 private data class CaptionCollapse(

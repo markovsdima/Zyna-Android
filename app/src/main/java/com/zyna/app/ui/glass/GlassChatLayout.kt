@@ -38,6 +38,7 @@ import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
+import com.zyna.app.ui.chat.render.PaintSplashTarget
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
@@ -62,6 +63,9 @@ class GlassChatLayout @JvmOverloads constructor(
     internal var onEditMessage: (MessageEditPreview) -> Unit = {}
     internal var onForwardMessage: (MessageForwardPreview) -> Unit = {}
     var onRedactMessage: (String) -> Unit = {}
+    var onRedactMessages: (List<String>) -> Unit = { messageIds ->
+        messageIds.forEach { messageId -> onRedactMessage(messageId) }
+    }
     var onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {}
     var onEvaluateVisibleReadReceiptCandidate: () -> Unit = {}
 
@@ -187,8 +191,8 @@ class GlassChatLayout @JvmOverloads constructor(
         onDismissRequested = {
             dismissMessageContextMenu()
         }
-        onActionSelected = { message, action ->
-            if (handleMessageContextAction(message, action)) {
+        onActionSelected = { request, action ->
+            if (handleMessageContextAction(request, action)) {
                 dismissMessageContextMenu()
             }
         }
@@ -1229,9 +1233,10 @@ class GlassChatLayout @JvmOverloads constructor(
     }
 
     private fun handleMessageContextAction(
-        message: MessageRenderModel,
+        request: MessageContextMenuRequest,
         action: MessageContextMenuAction
     ): Boolean {
+        val message = request.message
         return when (action) {
             MessageContextMenuAction.REPLY -> {
                 message.toReplyPreviewOrNull()?.let(onReplyToMessage)
@@ -1252,20 +1257,17 @@ class GlassChatLayout @JvmOverloads constructor(
             MessageContextMenuAction.DELETE -> {
                 val messageId = message.redactionTargetMessageId ?: return true
                 val target = contextMenuLayer.captureSelectedPaintSplashTarget(this)
-                if (target == null) {
-                    onRedactMessage(messageId)
-                    return true
-                }
-                val startBurst = {
-                    dismissMessageContextMenu(animated = false)
-                    target.hideSource()
-                    vulkanOverlay.addPaintSplash(target)
-                    onRedactMessage(messageId)
-                }
-                if (!contextMenuLayer.playSelectedCellDeleteAnticipation(startBurst)) {
-                    startBurst()
-                }
-                false
+                beginContextRedaction(listOf(messageId), target)
+            }
+            MessageContextMenuAction.DELETE_PHOTO -> {
+                val messageId = contextMenuLayer.selectedPhotoRedactionMessageId() ?: return true
+                val target = contextMenuLayer.captureSelectedPhotoPaintSplashTarget(this)
+                beginContextRedaction(listOf(messageId), target)
+            }
+            MessageContextMenuAction.DELETE_GROUP -> {
+                val messageIds = contextMenuLayer.selectedPhotoGroupRedactionMessageIds()
+                val target = contextMenuLayer.captureSelectedPaintSplashTarget(this)
+                beginContextRedaction(messageIds, target)
             }
             MessageContextMenuAction.RETRY_SEND -> {
                 message.outgoingEnvelopeId?.let(onRetryOutgoingEnvelope)
@@ -1280,6 +1282,33 @@ class GlassChatLayout @JvmOverloads constructor(
                 true
             }
         }
+    }
+
+    private fun beginContextRedaction(
+        messageIds: List<String>,
+        target: PaintSplashTarget?
+    ): Boolean {
+        val redactionIds = messageIds
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        if (redactionIds.isEmpty()) {
+            return true
+        }
+        if (target == null) {
+            onRedactMessages(redactionIds)
+            return true
+        }
+        val startBurst = {
+            dismissMessageContextMenu(animated = false)
+            target.hideSource()
+            vulkanOverlay.addPaintSplash(target)
+            onRedactMessages(redactionIds)
+        }
+        if (!contextMenuLayer.playSelectedCellDeleteAnticipation(startBurst)) {
+            startBurst()
+        }
+        return false
     }
 
     private fun copyMessageText(message: MessageRenderModel) {

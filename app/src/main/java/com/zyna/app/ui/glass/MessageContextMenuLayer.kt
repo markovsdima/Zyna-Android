@@ -63,6 +63,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private val cellLocation = IntArray(2)
     private val bubbleBoundsInScreen = RectF()
     private val bubbleBoundsInLayer = RectF()
+    private val drawingBubbleBoundsInLayer = RectF()
     private val shiftedBubbleBoundsInLayer = RectF()
     private val cancelDistancePx = ViewConfiguration.get(context).scaledTouchSlop * 2f
 
@@ -78,21 +79,21 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private var selectedCellAnticipationScale = 1f
         set(value) {
             field = value
-            invalidate()
+            selectedCellLayer.invalidate()
         }
     private var activationRawX = 0f
     private var activationRawY = 0f
     private var pressProgress = 0f
         set(value) {
             field = value.coerceIn(0f, 1f)
-            invalidate()
+            selectedCellLayer.invalidate()
         }
     private var menuProgress = 0f
         set(value) {
             field = value.coerceIn(0f, 1f)
             menuContainer.alpha = field
             menuGlass.alpha = field
-            invalidate()
+            selectedCellLayer.invalidate()
         }
 
     var onDismissRequested: () -> Unit = {}
@@ -100,6 +101,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         request: MessageContextMenuRequest,
         action: MessageContextMenuAction
     ) -> Unit)? = null
+    var onGlassGeometryChanged: () -> Unit = {}
+    var onDismissFullyHidden: () -> Unit = {}
+    val selectedCellLayer: View = SelectedCellLayer(context)
 
     init {
         visibility = GONE
@@ -108,7 +112,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         isFocusableInTouchMode = true
         isHapticFeedbackEnabled = true
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
-        setWillNotDraw(false)
+        setWillNotDraw(true)
         clipChildren = false
         clipToPadding = false
         addView(menuGlass)
@@ -138,6 +142,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
 
         request.cell.setContextMenuSourceHidden(true)
         visibility = VISIBLE
+        selectedCellLayer.visibility = VISIBLE
         bringToFront()
         isGestureCancelEnabled = true
         menuProgress = 0f
@@ -166,6 +171,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         isGestureCancelEnabled = false
         isMenuOpenRequested = true
         visibility = VISIBLE
+        selectedCellLayer.visibility = VISIBLE
         bringToFront()
         requestFocus()
         requestLayout()
@@ -253,7 +259,11 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             .map { it.messageId }
     }
 
-    internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
+    internal fun collectVulkanGlassRects(
+        out: MutableList<VulkanChatGlassRect>,
+        originLeft: Int = left,
+        originTop: Int = top
+    ) {
         if (
             visibility != VISIBLE ||
             menuGlass.width <= 0 ||
@@ -265,10 +275,10 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
 
         out.add(
             VulkanChatGlassRect(
-                left = (left + menuGlass.left).toFloat(),
-                top = (top + menuGlass.top).toFloat(),
-                right = (left + menuGlass.right).toFloat(),
-                bottom = (top + menuGlass.bottom).toFloat(),
+                left = (originLeft + menuGlass.left).toFloat(),
+                top = (originTop + menuGlass.top).toFloat(),
+                right = (originLeft + menuGlass.right).toFloat(),
+                bottom = (originTop + menuGlass.bottom).toFloat(),
                 cornerRadius = 14f.dpToPx(density),
                 opacity = 0.76f * menuProgress,
                 bezelWidth = 36f.dpToPx(density),
@@ -365,6 +375,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         if (visibility != VISIBLE || selectedRequest == null) {
             menuGlass.layout(0, 0, 0, 0)
             menuContainer.layout(0, 0, 0, 0)
+            selectedCellLayer.invalidate()
             return
         }
 
@@ -394,12 +405,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         menuGlass.alpha = menuContainer.alpha
         menuGlass.layout(menuLeft, menuTop, menuLeft + menuWidth, menuTop + menuHeight)
         menuContainer.layout(menuLeft, menuTop, menuLeft + menuWidth, menuTop + menuHeight)
+        selectedCellLayer.invalidate()
         controller.invalidateRegions()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        drawDim(canvas)
-        drawSelectedCell(canvas)
+        onGlassGeometryChanged()
     }
 
     private fun buildMenu(request: MessageContextMenuRequest) {
@@ -499,26 +507,37 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         }
     }
 
-    private fun drawDim(canvas: Canvas) {
+    private fun drawDim(canvas: Canvas, drawingLayer: View) {
         val alpha = (72 * menuProgress).roundToInt()
         if (alpha <= 0) {
             return
         }
         dimPaint.color = Color.argb(alpha, 0, 0, 0)
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+        canvas.drawRect(
+            0f,
+            0f,
+            drawingLayer.width.toFloat(),
+            drawingLayer.height.toFloat(),
+            dimPaint
+        )
     }
 
-    private fun drawSelectedCell(canvas: Canvas) {
+    private fun drawSelectedCell(canvas: Canvas, drawingLayer: View) {
         val request = selectedRequest ?: return
         val cell = request.cell
         if (!cell.isAttachedToWindow || cell.visibility != View.VISIBLE) {
             return
         }
-        getLocationOnScreen(layerLocation)
+        drawingLayer.getLocationOnScreen(layerLocation)
         cell.getLocationOnScreen(cellLocation)
 
         val layerCellX = (cellLocation[0] - layerLocation[0]).toFloat()
         val layerCellY = (cellLocation[1] - layerLocation[1]).toFloat()
+        drawingBubbleBoundsInLayer.set(bubbleBoundsInScreen)
+        drawingBubbleBoundsInLayer.offset(
+            -layerLocation[0].toFloat(),
+            -layerLocation[1].toFloat()
+        )
         val currentOffsetY = selectedCellTargetOffsetY * menuProgress
         val scale = currentSelectedCellScale() * selectedCellAnticipationScale
         val save = canvas.save()
@@ -526,8 +545,8 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         canvas.scale(
             scale,
             scale,
-            bubbleBoundsInLayer.centerX() - layerCellX,
-            bubbleBoundsInLayer.centerY() - layerCellY
+            drawingBubbleBoundsInLayer.centerX() - layerCellX,
+            drawingBubbleBoundsInLayer.centerY() - layerCellY
         )
         cell.drawForContextMenu(canvas)
         canvas.restoreToCount(save)
@@ -708,6 +727,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
                 val animatedProgress = it.animatedValue as Float
                 pressProgress = lerp(startPressProgress, targetPressProgress, animatedProgress)
                 menuProgress = lerp(startMenuProgress, targetMenuProgress, animatedProgress)
+                onGlassGeometryChanged()
             }
             if (clearAfterEnd) {
                 addListener(object : AnimatorListenerAdapter() {
@@ -727,6 +747,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     }
 
     private fun clearSelection(cancelAnimator: Boolean = true) {
+        val wasDismissing = isDismissing
         if (cancelAnimator) {
             animator?.cancel()
         }
@@ -742,13 +763,33 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         selectedCellTargetOffsetY = 0f
         selectedCellAnticipationScale = 1f
         visibility = GONE
+        selectedCellLayer.visibility = GONE
         pressProgress = 0f
         menuProgress = 0f
+        selectedCellLayer.invalidate()
         controller.invalidateRegions()
+        if (wasDismissing) {
+            onDismissFullyHidden()
+        }
     }
 
     private fun restoreSelectedSource() {
         selectedRequest?.cell?.setContextMenuSourceHidden(false)
+    }
+
+    private inner class SelectedCellLayer(context: Context) : View(context) {
+        init {
+            visibility = GONE
+            isClickable = false
+            isFocusable = false
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+            setWillNotDraw(false)
+        }
+
+        override fun onDraw(canvas: Canvas) {
+            drawDim(canvas, this)
+            drawSelectedCell(canvas, this)
+        }
     }
 }
 

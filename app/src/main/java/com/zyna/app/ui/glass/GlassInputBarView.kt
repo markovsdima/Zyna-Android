@@ -308,7 +308,11 @@ class GlassInputBarView @JvmOverloads constructor(
         return editPreview ?: preview
     }
 
-    internal fun collectVulkanGlassRects(out: MutableList<VulkanChatGlassRect>) {
+    internal fun collectVulkanGlassRects(
+        out: MutableList<VulkanChatGlassRect>,
+        originLeft: Int = left,
+        originTop: Int = top
+    ) {
         if (
             !vulkanGlassBackgroundEnabled ||
             !isShown ||
@@ -321,10 +325,10 @@ class GlassInputBarView @JvmOverloads constructor(
         if (activePreview() != null && previewGlass.width > 0 && previewGlass.height > 0) {
             out.add(
                 VulkanChatGlassRect(
-                    left = (left + previewGlass.left).toFloat(),
-                    top = (top + previewGlass.top).toFloat(),
-                    right = (left + previewGlass.right).toFloat(),
-                    bottom = (top + previewGlass.bottom).toFloat(),
+                    left = (originLeft + previewGlass.left).toFloat(),
+                    top = (originTop + previewGlass.top).toFloat(),
+                    right = (originLeft + previewGlass.right).toFloat(),
+                    bottom = (originTop + previewGlass.bottom).toFloat(),
                     cornerRadius = 16f.dpToPx(density),
                     opacity = 1f,
                     bezelWidth = 30f.dpToPx(density),
@@ -337,6 +341,8 @@ class GlassInputBarView @JvmOverloads constructor(
         addChildGlassRect(
             out = out,
             child = attachButton,
+            originLeft = originLeft,
+            originTop = originTop,
             cornerRadius = radius,
             bevelWidth = 32f.dpToPx(density),
             glassThickness = 48f.dpToPx(density),
@@ -345,6 +351,8 @@ class GlassInputBarView @JvmOverloads constructor(
         addChildGlassRect(
             out = out,
             child = editText,
+            originLeft = originLeft,
+            originTop = originTop,
             cornerRadius = radius,
             bevelWidth = 36f.dpToPx(density),
             glassThickness = 55f.dpToPx(density),
@@ -353,6 +361,8 @@ class GlassInputBarView @JvmOverloads constructor(
         addChildGlassRect(
             out = out,
             child = sendButton,
+            originLeft = originLeft,
+            originTop = originTop,
             cornerRadius = radius,
             bevelWidth = 32f.dpToPx(density),
             glassThickness = 48f.dpToPx(density),
@@ -555,6 +565,8 @@ class GlassInputBarView @JvmOverloads constructor(
     private fun addChildGlassRect(
         out: MutableList<VulkanChatGlassRect>,
         child: android.view.View,
+        originLeft: Int,
+        originTop: Int,
         cornerRadius: Float,
         bevelWidth: Float,
         glassThickness: Float,
@@ -565,10 +577,10 @@ class GlassInputBarView @JvmOverloads constructor(
         }
         out.add(
             VulkanChatGlassRect(
-                left = (left + child.left).toFloat(),
-                top = (top + child.top).toFloat(),
-                right = (left + child.right).toFloat(),
-                bottom = (top + child.bottom).toFloat(),
+                left = (originLeft + child.left).toFloat(),
+                top = (originTop + child.top).toFloat(),
+                right = (originLeft + child.right).toFloat(),
+                bottom = (originTop + child.bottom).toFloat(),
                 cornerRadius = cornerRadius,
                 opacity = 1f,
                 bezelWidth = bevelWidth,

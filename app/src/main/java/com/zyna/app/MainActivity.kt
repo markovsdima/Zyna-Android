@@ -13,24 +13,17 @@ import android.view.inputmethod.InputMethodManager
 import android.webkit.MimeTypeMap
 import android.widget.EditText
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.compose.setContent
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.zyna.app.data.matrix.MatrixClientState
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.zyna.app.data.outgoing.OutgoingImagePreprocessor
 import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingOutboxDebugHooks
@@ -40,10 +33,12 @@ import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.app.AppViewModel
 import com.zyna.app.ui.app.AppViewModelFactory
-import com.zyna.app.ui.app.ZynaApp
 import com.zyna.app.ui.glass.GlassInputBarView
+import com.zyna.app.ui.navigation.ZynaAppActions
+import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.photo.PhotoMessageEditor
 import com.zyna.app.ui.theme.ZynaAndroidTheme
+import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -52,144 +47,211 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private lateinit var appViewModel: AppViewModel
+    private lateinit var rootHost: ZynaRootHostView
+    private lateinit var photoPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>
+    private var latestState: AppUiState = AppUiState()
+    private var photoEditorItems: List<OutgoingPhotoDraftItem> = emptyList()
+    private var isPreparingPhotos: Boolean = false
+    private var photoEditorError: String? = null
+    private var photoEditorView: ComposeView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         preferMaxRefreshRate()
         val appContainer = (application as ZynaApplication).appContainer
         OutgoingOutboxDebugHooks.handleIntent(this, intent)
-        setContent {
-            val appViewModel: AppViewModel = viewModel(
-                factory = AppViewModelFactory(
-                    matrixClientService = appContainer.matrixClientService,
-                    localCacheRepository = appContainer.localCacheRepository,
-                    outgoingOutboxService = appContainer.outgoingOutboxService,
-                    matrixMediaLoader = appContainer.matrixMediaLoader
-                )
+
+        appViewModel = ViewModelProvider(
+            this,
+            AppViewModelFactory(
+                matrixClientService = appContainer.matrixClientService,
+                localCacheRepository = appContainer.localCacheRepository,
+                outgoingOutboxService = appContainer.outgoingOutboxService,
+                matrixMediaLoader = appContainer.matrixMediaLoader
             )
-            val state by appViewModel.uiState.collectAsState()
-            var photoEditorItems by remember { mutableStateOf<List<OutgoingPhotoDraftItem>>(emptyList()) }
-            var isPreparingPhotos by remember { mutableStateOf(false) }
-            var photoEditorError by remember { mutableStateOf<String?>(null) }
-            val coroutineScope = rememberCoroutineScope()
-            val photoPickerLauncher = rememberLauncherForActivityResult(
-                ActivityResultContracts.PickMultipleVisualMedia(10)
-            ) { uris ->
-                if (uris.isNotEmpty()) {
-                    isPreparingPhotos = true
-                    photoEditorError = null
-                    coroutineScope.launch {
-                        try {
-                            deletePhotoItems(photoEditorItems)
-                            photoEditorItems = prepareOutgoingPhotoItems(uris)
-                        } catch (error: CancellationException) {
-                            throw error
-                        } catch (error: Throwable) {
-                            photoEditorError = error.message ?: error.javaClass.simpleName
-                        } finally {
-                            isPreparingPhotos = false
-                        }
+        )[AppViewModel::class.java]
+
+        photoPickerLauncher = registerForActivityResult(
+            ActivityResultContracts.PickMultipleVisualMedia(10)
+        ) { uris ->
+            handlePickedPhotos(uris)
+        }
+
+        rootHost = ZynaRootHostView(this)
+        setContentView(rootHost)
+
+        val actions = ZynaAppActions(
+            matrixMediaLoader = appContainer.matrixMediaLoader,
+            onLogin = appViewModel::login,
+            onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
+            onRefreshRooms = appViewModel::refreshRooms,
+            onOpenRoom = appViewModel::openRoom,
+            onForwardRoomSelected = appViewModel::selectForwardRoom,
+            onCancelForwardPicker = appViewModel::cancelForwardPicker,
+            onRefreshChat = appViewModel::refreshCurrentChat,
+            onCloseChat = appViewModel::closeChat,
+            onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
+            onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
+            onJumpToChatLiveEdge = appViewModel::jumpToChatLiveEdge,
+            onSendChatMessage = appViewModel::sendChatMessage,
+            onAttachPhotos = ::launchPhotoPicker,
+            onReplyToMessage = appViewModel::setChatReplyTarget,
+            onReplyHeaderClicked = appViewModel::jumpToChatEvent,
+            onCancelReply = appViewModel::clearChatReplyTarget,
+            onEditMessage = appViewModel::setChatEditTarget,
+            onCancelEdit = appViewModel::clearChatEditTarget,
+            onForwardMessage = appViewModel::startForwardMessage,
+            onCancelForward = appViewModel::clearChatForwardTarget,
+            onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
+            onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
+            onRedactMessage = appViewModel::redactMessage,
+            onRedactMessages = appViewModel::redactMessages,
+            onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
+            onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
+            onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
+            onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
+            onLogout = appViewModel::logout
+        )
+
+        onBackPressedDispatcher.addCallback(
+            this,
+            object : OnBackPressedCallback(true) {
+                override fun handleOnBackPressed() {
+                    if (rootHost.handleBack()) {
+                        return
                     }
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                    isEnabled = true
                 }
             }
+        )
 
-            ZynaAndroidTheme {
-                Box(Modifier.fillMaxSize()) {
-                    ZynaApp(
-                        state = state,
-                        matrixMediaLoader = appContainer.matrixMediaLoader,
-                        onLogin = appViewModel::login,
-                        onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
-                        onRefreshRooms = appViewModel::refreshRooms,
-                        onOpenRoom = appViewModel::openRoom,
-                        onForwardRoomSelected = appViewModel::selectForwardRoom,
-                        onCancelForwardPicker = appViewModel::cancelForwardPicker,
-                        onRefreshChat = appViewModel::refreshCurrentChat,
-                        onCloseChat = appViewModel::closeChat,
-                        onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
-                        onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
-                        onJumpToChatLiveEdge = appViewModel::jumpToChatLiveEdge,
-                        onSendChatMessage = appViewModel::sendChatMessage,
-                        onAttachPhotos = {
-                            photoPickerLauncher.launch(
-                                PickVisualMediaRequest(
-                                    ActivityResultContracts.PickVisualMedia.ImageOnly
-                                )
-                            )
-                        },
-                        onReplyToMessage = appViewModel::setChatReplyTarget,
-                        onReplyHeaderClicked = appViewModel::jumpToChatEvent,
-                        onCancelReply = appViewModel::clearChatReplyTarget,
-                        onEditMessage = appViewModel::setChatEditTarget,
-                        onCancelEdit = appViewModel::clearChatEditTarget,
-                        onForwardMessage = appViewModel::startForwardMessage,
-                        onCancelForward = appViewModel::clearChatForwardTarget,
-                        onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
-                        onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
-                        onRedactMessage = appViewModel::redactMessage,
-                        onRedactMessages = appViewModel::redactMessages,
-                        onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
-                        onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
-                        onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
-                        onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
-                        onLogout = appViewModel::logout
-                    )
-                    if (photoEditorItems.isNotEmpty() && state.route is AppRoute.Chat) {
-                        PhotoMessageEditor(
-                            items = photoEditorItems,
-                            isSending = isPreparingPhotos,
-                            errorMessage = photoEditorError,
-                            onDismiss = {
-                                if (!isPreparingPhotos) {
-                                    deletePhotoItems(photoEditorItems)
-                                    photoEditorItems = emptyList()
-                                    photoEditorError = null
-                                }
-                            },
-                            onDiscardItem = { item ->
-                                deletePhotoItems(listOf(item))
-                            },
-                            onSend = { result ->
-                                if (isPreparingPhotos) {
-                                    return@PhotoMessageEditor
-                                }
-                                isPreparingPhotos = true
-                                photoEditorError = null
-                                coroutineScope.launch {
-                                    var processedItems: List<OutgoingPhotoDraftItem> = emptyList()
-                                    try {
-                                        processedItems = processOutgoingPhotoItems(result.items)
-                                        val draft = OutgoingPhotoDraft(
-                                            items = processedItems,
-                                            caption = result.caption,
-                                            captionPlacement = result.captionPlacement,
-                                            layoutOverride = result.layoutOverride
-                                        )
-                                        val didSend = appViewModel.sendPhotoMessages(draft)
-                                        if (didSend) {
-                                            deletePhotoItems(result.items)
-                                            photoEditorItems = emptyList()
-                                            photoEditorError = null
-                                        } else {
-                                            deletePhotoItems(processedItems)
-                                            photoEditorError = "Could not send photos"
-                                        }
-                                    } catch (error: CancellationException) {
-                                        deletePhotoItems(processedItems)
-                                        throw error
-                                    } catch (error: Throwable) {
-                                        deletePhotoItems(processedItems)
-                                        photoEditorError = error.message ?: error.javaClass.simpleName
-                                    } finally {
-                                        isPreparingPhotos = false
-                                    }
-                                }
-                            }
-                        )
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                appViewModel.uiState.collect { state ->
+                    val collectStart = ZynaPerfLog.start()
+                    ZynaPerfLog.mark {
+                        "activity.uiState.collect route=${state.route.perfName()} " +
+                            "messages=${state.chatMessages.size} loading=${state.isLoadingChat}"
+                    }
+                    latestState = state
+                    rootHost.render(state, actions)
+                    renderPhotoEditor()
+                    ZynaPerfLog.end(
+                        collectStart,
+                        "activity.uiState.rendered"
+                    ) {
+                        "route=${state.route.perfName()} messages=${state.chatMessages.size}"
                     }
                 }
             }
         }
+    }
+
+    private fun launchPhotoPicker() {
+        photoPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    private fun handlePickedPhotos(uris: List<Uri>) {
+        if (uris.isEmpty()) {
+            return
+        }
+
+        isPreparingPhotos = true
+        photoEditorError = null
+        renderPhotoEditor()
+        lifecycleScope.launch {
+            try {
+                deletePhotoItems(photoEditorItems)
+                photoEditorItems = prepareOutgoingPhotoItems(uris)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                photoEditorError = error.message ?: error.javaClass.simpleName
+            } finally {
+                isPreparingPhotos = false
+                renderPhotoEditor()
+            }
+        }
+    }
+
+    private fun renderPhotoEditor() {
+        val shouldShowEditor = photoEditorItems.isNotEmpty() && latestState.route is AppRoute.Chat
+        if (!shouldShowEditor) {
+            rootHost.showOverlay(null)
+            photoEditorView = null
+            return
+        }
+
+        val editorView = photoEditorView ?: ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            photoEditorView = this
+        }
+
+        editorView.setContent {
+            ZynaAndroidTheme {
+                PhotoMessageEditor(
+                    items = photoEditorItems,
+                    isSending = isPreparingPhotos,
+                    errorMessage = photoEditorError,
+                    onDismiss = {
+                        if (!isPreparingPhotos) {
+                            deletePhotoItems(photoEditorItems)
+                            photoEditorItems = emptyList()
+                            photoEditorError = null
+                            renderPhotoEditor()
+                        }
+                    },
+                    onDiscardItem = { item ->
+                        deletePhotoItems(listOf(item))
+                    },
+                    onSend = { result ->
+                        if (isPreparingPhotos) {
+                            return@PhotoMessageEditor
+                        }
+                        isPreparingPhotos = true
+                        photoEditorError = null
+                        renderPhotoEditor()
+                        lifecycleScope.launch {
+                            var processedItems: List<OutgoingPhotoDraftItem> = emptyList()
+                            try {
+                                processedItems = processOutgoingPhotoItems(result.items)
+                                val draft = OutgoingPhotoDraft(
+                                    items = processedItems,
+                                    caption = result.caption,
+                                    captionPlacement = result.captionPlacement,
+                                    layoutOverride = result.layoutOverride
+                                )
+                                val didSend = appViewModel.sendPhotoMessages(draft)
+                                if (didSend) {
+                                    deletePhotoItems(result.items)
+                                    photoEditorItems = emptyList()
+                                    photoEditorError = null
+                                } else {
+                                    deletePhotoItems(processedItems)
+                                    photoEditorError = "Could not send photos"
+                                }
+                            } catch (error: CancellationException) {
+                                deletePhotoItems(processedItems)
+                                throw error
+                            } catch (error: Throwable) {
+                                deletePhotoItems(processedItems)
+                                photoEditorError = error.message ?: error.javaClass.simpleName
+                            } finally {
+                                isPreparingPhotos = false
+                                renderPhotoEditor()
+                            }
+                        }
+                    }
+                )
+            }
+        }
+        rootHost.showOverlay(editorView)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -363,6 +425,16 @@ private fun MotionEvent.isInsideView(view: View): Boolean {
     return view.getGlobalVisibleRect(bounds) && bounds.contains(rawX.toInt(), rawY.toInt())
 }
 
+private fun AppRoute.perfName(): String {
+    return when (this) {
+        AppRoute.ForwardPicker -> "ForwardPicker"
+        AppRoute.Login -> "Login"
+        is AppRoute.RecoveryKey -> "RecoveryKey"
+        AppRoute.Rooms -> "Rooms"
+        is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"
+    }
+}
+
 private fun OutgoingPhotoDraftItem.localFiles(): List<File> {
     return listOfNotNull(
         localPath.takeIf { it.isNotBlank() },
@@ -379,44 +451,4 @@ private inline fun <reified T : View> View.findAncestor(): T? {
         current = current.parent as? View
     }
     return null
-}
-
-@Composable
-@Preview
-fun AppPreview() {
-    ZynaAndroidTheme {
-        ZynaApp(
-            state = AppUiState(matrixState = MatrixClientState.LoggedOut),
-            matrixMediaLoader = null,
-            onLogin = { _, _, _ -> },
-            onSubmitRecoveryKey = {},
-            onRefreshRooms = {},
-            onOpenRoom = {},
-            onForwardRoomSelected = {},
-            onCancelForwardPicker = {},
-            onRefreshChat = {},
-            onCloseChat = {},
-            onLoadOlderChatMessages = {},
-            onLoadNewerChatMessages = {},
-            onJumpToChatLiveEdge = {},
-            onSendChatMessage = { false },
-            onAttachPhotos = {},
-            onReplyToMessage = {},
-            onReplyHeaderClicked = {},
-            onCancelReply = {},
-            onEditMessage = {},
-            onCancelEdit = {},
-            onForwardMessage = {},
-            onCancelForward = {},
-            onRetryOutgoingEnvelope = {},
-            onDiscardOutgoingEnvelope = {},
-            onRedactMessage = {},
-            onRedactMessages = {},
-            onDebugMarkOutgoingEnvelopeFailed = {},
-            onVisibleReadReceiptCandidate = { _, _, _ -> },
-            onChatJumpTargetConsumed = {},
-            onChatScrollToLiveEdgeConsumed = {},
-            onLogout = {}
-        )
-    }
 }

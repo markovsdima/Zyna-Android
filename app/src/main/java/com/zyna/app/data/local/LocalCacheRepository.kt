@@ -20,6 +20,7 @@ import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingTextEnvelope
 import com.zyna.app.data.outgoing.OutgoingTransportState
+import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
@@ -147,38 +148,85 @@ class LocalCacheRepository(
         roomId: String,
         limit: Int
     ): TimelineWindowSnapshot<MatrixChatMessage> = withContext(Dispatchers.IO) {
+        val totalStart = ZynaPerfLog.start()
+        ZynaPerfLog.mark { "cache.latestWindow.begin roomId=$roomId limit=$limit" }
+        val messagesStart = ZynaPerfLog.start()
         val messages = latestRoomTimelineWindowEntities(
             userId = userId,
             roomId = roomId,
             limit = limit
         )
+        ZynaPerfLog.end(
+            messagesStart,
+            "cache.latestWindow.messagesQuery"
+        ) {
+            "roomId=$roomId count=${messages.size}"
+        }
+        val outgoingStart = ZynaPerfLog.start()
         val outgoingEnvelopes = outgoingDao.activeRoomEnvelopesSnapshot(userId, roomId)
+        ZynaPerfLog.end(
+            outgoingStart,
+            "cache.latestWindow.outgoingQuery"
+        ) {
+            "roomId=$roomId count=${outgoingEnvelopes.size}"
+        }
         val oldestAnchor = messages.firstOrNull()?.toTimelineWindowAnchor()
         val newestAnchor = messages.lastOrNull()?.toTimelineWindowAnchor()
+        val mergeStart = ZynaPerfLog.start()
+        val mergedMessages = mergeTimelineWithOutgoing(
+            messages = messages,
+            outgoingEnvelopes = outgoingEnvelopes,
+            bounds = TimelineWindowBounds(oldestAnchor = oldestAnchor)
+        )
+        ZynaPerfLog.end(
+            mergeStart,
+            "cache.latestWindow.merge"
+        ) {
+            "roomId=$roomId merged=${mergedMessages.size}"
+        }
+        val hasOlderStart = ZynaPerfLog.start()
+        val hasOlder = oldestAnchor?.let { anchor ->
+            hasOlderRoomTimelineMessages(
+                userId = userId,
+                roomId = roomId,
+                anchor = anchor
+            )
+        } ?: false
+        ZynaPerfLog.end(
+            hasOlderStart,
+            "cache.latestWindow.hasOlder"
+        ) {
+            "roomId=$roomId value=$hasOlder"
+        }
+        val hasNewerStart = ZynaPerfLog.start()
+        val hasNewer = newestAnchor?.let { anchor ->
+            hasNewerRoomTimelineMessages(
+                userId = userId,
+                roomId = roomId,
+                anchor = anchor
+            )
+        } ?: false
+        ZynaPerfLog.end(
+            hasNewerStart,
+            "cache.latestWindow.hasNewer"
+        ) {
+            "roomId=$roomId value=$hasNewer"
+        }
 
         TimelineWindowSnapshot(
             anchor = oldestAnchor,
-            messages = mergeTimelineWithOutgoing(
-                messages = messages,
-                outgoingEnvelopes = outgoingEnvelopes,
-                bounds = TimelineWindowBounds(oldestAnchor = oldestAnchor)
-            ),
+            messages = mergedMessages,
             newestAnchor = newestAnchor,
-            hasOlderInDb = oldestAnchor?.let { anchor ->
-                hasOlderRoomTimelineMessages(
-                    userId = userId,
-                    roomId = roomId,
-                    anchor = anchor
-                )
-            } ?: false,
-            hasNewerInDb = newestAnchor?.let { anchor ->
-                hasNewerRoomTimelineMessages(
-                    userId = userId,
-                    roomId = roomId,
-                    anchor = anchor
-                )
-            } ?: false
-        )
+            hasOlderInDb = hasOlder,
+            hasNewerInDb = hasNewer
+        ).also {
+            ZynaPerfLog.end(
+                totalStart,
+                "cache.latestWindow.total"
+            ) {
+                "roomId=$roomId count=${it.messages.size}"
+            }
+        }
     }
 
     suspend fun roomTimelineWindowAroundEvent(

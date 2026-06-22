@@ -13,6 +13,7 @@ import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import com.zyna.app.ui.chat.render.PaintSplashTarget
+import com.zyna.app.util.ZynaPerfLog
 
 /**
  * First chat-only Vulkan backend foothold.
@@ -33,6 +34,8 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     private var frameCallbackPosted = false
     private var creationAttempted = false
     private var enabled = false
+    private var keepSurfaceWarm = false
+    private var presentationSuppressed = false
     private var pendingPaintSplash: PendingPaintSplash? = null
     private var pendingBackdropFrame: PendingBackdropFrame? = null
     private var pendingBackdropRectUpdate: PendingBackdropRectUpdate? = null
@@ -89,11 +92,25 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     }
 
     fun setOverlayEnabled(isEnabled: Boolean) {
+        val start = ZynaPerfLog.start()
         if (enabled == isEnabled) {
+            ZynaPerfLog.end(
+                start,
+                "vulkanOverlay.setEnabled.noop"
+            ) {
+                "enabled=$enabled available=${NativeVulkanChat.isAvailable}"
+            }
             return
         }
         enabled = isEnabled
-        visibility = if (enabled && NativeVulkanChat.isAvailable) INVISIBLE else GONE
+        visibility = if (enabled && NativeVulkanChat.isAvailable) {
+            if (keepSurfaceWarm) VISIBLE else INVISIBLE
+        } else {
+            GONE
+        }
+        if (visibility == VISIBLE && keepSurfaceWarm) {
+            alpha = 0f
+        }
         if (enabled) {
             ensureRenderer()
         } else {
@@ -103,6 +120,50 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             clearPendingSplash()
             clearBackdropFrame(clearNative = true)
             clearNativeSurface()
+        }
+        ZynaPerfLog.end(
+            start,
+            "vulkanOverlay.setEnabled"
+        ) {
+            "enabled=$enabled available=${NativeVulkanChat.isAvailable} " +
+                "visibility=$visibility handle=${nativeHandle != 0L}"
+        }
+    }
+
+    fun warmSurface() {
+        val start = ZynaPerfLog.start()
+        keepSurfaceWarm = true
+        if (!enabled || !NativeVulkanChat.isAvailable) {
+            ZynaPerfLog.end(
+                start,
+                "vulkanOverlay.warmSurface.skipped"
+            ) {
+                "enabled=$enabled available=${NativeVulkanChat.isAvailable}"
+            }
+            return
+        }
+
+        alpha = 0f
+        visibility = VISIBLE
+        ensureRenderer()
+        bindCurrentSurface()
+        ZynaPerfLog.end(
+            start,
+            "vulkanOverlay.warmSurface"
+        ) {
+            "surface=${surface != null} handle=${nativeHandle != 0L} size=${width}x$height"
+        }
+    }
+
+    fun setPresentationSuppressed(suppressed: Boolean) {
+        if (presentationSuppressed == suppressed) {
+            return
+        }
+        presentationSuppressed = suppressed
+        if (suppressed || (keepSurfaceWarm && !hasActiveBackdropFrame())) {
+            alpha = 0f
+        } else if (visibility == VISIBLE) {
+            alpha = 1f
         }
     }
 
@@ -151,6 +212,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         }
         renderPacingLogsRemaining = VULKAN_CHAT_PACING_LOG_LIMIT
         idleClearFramesRemaining = IDLE_CLEAR_FRAME_COUNT
+        alpha = presentedAlpha()
         visibility = VISIBLE
         bindCurrentSurface()
         startPendingSplashIfReady()
@@ -201,6 +263,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
                 textureTop = textureTop
             )
         }
+        alpha = presentedAlpha()
         visibility = VISIBLE
         bindCurrentSurface()
         val didQueue = startPendingBackdropIfReady()
@@ -242,6 +305,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             )
         }
 
+        alpha = presentedAlpha()
         visibility = VISIBLE
         bindCurrentSurface()
         synchronized(renderStateLock) {
@@ -270,6 +334,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     }
 
     override fun onAttachedToWindow() {
+        val start = ZynaPerfLog.start()
         super.onAttachedToWindow()
         if (enabled) {
             ensureRenderer()
@@ -278,6 +343,12 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
                 startPendingBackdropIfReady()
                 startPendingSplashIfReady() || requestRenderFrame()
             }
+        }
+        ZynaPerfLog.end(
+            start,
+            "vulkanOverlay.attach"
+        ) {
+            "enabled=$enabled visibility=$visibility handle=${nativeHandle != 0L}"
         }
     }
 
@@ -294,6 +365,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     }
 
     override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+        val start = ZynaPerfLog.start()
         if (ENABLE_VULKAN_CHAT_VERBOSE_RENDER_TIMING) {
             Log.d(TAG, "surface available ${width}x$height visible=$visibility pending=${pendingPaintSplash != null}")
         }
@@ -304,6 +376,12 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             setNativeSurface(width, height)
             startPendingBackdropIfReady()
             startPendingSplashIfReady() || requestRenderFrame()
+        }
+        ZynaPerfLog.end(
+            start,
+            "vulkanOverlay.surfaceAvailable"
+        ) {
+            "size=${width}x$height enabled=$enabled visibility=$visibility handle=${nativeHandle != 0L}"
         }
     }
 
@@ -335,7 +413,16 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) = Unit
 
     private fun ensureRenderer() {
+        val start = ZynaPerfLog.start()
         if (nativeHandle != 0L || creationAttempted || !NativeVulkanChat.isAvailable) {
+            ZynaPerfLog.endIfSlow(
+                start,
+                "vulkanOverlay.ensureRenderer.skip.slow",
+                thresholdMs = 1.0
+            ) {
+                "handle=${nativeHandle != 0L} attempted=$creationAttempted " +
+                    "available=${NativeVulkanChat.isAvailable}"
+            }
             return
         }
         creationAttempted = true
@@ -359,6 +446,12 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         } else {
             visibility = GONE
         }
+        ZynaPerfLog.end(
+            start,
+            "vulkanOverlay.ensureRenderer"
+        ) {
+            "handle=${nativeHandle != 0L} visibility=$visibility size=${width}x$height"
+        }
     }
 
     private fun hideIdleSurface() {
@@ -372,10 +465,21 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         idleClearFramesRemaining = 0
         if (!hasActiveBackdropFrame()) {
             clearNativeSurface()
-            visibility = if (enabled && NativeVulkanChat.isAvailable) INVISIBLE else GONE
+            if (keepSurfaceWarm && enabled && NativeVulkanChat.isAvailable) {
+                alpha = 0f
+                visibility = VISIBLE
+                bindCurrentSurface()
+            } else {
+                visibility = if (enabled && NativeVulkanChat.isAvailable) INVISIBLE else GONE
+            }
         } else {
+            alpha = presentedAlpha()
             visibility = VISIBLE
         }
+    }
+
+    private fun presentedAlpha(): Float {
+        return if (presentationSuppressed) 0f else 1f
     }
 
     private fun startPendingSplashIfReady(): Boolean {

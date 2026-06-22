@@ -1,31 +1,22 @@
 package com.zyna.app.ui.chat
 
+import android.content.Context
+import android.content.res.Configuration
+import android.graphics.Color
 import android.graphics.RectF
+import android.graphics.Typeface
+import android.text.TextUtils
 import android.util.Log
+import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
@@ -46,17 +37,19 @@ import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageForwardPreview
-import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.chat.render.PhotoGroupLayout
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
+import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
-import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
+import com.zyna.app.ui.glass.VulkanChatOverlayView
+import com.zyna.app.util.ZynaPerfLog
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -65,548 +58,639 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ChatScreen(
-    roomName: String,
-    roomId: String,
-    messages: List<MatrixChatMessage>,
-    windowChangeOrigin: TimelineWindowChangeOrigin,
-    isLoading: Boolean,
-    isLoadingOlder: Boolean,
-    canLoadOlder: Boolean,
-    canLoadNewer: Boolean,
-    isAtLiveEdge: Boolean,
-    scrollToLiveEdgeRequested: Boolean,
-    errorMessage: String?,
-    isSendingMessage: Boolean = false,
-    sendErrorMessage: String? = null,
-    replyTarget: MatrixReplyInfo? = null,
-    editTarget: MatrixEditTarget? = null,
-    forwardTarget: MatrixForwardTarget? = null,
-    matrixMediaLoader: MatrixMediaLoader? = null,
-    jumpTargetEventId: String? = null,
-    onRefresh: () -> Unit,
-    onBack: () -> Unit,
-    onLoadOlder: () -> Unit,
-    onLoadNewer: () -> Unit,
-    onJumpToLiveEdge: () -> Unit,
-    onSendMessage: (String) -> Boolean = { false },
-    onAttachPhotos: () -> Unit = {},
-    onReplyToMessage: (MatrixReplyInfo) -> Unit = {},
-    onReplyHeaderClicked: (String) -> Unit = {},
-    onCancelReply: () -> Unit = {},
-    onEditMessage: (MatrixEditTarget) -> Unit = {},
-    onCancelEdit: () -> Unit = {},
-    onForwardMessage: (MatrixForwardTarget) -> Unit = {},
-    onCancelForward: () -> Unit = {},
-    onRetryOutgoingEnvelope: (String) -> Unit = {},
-    onDiscardOutgoingEnvelope: (String) -> Unit = {},
-    onRedactMessage: (String) -> Unit = {},
-    onRedactMessages: (List<String>) -> Unit = { messageIds ->
-        messageIds.forEach { messageId -> onRedactMessage(messageId) }
-    },
-    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit = {},
-    onVisibleReadReceiptCandidate: (
-        roomId: String,
-        eventId: String?,
-        canEstablishBaseline: Boolean
-    ) -> Unit = { _, _, _ -> },
-    onJumpTargetConsumed: (String) -> Unit = {},
-    onScrollToLiveEdgeConsumed: () -> Unit = {}
-) {
-    val glassPalette = chatGlassPalette()
-    val sendErrorColor = MaterialTheme.colorScheme.error.toArgb()
-    var photoViewerRequest by remember { mutableStateOf<PhotoViewerOpenRequest?>(null) }
-    Box(Modifier.fillMaxSize()) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    navigationIcon = {
-                        TextButton(onClick = onBack) {
-                            Text("Back")
-                        }
-                    },
-                    title = {
-                        Column {
-                            Text(
-                                text = roomName,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                text = roomId,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    },
-                    actions = {
-                        TextButton(
-                            onClick = onRefresh,
-                            enabled = !isLoading
-                        ) {
-                            Text(if (isLoading) "Loading" else "Refresh")
-                        }
-                    }
-                )
-            }
-        ) { innerPadding ->
-            when {
-                errorMessage != null -> Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = errorMessage,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
-                else -> ChatMessageList(
-                    messages = messages,
-                    roomId = roomId,
-                    windowChangeOrigin = windowChangeOrigin,
-                    isLoading = isLoading,
-                    isLoadingOlder = isLoadingOlder,
-                    canLoadOlder = canLoadOlder,
-                    canLoadNewer = canLoadNewer,
-                    isAtLiveEdge = isAtLiveEdge,
-                    scrollToLiveEdgeRequested = scrollToLiveEdgeRequested,
-                    isSendingMessage = isSendingMessage,
-                    sendErrorMessage = sendErrorMessage,
-                    sendErrorColor = sendErrorColor,
-                    replyTarget = replyTarget,
-                    editTarget = editTarget,
-                    forwardTarget = forwardTarget,
-                    matrixMediaLoader = matrixMediaLoader,
-                    jumpTargetEventId = jumpTargetEventId,
-                    palette = glassPalette,
-                    onLoadOlder = onLoadOlder,
-                    onLoadNewer = onLoadNewer,
-                    onJumpToLiveEdge = onJumpToLiveEdge,
-                    onSendMessage = onSendMessage,
-                    onAttachPhotos = onAttachPhotos,
-                    onReplyToMessage = onReplyToMessage,
-                    onReplyHeaderClicked = onReplyHeaderClicked,
-                    onPhotoViewerRequested = { request ->
-                        photoViewerRequest = request
-                    },
-                    onCancelReply = onCancelReply,
-                    onEditMessage = onEditMessage,
-                    onCancelEdit = onCancelEdit,
-                    onForwardMessage = onForwardMessage,
-                    onCancelForward = onCancelForward,
-                    onRetryOutgoingEnvelope = onRetryOutgoingEnvelope,
-                    onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope,
-                    onRedactMessage = onRedactMessage,
-                    onRedactMessages = onRedactMessages,
-                    onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed,
-                    onVisibleReadReceiptCandidate = onVisibleReadReceiptCandidate,
-                    onJumpTargetConsumed = onJumpTargetConsumed,
-                    onScrollToLiveEdgeConsumed = onScrollToLiveEdgeConsumed,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(innerPadding)
-                )
-            }
-        }
+data class ChatScreenViewState(
+    val roomName: String,
+    val roomId: String,
+    val messages: List<MatrixChatMessage>,
+    val windowChangeOrigin: TimelineWindowChangeOrigin,
+    val isLoading: Boolean,
+    val isLoadingOlder: Boolean,
+    val canLoadOlder: Boolean,
+    val canLoadNewer: Boolean,
+    val isAtLiveEdge: Boolean,
+    val scrollToLiveEdgeRequested: Boolean,
+    val errorMessage: String?,
+    val isSendingMessage: Boolean,
+    val sendErrorMessage: String?,
+    val replyTarget: MatrixReplyInfo?,
+    val editTarget: MatrixEditTarget?,
+    val forwardTarget: MatrixForwardTarget?,
+    val matrixMediaLoader: MatrixMediaLoader?,
+    val jumpTargetEventId: String?
+)
 
-        val viewerRequest = photoViewerRequest
-        if (viewerRequest != null && matrixMediaLoader != null) {
-            key(viewerRequest) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = { context ->
-                        PhotoViewerLayer(context, matrixMediaLoader).apply {
-                            onDismissed = {
-                                photoViewerRequest = null
-                            }
-                            open(viewerRequest)
-                        }
-                    },
-                    update = { layer ->
-                        layer.onDismissed = {
-                            photoViewerRequest = null
-                        }
-                    }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatMessageList(
-    messages: List<MatrixChatMessage>,
-    roomId: String,
-    windowChangeOrigin: TimelineWindowChangeOrigin,
-    isLoading: Boolean,
-    isLoadingOlder: Boolean,
-    canLoadOlder: Boolean,
-    canLoadNewer: Boolean,
-    isAtLiveEdge: Boolean,
-    scrollToLiveEdgeRequested: Boolean,
-    isSendingMessage: Boolean,
-    sendErrorMessage: String?,
-    sendErrorColor: Int,
-    replyTarget: MatrixReplyInfo?,
-    editTarget: MatrixEditTarget?,
-    forwardTarget: MatrixForwardTarget?,
-    matrixMediaLoader: MatrixMediaLoader?,
-    jumpTargetEventId: String?,
-    palette: GlassPalette,
-    onLoadOlder: () -> Unit,
-    onLoadNewer: () -> Unit,
-    onJumpToLiveEdge: () -> Unit,
-    onSendMessage: (String) -> Boolean,
-    onAttachPhotos: () -> Unit,
-    onReplyToMessage: (MatrixReplyInfo) -> Unit,
-    onReplyHeaderClicked: (String) -> Unit,
-    onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
-    onCancelReply: () -> Unit,
-    onEditMessage: (MatrixEditTarget) -> Unit,
-    onCancelEdit: () -> Unit,
-    onForwardMessage: (MatrixForwardTarget) -> Unit,
-    onCancelForward: () -> Unit,
-    onRetryOutgoingEnvelope: (String) -> Unit,
-    onDiscardOutgoingEnvelope: (String) -> Unit,
-    onRedactMessage: (String) -> Unit,
-    onRedactMessages: (List<String>) -> Unit,
-    onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
-    onVisibleReadReceiptCandidate: (
+data class ChatScreenViewActions(
+    val onRefresh: () -> Unit,
+    val onBack: () -> Unit,
+    val onLoadOlder: () -> Unit,
+    val onLoadNewer: () -> Unit,
+    val onJumpToLiveEdge: () -> Unit,
+    val onSendMessage: (String) -> Boolean,
+    val onAttachPhotos: () -> Unit,
+    val onReplyToMessage: (MatrixReplyInfo) -> Unit,
+    val onReplyHeaderClicked: (String) -> Unit,
+    val onCancelReply: () -> Unit,
+    val onEditMessage: (MatrixEditTarget) -> Unit,
+    val onCancelEdit: () -> Unit,
+    val onForwardMessage: (MatrixForwardTarget) -> Unit,
+    val onCancelForward: () -> Unit,
+    val onRetryOutgoingEnvelope: (String) -> Unit,
+    val onDiscardOutgoingEnvelope: (String) -> Unit,
+    val onRedactMessage: (String) -> Unit,
+    val onRedactMessages: (List<String>) -> Unit,
+    val onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit,
+    val onVisibleReadReceiptCandidate: (
         roomId: String,
         eventId: String?,
         canEstablishBaseline: Boolean
     ) -> Unit,
-    onJumpTargetConsumed: (String) -> Unit,
-    onScrollToLiveEdgeConsumed: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val messageTheme = MessageRenderTheme(
-        outgoingBubble = MaterialTheme.colorScheme.primaryContainer.toArgb(),
-        outgoingText = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
-        outgoingMetadata = MaterialTheme.colorScheme.onPrimaryContainer.toArgb(),
-        incomingBubble = MaterialTheme.colorScheme.surfaceVariant.toArgb(),
-        incomingText = MaterialTheme.colorScheme.onSurfaceVariant.toArgb(),
-        incomingMetadata = MaterialTheme.colorScheme.onSurfaceVariant.toArgb()
-    )
+    val onJumpTargetConsumed: (String) -> Unit,
+    val onScrollToLiveEdgeConsumed: () -> Unit
+)
 
-    AndroidView(
-        modifier = modifier,
-        factory = { context ->
-            val chatLayout = GlassChatLayout(context)
-            chatLayout.recyclerView.adapter = ChatMessageAdapter(
-                messageTheme = messageTheme,
-                matrixMediaLoader = matrixMediaLoader,
-                onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
-                onContextMenuRequested = chatLayout::showMessageContextMenu,
-                onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
-                onReplyHeaderClicked = onReplyHeaderClicked,
-                onPhotoViewerRequested = onPhotoViewerRequested
-            )
-            chatLayout.recyclerView.addOnScrollListener(MediaPrefetchScrollListener)
-            chatLayout.onLoadOlderMessages = onLoadOlder
-            chatLayout.onLoadNewerMessages = onLoadNewer
-            chatLayout.onScrollToLiveEdge = onJumpToLiveEdge
-            chatLayout.onReplyToMessage = { target ->
-                onReplyToMessage(target.toMatrixReplyInfo())
-            }
-            chatLayout.onEditMessage = { target ->
-                onEditMessage(target.toMatrixEditTarget())
-            }
-            chatLayout.onForwardMessage = { target ->
-                onForwardMessage(target.toMatrixForwardTarget())
-            }
-            chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
-            chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
-            chatLayout.onRedactMessage = onRedactMessage
-            chatLayout.onRedactMessages = onRedactMessages
-            chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
-            chatLayout.onEvaluateVisibleReadReceiptCandidate = {
-                chatLayout.evaluateVisibleReadReceiptCandidate(isAtLiveEdge) { eventId, canEstablishBaseline ->
-                    onVisibleReadReceiptCandidate(roomId, eventId, canEstablishBaseline)
-                }
-            }
-            chatLayout.inputBar.onSendMessage = onSendMessage
-            chatLayout.inputBar.onAttachClicked = onAttachPhotos
-            chatLayout.inputBar.onPreviewCancelled = {
-                if (forwardTarget != null) onCancelForward() else onCancelReply()
-            }
-            chatLayout.inputBar.allowEmptySend = forwardTarget != null
-            chatLayout.inputBar.setPreview(
-                forwardTarget?.toComposerPreview() ?: replyTarget?.toComposerPreview()
-            )
-            chatLayout.inputBar.onEditCancelled = onCancelEdit
-            chatLayout.inputBar.setEditDraft(editTarget?.eventId, editTarget?.body)
-            chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
-            chatLayout.setPalette(palette)
-            chatLayout.setPaginationState(
-                isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder &&
-                    !isLoading &&
-                    jumpTargetEventId == null &&
-                    !scrollToLiveEdgeRequested,
-                canLoadNewer = canLoadNewer &&
-                    !isLoading &&
-                    jumpTargetEventId == null &&
-                    !scrollToLiveEdgeRequested
-            )
-            chatLayout.setLiveEdgeState(isAtLiveEdge)
-            chatLayout.setEmptyState(messages.isEmpty(), isLoading)
-            chatLayout.setComposerState(
-                isSending = isSendingMessage,
-                errorMessage = sendErrorMessage,
-                errorColor = sendErrorColor
-            )
-            chatLayout
-        },
-        update = { chatLayout ->
-            chatLayout.setPalette(palette)
-            chatLayout.onLoadOlderMessages = onLoadOlder
-            chatLayout.onLoadNewerMessages = onLoadNewer
-            chatLayout.onScrollToLiveEdge = onJumpToLiveEdge
-            chatLayout.onReplyToMessage = { target ->
-                onReplyToMessage(target.toMatrixReplyInfo())
-            }
-            chatLayout.onEditMessage = { target ->
-                onEditMessage(target.toMatrixEditTarget())
-            }
-            chatLayout.onForwardMessage = { target ->
-                onForwardMessage(target.toMatrixForwardTarget())
-            }
-            chatLayout.onRetryOutgoingEnvelope = onRetryOutgoingEnvelope
-            chatLayout.onDiscardOutgoingEnvelope = onDiscardOutgoingEnvelope
-            chatLayout.onRedactMessage = onRedactMessage
-            chatLayout.onRedactMessages = onRedactMessages
-            chatLayout.onDebugMarkOutgoingEnvelopeFailed = onDebugMarkOutgoingEnvelopeFailed
-            chatLayout.onEvaluateVisibleReadReceiptCandidate = {
-                chatLayout.evaluateVisibleReadReceiptCandidate(isAtLiveEdge) { eventId, canEstablishBaseline ->
-                    onVisibleReadReceiptCandidate(roomId, eventId, canEstablishBaseline)
-                }
-            }
-            chatLayout.inputBar.onSendMessage = onSendMessage
-            chatLayout.inputBar.onAttachClicked = onAttachPhotos
-            chatLayout.inputBar.onPreviewCancelled = {
-                if (forwardTarget != null) onCancelForward() else onCancelReply()
-            }
-            chatLayout.inputBar.allowEmptySend = forwardTarget != null
-            chatLayout.inputBar.setPreview(
-                forwardTarget?.toComposerPreview() ?: replyTarget?.toComposerPreview()
-            )
-            chatLayout.inputBar.onEditCancelled = onCancelEdit
-            chatLayout.inputBar.setEditDraft(editTarget?.eventId, editTarget?.body)
-            chatLayout.inputBar.setEditPreview(editTarget?.toComposerPreview())
-            chatLayout.setPaginationState(
-                isLoadingOlder = isLoadingOlder,
-                canLoadOlder = canLoadOlder &&
-                    !isLoading &&
-                    jumpTargetEventId == null &&
-                    !scrollToLiveEdgeRequested,
-                canLoadNewer = canLoadNewer &&
-                    !isLoading &&
-                    jumpTargetEventId == null &&
-                    !scrollToLiveEdgeRequested
-            )
-            chatLayout.setLiveEdgeState(isAtLiveEdge)
-            chatLayout.setEmptyState(messages.isEmpty(), isLoading)
-            chatLayout.setComposerState(
-                isSending = isSendingMessage,
-                errorMessage = sendErrorMessage,
-                errorColor = sendErrorColor
-            )
+internal class ChatScreenView(
+    context: Context,
+    vulkanOverlayHost: VulkanChatOverlayView?,
+    private val vulkanForegroundHost: FrameLayout?,
+    private val rootOverlayHost: FrameLayout?
+) : FrameLayout(context) {
+    private val initStart = ZynaPerfLog.start()
+    private val density = resources.displayMetrics.density
+    private var isDarkTheme = resources.configuration.isNightMode()
+    private var nativeColors = nativeChatColors(isDarkTheme)
+    private var palette = nativeColors.palette
+    private var messageTheme = nativeColors.messageTheme
+    private var sendErrorColor = nativeColors.sendError
+    private var statusTopInset = 0
+    private var photoViewerLayer: PhotoViewerLayer? = null
 
-            val recyclerView = chatLayout.recyclerView
-            val adapter = recyclerView.adapter as ChatMessageAdapter
-            adapter.onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture
-            adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
-            adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
-            adapter.onReplyHeaderClicked = onReplyHeaderClicked
-            adapter.onPhotoViewerRequested = onPhotoViewerRequested
-            adapter.matrixMediaLoader = matrixMediaLoader
-            val displayedMessages = messages
-                .asReversed()
-                .withMediaGroupPresentation(
-                    hasNewerBoundary = canLoadNewer,
-                    hasOlderBoundary = canLoadOlder
-                )
-            val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
-            val nextNewestMessageId = displayedMessages.firstOrNull()?.id
-            val hasNewerMessage = previousNewestMessageId != null &&
-                nextNewestMessageId != null &&
-                previousNewestMessageId != nextNewestMessageId
-            val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
-            val firstVisiblePosition = layoutManager?.findFirstVisibleItemPosition()
-                ?: RecyclerView.NO_POSITION
-            val wasAtBottom = firstVisiblePosition != RecyclerView.NO_POSITION &&
-                firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
-            val viewportAnchor = if (
-                !wasAtBottom &&
-                layoutManager != null &&
-                recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE &&
-                windowChangeOrigin == TimelineWindowChangeOrigin.DATABASE_PAGINATION
+    private val root = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        setBackgroundColor(palette.background)
+    }
+    private val topBar = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(palette.background)
+    }
+    private val backButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = "Back"
+        textSize = 16f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(nativeColors.actionText)
+        isClickable = true
+        isFocusable = true
+    }
+    private val titleColumn = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_VERTICAL
+    }
+    private val titleText = TextView(context).apply {
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        textSize = 17f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(nativeColors.titleText)
+    }
+    private val subtitleText = TextView(context).apply {
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        textSize = 12f
+        setTextColor(nativeColors.subtitleText)
+    }
+    private val refreshButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 15f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(nativeColors.actionText)
+        isClickable = true
+        isFocusable = true
+    }
+    private val contentFrame = FrameLayout(context)
+    private val chatLayoutStart = ZynaPerfLog.start()
+    private val chatLayout = GlassChatLayout(
+        context = context,
+        sharedVulkanOverlay = vulkanOverlayHost,
+        sharedForegroundHost = vulkanForegroundHost
+    ).also {
+        ZynaPerfLog.end(chatLayoutStart, "chatView.createGlassChatLayout")
+    }
+    private val errorView = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 15f
+        includeFontPadding = true
+        setTextColor(sendErrorColor)
+        visibility = View.GONE
+    }
+
+    init {
+        clipChildren = false
+        clipToPadding = false
+        setBackgroundColor(palette.background)
+
+        addView(
+            root,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        root.addView(
+            topBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(NATIVE_TOP_BAR_HEIGHT_DP)
+            )
+        )
+        topBar.addView(
+            backButton,
+            LinearLayout.LayoutParams(
+                dp(72),
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        topBar.addView(
+            titleColumn,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                1f
+            )
+        )
+        titleColumn.addView(
+            titleText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        titleColumn.addView(
+            subtitleText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        topBar.addView(
+            refreshButton,
+            LinearLayout.LayoutParams(
+                dp(96),
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        root.addView(
+            contentFrame,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        val adapterStart = ZynaPerfLog.start()
+        chatLayout.recyclerView.adapter = ChatMessageAdapter(
+            messageTheme = messageTheme,
+            matrixMediaLoader = null,
+            onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
+            onContextMenuRequested = chatLayout::showMessageContextMenu,
+            onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
+            onReplyHeaderClicked = {},
+            onPhotoViewerRequested = {}
+        )
+        chatLayout.recyclerView.addOnScrollListener(MediaPrefetchScrollListener)
+        ZynaPerfLog.end(adapterStart, "chatView.initAdapter")
+        contentFrame.addView(
+            chatLayout,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        contentFrame.addView(
+            errorView,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
+            val nextTopInset = insets.getInsets(WindowInsetsCompat.Type.systemBars()).top
+            if (statusTopInset != nextTopInset) {
+                statusTopInset = nextTopInset
+                topBar.updatePadding(top = statusTopInset)
+                val params = topBar.layoutParams as LinearLayout.LayoutParams
+                params.height = dp(NATIVE_TOP_BAR_HEIGHT_DP) + statusTopInset
+                topBar.layoutParams = params
+            }
+            insets
+        }
+        ZynaPerfLog.end(initStart, "chatView.init.done")
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        ViewCompat.requestApplyInsets(this)
+    }
+
+    override fun onDetachedFromWindow() {
+        removePhotoViewer()
+        super.onDetachedFromWindow()
+    }
+
+    fun handleBack(): Boolean {
+        val layer = photoViewerLayer ?: return false
+        layer.close(animated = true)
+        return true
+    }
+
+    fun render(state: ChatScreenViewState, actions: ChatScreenViewActions) {
+        updateNativeThemeIfNeeded()
+        val renderStart = ZynaPerfLog.start()
+        ZynaPerfLog.mark {
+            "chatView.render.begin roomId=${state.roomId} messages=${state.messages.size} " +
+                "origin=${state.windowChangeOrigin} loading=${state.isLoading} " +
+                "jump=${state.jumpTargetEventId != null} liveReq=${state.scrollToLiveEdgeRequested}"
+        }
+        titleText.text = state.roomName
+        subtitleText.text = state.roomId
+        backButton.setOnClickListener { actions.onBack() }
+        refreshButton.text = if (state.isLoading) "Loading" else "Refresh"
+        refreshButton.isEnabled = !state.isLoading
+        refreshButton.alpha = if (state.isLoading) 0.54f else 1f
+        refreshButton.setOnClickListener { actions.onRefresh() }
+
+        val errorMessage = state.errorMessage
+        if (errorMessage != null) {
+            chatLayout.visibility = View.GONE
+            errorView.text = errorMessage
+            errorView.visibility = View.VISIBLE
+            ZynaPerfLog.end(
+                renderStart,
+                "chatView.render.error"
             ) {
-                recyclerView.findViewportAnchor(adapter)
-            } else null
-            val wasEmpty = adapter.itemCount == 0
-            val themeChanged = adapter.messageTheme != messageTheme
-            val jumpTargetPosition = jumpTargetEventId?.let { targetEventId ->
-                displayedMessages.indexOfFirst { message ->
-                    message.eventId == targetEventId || message.id == targetEventId
-                }.takeIf { it != -1 }
+                "roomId=${state.roomId} message=${errorMessage.take(80)}"
             }
-            val shouldApplyJumpTarget = jumpTargetPosition != null &&
-                windowChangeOrigin == TimelineWindowChangeOrigin.JUMP
-            val shouldApplyScrollToLiveEdge = scrollToLiveEdgeRequested &&
-                windowChangeOrigin == TimelineWindowChangeOrigin.JUMP &&
-                displayedMessages.isNotEmpty()
-            val visibleCenterPosition = layoutManager?.visibleCenterAdapterPosition()
-            val jumpDistance = jumpTargetPosition?.let { targetPosition ->
-                abs(targetPosition - (visibleCenterPosition ?: targetPosition))
-            } ?: 0
-            val isSameWindowJump = adapter.currentList.isSameMessageWindow(displayedMessages)
-            val shouldTeleportJump = shouldApplyJumpTarget &&
-                (!isSameWindowJump || jumpDistance > LOCAL_JUMP_SMOOTH_SCROLL_MAX_DISTANCE)
-            val shouldSmoothLocalJump = shouldApplyJumpTarget &&
-                isSameWindowJump &&
-                !shouldTeleportJump
-            val teleportDirection = if (
-                jumpTargetPosition != null &&
-                shouldTeleportJump &&
-                !wasEmpty
+            return
+        }
+
+        errorView.visibility = View.GONE
+        chatLayout.visibility = View.VISIBLE
+        renderChatLayout(state, actions)
+        ZynaPerfLog.end(
+            renderStart,
+            "chatView.render.done"
+        ) {
+            "roomId=${state.roomId} messages=${state.messages.size}"
+        }
+    }
+
+    private fun renderChatLayout(
+        state: ChatScreenViewState,
+        actions: ChatScreenViewActions
+    ) {
+        val layoutRenderStart = ZynaPerfLog.start()
+        chatLayout.setPalette(palette)
+        chatLayout.onLoadOlderMessages = actions.onLoadOlder
+        chatLayout.onLoadNewerMessages = actions.onLoadNewer
+        chatLayout.onScrollToLiveEdge = actions.onJumpToLiveEdge
+        chatLayout.onReplyToMessage = { target ->
+            actions.onReplyToMessage(target.toMatrixReplyInfo())
+        }
+        chatLayout.onEditMessage = { target ->
+            actions.onEditMessage(target.toMatrixEditTarget())
+        }
+        chatLayout.onForwardMessage = { target ->
+            actions.onForwardMessage(target.toMatrixForwardTarget())
+        }
+        chatLayout.onRetryOutgoingEnvelope = actions.onRetryOutgoingEnvelope
+        chatLayout.onDiscardOutgoingEnvelope = actions.onDiscardOutgoingEnvelope
+        chatLayout.onRedactMessage = actions.onRedactMessage
+        chatLayout.onRedactMessages = actions.onRedactMessages
+        chatLayout.onDebugMarkOutgoingEnvelopeFailed = actions.onDebugMarkOutgoingEnvelopeFailed
+        chatLayout.onEvaluateVisibleReadReceiptCandidate = {
+            chatLayout.evaluateVisibleReadReceiptCandidate(state.isAtLiveEdge) { eventId, canEstablishBaseline ->
+                actions.onVisibleReadReceiptCandidate(state.roomId, eventId, canEstablishBaseline)
+            }
+        }
+        chatLayout.inputBar.onSendMessage = actions.onSendMessage
+        chatLayout.inputBar.onAttachClicked = actions.onAttachPhotos
+        chatLayout.inputBar.onPreviewCancelled = {
+            if (state.forwardTarget != null) actions.onCancelForward() else actions.onCancelReply()
+        }
+        chatLayout.inputBar.allowEmptySend = state.forwardTarget != null
+        chatLayout.inputBar.setPreview(
+            state.forwardTarget?.toComposerPreview() ?: state.replyTarget?.toComposerPreview()
+        )
+        chatLayout.inputBar.onEditCancelled = actions.onCancelEdit
+        chatLayout.inputBar.setEditDraft(state.editTarget?.eventId, state.editTarget?.body)
+        chatLayout.inputBar.setEditPreview(state.editTarget?.toComposerPreview())
+        chatLayout.setPaginationState(
+            isLoadingOlder = state.isLoadingOlder,
+            canLoadOlder = state.canLoadOlder &&
+                !state.isLoading &&
+                state.jumpTargetEventId == null &&
+                !state.scrollToLiveEdgeRequested,
+            canLoadNewer = state.canLoadNewer &&
+                !state.isLoading &&
+                state.jumpTargetEventId == null &&
+                !state.scrollToLiveEdgeRequested
+        )
+        chatLayout.setLiveEdgeState(state.isAtLiveEdge)
+        chatLayout.setEmptyState(state.messages.isEmpty(), state.isLoading)
+        chatLayout.setComposerState(
+            isSending = state.isSendingMessage,
+            errorMessage = state.sendErrorMessage,
+            errorColor = sendErrorColor
+        )
+
+        val recyclerView = chatLayout.recyclerView
+        val adapter = recyclerView.adapter as ChatMessageAdapter
+        adapter.onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture
+        adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
+        adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
+        adapter.onReplyHeaderClicked = actions.onReplyHeaderClicked
+        adapter.onPhotoViewerRequested = { request ->
+            openPhotoViewer(request, state.matrixMediaLoader)
+        }
+        adapter.matrixMediaLoader = state.matrixMediaLoader
+        val presentationStart = ZynaPerfLog.start()
+        val displayedMessages = state.messages
+            .asReversed()
+            .withMediaGroupPresentation(
+                hasNewerBoundary = state.canLoadNewer,
+                hasOlderBoundary = state.canLoadOlder
+            )
+        ZynaPerfLog.end(
+            presentationStart,
+            "chatView.mediaPresentation"
+        ) {
+            "roomId=${state.roomId} input=${state.messages.size} displayed=${displayedMessages.size}"
+        }
+        val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
+        val nextNewestMessageId = displayedMessages.firstOrNull()?.id
+        val hasNewerMessage = previousNewestMessageId != null &&
+            nextNewestMessageId != null &&
+            previousNewestMessageId != nextNewestMessageId
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
+        val firstVisiblePosition = layoutManager?.findFirstVisibleItemPosition()
+            ?: RecyclerView.NO_POSITION
+        val wasAtBottom = firstVisiblePosition != RecyclerView.NO_POSITION &&
+            firstVisiblePosition <= NEWEST_EDGE_THRESHOLD
+        val viewportAnchor = if (
+            !wasAtBottom &&
+            layoutManager != null &&
+            recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE &&
+            state.windowChangeOrigin == TimelineWindowChangeOrigin.DATABASE_PAGINATION
+        ) {
+            recyclerView.findViewportAnchor(adapter)
+        } else null
+        val wasEmpty = adapter.itemCount == 0
+        val themeChanged = adapter.messageTheme != messageTheme
+        val jumpTargetPosition = state.jumpTargetEventId?.let { targetEventId ->
+            displayedMessages.indexOfFirst { message ->
+                message.eventId == targetEventId || message.id == targetEventId
+            }.takeIf { it != -1 }
+        }
+        val shouldApplyJumpTarget = jumpTargetPosition != null &&
+            state.windowChangeOrigin == TimelineWindowChangeOrigin.JUMP
+        val shouldApplyScrollToLiveEdge = state.scrollToLiveEdgeRequested &&
+            state.windowChangeOrigin == TimelineWindowChangeOrigin.JUMP &&
+            displayedMessages.isNotEmpty()
+        val visibleCenterPosition = layoutManager?.visibleCenterAdapterPosition()
+        val jumpDistance = jumpTargetPosition?.let { targetPosition ->
+            abs(targetPosition - (visibleCenterPosition ?: targetPosition))
+        } ?: 0
+        val isSameWindowJump = adapter.currentList.isSameMessageWindow(displayedMessages)
+        val shouldTeleportJump = shouldApplyJumpTarget &&
+            (!isSameWindowJump || jumpDistance > LOCAL_JUMP_SMOOTH_SCROLL_MAX_DISTANCE)
+        val shouldSmoothLocalJump = shouldApplyJumpTarget &&
+            isSameWindowJump &&
+            !shouldTeleportJump
+        val teleportDirection = if (
+            jumpTargetPosition != null &&
+            shouldTeleportJump &&
+            !wasEmpty
+        ) {
+            inferTeleportDirection(
+                adapter = adapter,
+                layoutManager = layoutManager,
+                displayedMessages = displayedMessages,
+                targetPosition = jumpTargetPosition
+            )
+        } else null
+        val didBeginTeleport = teleportDirection?.let(chatLayout::beginSnapshotTeleport) == true
+        val didBeginLiveEdgeTeleport = if (
+            shouldApplyScrollToLiveEdge &&
+            !wasEmpty &&
+            !didBeginTeleport
+        ) {
+            chatLayout.beginSnapshotTeleport(ChatTeleportDirection.TO_NEWER)
+        } else {
+            false
+        }
+        if (state.jumpTargetEventId != null) {
+            logChatTeleport(
+                "native ui update origin=${state.windowChangeOrigin} " +
+                    "targetFound=${jumpTargetPosition != null} " +
+                    "targetPosition=$jumpTargetPosition " +
+                    "shouldApply=$shouldApplyJumpTarget " +
+                    "sameWindow=$isSameWindowJump distance=$jumpDistance " +
+                    "teleport=$shouldTeleportJump smooth=$shouldSmoothLocalJump " +
+                    "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
+                    "firstVisible=$firstVisiblePosition wasEmpty=$wasEmpty " +
+                    "direction=$teleportDirection didBegin=$didBeginTeleport"
+            )
+        }
+        if (state.scrollToLiveEdgeRequested) {
+            logChatTeleport(
+                "native live ui update origin=${state.windowChangeOrigin} " +
+                    "shouldApply=$shouldApplyScrollToLiveEdge " +
+                    "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
+                    "firstVisible=$firstVisiblePosition didBegin=$didBeginLiveEdgeTeleport"
+            )
+        }
+        adapter.messageTheme = messageTheme
+        val submitStart = ZynaPerfLog.start()
+        adapter.submitList(displayedMessages) {
+            ZynaPerfLog.end(
+                submitStart,
+                "chatView.submitList.commit"
             ) {
-                inferTeleportDirection(
-                    adapter = adapter,
-                    layoutManager = layoutManager,
-                    displayedMessages = displayedMessages,
-                    targetPosition = jumpTargetPosition
-                )
-            } else null
-            val didBeginTeleport = teleportDirection?.let(chatLayout::beginSnapshotTeleport) == true
-            val didBeginLiveEdgeTeleport = if (
-                shouldApplyScrollToLiveEdge &&
-                !wasEmpty &&
-                !didBeginTeleport
-            ) {
-                chatLayout.beginSnapshotTeleport(ChatTeleportDirection.TO_NEWER)
-            } else {
-                false
+                "roomId=${state.roomId} displayed=${displayedMessages.size} " +
+                    "wasEmpty=$wasEmpty children=${recyclerView.childCount}"
             }
-            if (jumpTargetEventId != null) {
-                logChatTeleport(
-                    "ui update origin=$windowChangeOrigin " +
-                        "targetFound=${jumpTargetPosition != null} " +
-                        "targetPosition=$jumpTargetPosition " +
-                        "shouldApply=$shouldApplyJumpTarget " +
-                        "sameWindow=$isSameWindowJump distance=$jumpDistance " +
-                        "teleport=$shouldTeleportJump smooth=$shouldSmoothLocalJump " +
-                        "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
-                        "firstVisible=$firstVisiblePosition wasEmpty=$wasEmpty " +
-                        "direction=$teleportDirection didBegin=$didBeginTeleport"
-                )
-            }
-            if (scrollToLiveEdgeRequested) {
-                logChatTeleport(
-                    "live ui update origin=$windowChangeOrigin " +
-                        "shouldApply=$shouldApplyScrollToLiveEdge " +
-                        "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
-                        "firstVisible=$firstVisiblePosition didBegin=$didBeginLiveEdgeTeleport"
-                )
-            }
-            adapter.messageTheme = messageTheme
-            adapter.submitList(displayedMessages) {
-                if (displayedMessages.isNotEmpty()) {
-                    if (shouldApplyScrollToLiveEdge) {
-                        recyclerView.stopScroll()
-                        chatLayout.scrollToBottom(animated = false)
-                        if (didBeginLiveEdgeTeleport) {
-                            recyclerView.runAfterNextPreDraw {
-                                chatLayout.completeSnapshotTeleport {
-                                    onScrollToLiveEdgeConsumed()
-                                }
+            if (displayedMessages.isNotEmpty()) {
+                if (shouldApplyScrollToLiveEdge) {
+                    recyclerView.stopScroll()
+                    chatLayout.scrollToBottom(animated = false)
+                    if (didBeginLiveEdgeTeleport) {
+                        recyclerView.runAfterNextPreDraw {
+                            chatLayout.completeSnapshotTeleport {
+                                actions.onScrollToLiveEdgeConsumed()
                             }
-                        } else {
-                            onScrollToLiveEdgeConsumed()
                         }
-                    } else if (jumpTargetEventId != null && jumpTargetPosition != null && shouldApplyJumpTarget) {
-                        logChatTeleport(
-                            "commit scroll targetPosition=$jumpTargetPosition " +
-                                "didBegin=$didBeginTeleport childCount=${recyclerView.childCount}"
+                    } else {
+                        actions.onScrollToLiveEdgeConsumed()
+                    }
+                } else if (
+                    state.jumpTargetEventId != null &&
+                    jumpTargetPosition != null &&
+                    shouldApplyJumpTarget
+                ) {
+                    logChatTeleport(
+                        "native commit scroll targetPosition=$jumpTargetPosition " +
+                            "didBegin=$didBeginTeleport childCount=${recyclerView.childCount}"
+                    )
+                    recyclerView.stopScroll()
+                    if (didBeginTeleport) {
+                        layoutManager?.scrollToPositionWithOffset(
+                            jumpTargetPosition,
+                            recyclerView.jumpTargetScrollOffset()
                         )
-                        recyclerView.stopScroll()
-                        if (didBeginTeleport) {
+                        recyclerView.runAfterNextPreDraw {
+                            logChatTeleport(
+                                "native preDraw complete targetPosition=$jumpTargetPosition " +
+                                    "childCount=${recyclerView.childCount}"
+                            )
+                            chatLayout.completeSnapshotTeleport {
+                                chatLayout.highlightMessageAtAdapterPosition(jumpTargetPosition)
+                                actions.onJumpTargetConsumed(state.jumpTargetEventId)
+                            }
+                        }
+                    } else {
+                        if (shouldSmoothLocalJump) {
+                            val scrollDelayMillis = jumpDistance.localJumpScrollDelayMillis()
+                            recyclerView.smoothScrollToPosition(jumpTargetPosition)
+                            chatLayout.highlightMessageAtAdapterPosition(
+                                position = jumpTargetPosition,
+                                delayMillis = scrollDelayMillis + LOCAL_JUMP_HIGHLIGHT_DELAY_MS
+                            )
+                            recyclerView.postDelayed(
+                                { actions.onJumpTargetConsumed(state.jumpTargetEventId) },
+                                scrollDelayMillis
+                            )
+                        } else {
                             layoutManager?.scrollToPositionWithOffset(
                                 jumpTargetPosition,
                                 recyclerView.jumpTargetScrollOffset()
                             )
-                            recyclerView.runAfterNextPreDraw {
-                                logChatTeleport(
-                                    "preDraw complete targetPosition=$jumpTargetPosition " +
-                                        "childCount=${recyclerView.childCount}"
-                                )
-                                chatLayout.completeSnapshotTeleport {
-                                    chatLayout.highlightMessageAtAdapterPosition(jumpTargetPosition)
-                                    onJumpTargetConsumed(jumpTargetEventId)
-                                }
-                            }
-                        } else {
-                            if (shouldSmoothLocalJump) {
-                                val scrollDelayMillis = jumpDistance.localJumpScrollDelayMillis()
-                                recyclerView.smoothScrollToPosition(jumpTargetPosition)
-                                chatLayout.highlightMessageAtAdapterPosition(
-                                    position = jumpTargetPosition,
-                                    delayMillis = scrollDelayMillis + LOCAL_JUMP_HIGHLIGHT_DELAY_MS
-                                )
-                                recyclerView.postDelayed(
-                                    { onJumpTargetConsumed(jumpTargetEventId) },
-                                    scrollDelayMillis
-                                )
-                            } else {
-                                layoutManager?.scrollToPositionWithOffset(
-                                    jumpTargetPosition,
-                                    recyclerView.jumpTargetScrollOffset()
-                                )
-                                chatLayout.highlightMessageAtAdapterPosition(jumpTargetPosition)
-                                onJumpTargetConsumed(jumpTargetEventId)
-                            }
-                        }
-                    } else if (
-                        wasEmpty ||
-                        (
-                            wasAtBottom &&
-                                hasNewerMessage &&
-                                windowChangeOrigin != TimelineWindowChangeOrigin.DATABASE_PAGINATION
-                            )
-                    ) {
-                        chatLayout.scrollToBottom(animated = false)
-                    } else if (viewportAnchor != null) {
-                        val anchorPosition = displayedMessages.indexOfFirst { it.id == viewportAnchor.messageId }
-                        if (anchorPosition != -1) {
-                            layoutManager?.scrollToPositionWithOffset(
-                                anchorPosition,
-                                viewportAnchor.top
-                            )
+                            chatLayout.highlightMessageAtAdapterPosition(jumpTargetPosition)
+                            actions.onJumpTargetConsumed(state.jumpTargetEventId)
                         }
                     }
+                } else if (
+                    wasEmpty ||
+                    (
+                        wasAtBottom &&
+                            hasNewerMessage &&
+                            state.windowChangeOrigin != TimelineWindowChangeOrigin.DATABASE_PAGINATION
+                        )
+                ) {
+                    chatLayout.scrollToBottom(animated = false)
+                } else if (viewportAnchor != null) {
+                    val anchorPosition = displayedMessages.indexOfFirst { it.id == viewportAnchor.messageId }
+                    if (anchorPosition != -1) {
+                        layoutManager?.scrollToPositionWithOffset(
+                            anchorPosition,
+                            viewportAnchor.top
+                        )
+                    }
                 }
-                chatLayout.invalidateGlassContent()
-                chatLayout.prefetchOlderMessagesIfNeeded()
-                recyclerView.post {
-                    recyclerView.prefetchMediaAroundVisibleWindow()
-                }
-                chatLayout.scheduleVisibleReadReceiptCandidateEvaluation(
-                    delayMillis = READ_RECEIPT_CONTENT_UPDATE_DELAY_MS
-                )
             }
-            if (themeChanged) {
-                adapter.notifyDataSetChanged()
+            chatLayout.invalidateGlassContent()
+            chatLayout.prefetchOlderMessagesIfNeeded()
+            recyclerView.post {
+                recyclerView.prefetchMediaAroundVisibleWindow()
+            }
+            chatLayout.scheduleVisibleReadReceiptCandidateEvaluation(
+                delayMillis = READ_RECEIPT_CONTENT_UPDATE_DELAY_MS
+            )
+        }
+        if (themeChanged) {
+            val notifyStart = ZynaPerfLog.start()
+            adapter.notifyDataSetChanged()
+            ZynaPerfLog.end(notifyStart, "chatView.notifyDataSetChanged") {
+                "roomId=${state.roomId}"
             }
         }
-    )
+        ZynaPerfLog.end(
+            submitStart,
+            "chatView.submitList.call"
+        ) {
+            "roomId=${state.roomId} displayed=${displayedMessages.size}"
+        }
+        ZynaPerfLog.end(
+            layoutRenderStart,
+            "chatView.renderChatLayout.done"
+        ) {
+            "roomId=${state.roomId} displayed=${displayedMessages.size}"
+        }
+    }
+
+    private fun openPhotoViewer(request: PhotoViewerOpenRequest, imageLoader: MatrixMediaLoader?) {
+        imageLoader ?: return
+        val start = ZynaPerfLog.start()
+        removePhotoViewer()
+        val layer = PhotoViewerLayer(context, imageLoader).apply {
+            onDismissed = {
+                removePhotoViewer()
+            }
+            open(request)
+        }
+        photoViewerLayer = layer
+        val host = rootOverlayHost ?: this
+        host.addView(
+            layer,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        layer.bringToFront()
+        ZynaPerfLog.end(
+            start,
+            "chatView.openPhotoViewer"
+        ) {
+            "messageId=${request.messageId} items=${request.items.size}"
+        }
+    }
+
+    private fun removePhotoViewer() {
+        val layer = photoViewerLayer ?: return
+        photoViewerLayer = null
+        (layer.parent as? ViewGroup)?.removeView(layer)
+    }
+
+    private fun updateNativeThemeIfNeeded() {
+        val nextDarkTheme = resources.configuration.isNightMode()
+        if (nextDarkTheme == isDarkTheme) {
+            return
+        }
+        isDarkTheme = nextDarkTheme
+        nativeColors = nativeChatColors(nextDarkTheme)
+        palette = nativeColors.palette
+        messageTheme = nativeColors.messageTheme
+        sendErrorColor = nativeColors.sendError
+        applyNativeColors()
+    }
+
+    private fun applyNativeColors() {
+        setBackgroundColor(palette.background)
+        root.setBackgroundColor(palette.background)
+        topBar.setBackgroundColor(palette.background)
+        backButton.setTextColor(nativeColors.actionText)
+        titleText.setTextColor(nativeColors.titleText)
+        subtitleText.setTextColor(nativeColors.subtitleText)
+        refreshButton.setTextColor(nativeColors.actionText)
+        errorView.setTextColor(sendErrorColor)
+        chatLayout.setPalette(palette)
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * density).roundToInt()
+    }
 }
 
 private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
@@ -829,17 +913,67 @@ private fun RecyclerView.jumpTargetScrollOffset(): Int {
     return paddingTop + (availableHeight * JUMP_TARGET_VIEWPORT_FRACTION).toInt()
 }
 
-@Composable
-private fun chatGlassPalette(): GlassPalette {
-    val scheme = MaterialTheme.colorScheme
-    return GlassPalette(
-        background = scheme.surface.toArgb(),
-        glassTint = scheme.surface.copy(alpha = 0.18f).toArgb(),
-        glassTintStrong = scheme.surfaceContainerHighest.copy(alpha = 0.24f).toArgb(),
-        stroke = scheme.onSurface.copy(alpha = 0.18f).toArgb(),
-        text = scheme.onSurface.toArgb(),
-        hint = scheme.onSurfaceVariant.copy(alpha = 0.72f).toArgb()
-    )
+private data class NativeChatColors(
+    val palette: GlassPalette,
+    val messageTheme: MessageRenderTheme,
+    val actionText: Int,
+    val titleText: Int,
+    val subtitleText: Int,
+    val sendError: Int
+)
+
+private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
+    return if (isDarkTheme) {
+        NativeChatColors(
+            palette = GlassPalette(
+                background = Color.rgb(18, 18, 22),
+                glassTint = Color.argb(58, 48, 47, 56),
+                glassTintStrong = Color.argb(82, 62, 60, 70),
+                stroke = Color.argb(74, 255, 255, 255),
+                text = Color.rgb(232, 225, 229),
+                hint = Color.argb(184, 202, 196, 208)
+            ),
+            messageTheme = MessageRenderTheme(
+                outgoingBubble = Color.rgb(79, 55, 139),
+                outgoingText = Color.rgb(234, 221, 255),
+                outgoingMetadata = Color.rgb(234, 221, 255),
+                incomingBubble = Color.rgb(49, 48, 56),
+                incomingText = Color.rgb(232, 225, 229),
+                incomingMetadata = Color.rgb(202, 196, 208)
+            ),
+            actionText = Color.rgb(208, 188, 255),
+            titleText = Color.rgb(232, 225, 229),
+            subtitleText = Color.rgb(202, 196, 208),
+            sendError = Color.rgb(255, 180, 171)
+        )
+    } else {
+        NativeChatColors(
+            palette = GlassPalette(
+                background = Color.WHITE,
+                glassTint = Color.argb(48, 255, 255, 255),
+                glassTintStrong = Color.argb(61, 255, 255, 255),
+                stroke = Color.argb(46, 0, 0, 0),
+                text = Color.rgb(29, 27, 32),
+                hint = Color.argb(153, 73, 69, 79)
+            ),
+            messageTheme = MessageRenderTheme(
+                outgoingBubble = Color.rgb(234, 221, 255),
+                outgoingText = Color.rgb(33, 0, 93),
+                outgoingMetadata = Color.rgb(33, 0, 93),
+                incomingBubble = Color.rgb(231, 224, 236),
+                incomingText = Color.rgb(29, 27, 32),
+                incomingMetadata = Color.rgb(73, 69, 79)
+            ),
+            actionText = Color.rgb(33, 0, 93),
+            titleText = Color.rgb(29, 27, 32),
+            subtitleText = Color.rgb(73, 69, 79),
+            sendError = Color.rgb(186, 26, 26)
+        )
+    }
+}
+
+private fun Configuration.isNightMode(): Boolean {
+    return (uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 }
 
 private class ChatMessageAdapter(
@@ -866,7 +1000,14 @@ private class ChatMessageAdapter(
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
-        return ChatMessageViewHolder(parent, matrixMediaLoader)
+        val start = ZynaPerfLog.start()
+        return ChatMessageViewHolder(parent, matrixMediaLoader).also {
+            ZynaPerfLog.endIfSlow(
+                start,
+                "chatAdapter.createViewHolder.slow",
+                thresholdMs = 4.0
+            )
+        }
     }
 
     override fun getItemId(position: Int): Long {
@@ -874,6 +1015,7 @@ private class ChatMessageAdapter(
     }
 
     override fun onBindViewHolder(holder: ChatMessageViewHolder, position: Int) {
+        val start = ZynaPerfLog.start()
         holder.bind(
             message = getItem(position).toRenderModel(),
             theme = messageTheme,
@@ -883,6 +1025,13 @@ private class ChatMessageAdapter(
             onReplyHeaderClicked = onReplyHeaderClicked,
             onPhotoViewerRequested = onPhotoViewerRequested
         )
+        ZynaPerfLog.endIfSlow(
+            start,
+            "chatAdapter.bind.slow",
+            thresholdMs = 4.0
+        ) {
+            "position=$position id=${getItem(position).id}"
+        }
     }
 
     override fun onCurrentListChanged(
@@ -1298,6 +1447,7 @@ private const val MEDIA_PREFETCH_MAX_WIDTH_DP = 320
 private const val MEDIA_PREFETCH_MIN_HEIGHT_DP = 128
 private const val MEDIA_PREFETCH_MAX_HEIGHT_DP = 390
 private const val MEDIA_PREFETCH_TILE_SPACING_DP = 2
+private const val NATIVE_TOP_BAR_HEIGHT_DP = 64
 private const val FNV_64_OFFSET_BASIS = -3750763034362895579L
 private const val FNV_64_PRIME = 1099511628211L
 

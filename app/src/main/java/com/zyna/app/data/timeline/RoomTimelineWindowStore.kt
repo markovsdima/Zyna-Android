@@ -7,6 +7,7 @@ import com.zyna.app.data.local.TimelineWindowBounds
 import com.zyna.app.data.local.TimelineWindowSnapshot
 import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.util.ZynaPerfLog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,13 +64,31 @@ class RoomTimelineWindowStore(
     }
 
     suspend fun initialMessagesSnapshot(): List<MatrixChatMessage> {
+        val start = ZynaPerfLog.start()
+        ZynaPerfLog.mark {
+            "timelineStore.initialSnapshot.begin roomId=$roomId limit=$initialLimit"
+        }
         val snapshot = localCacheRepository.latestRoomTimelineWindowSnapshot(
             userId = userId,
             roomId = roomId,
             limit = initialLimit
         )
+        val applyStart = ZynaPerfLog.start()
         applySnapshotState(snapshot, keepLiveEdge = true)
         didFillInitialWindow = snapshot.messages.size >= initialLimit
+        ZynaPerfLog.end(
+            applyStart,
+            "timelineStore.initialSnapshot.applyState"
+        ) {
+            "roomId=$roomId count=${snapshot.messages.size}"
+        }
+        ZynaPerfLog.end(
+            start,
+            "timelineStore.initialSnapshot.done"
+        ) {
+            "roomId=$roomId count=${snapshot.messages.size} " +
+                "older=${snapshot.hasOlderInDb} newer=${snapshot.hasNewerInDb}"
+        }
         return snapshot.messages
     }
 

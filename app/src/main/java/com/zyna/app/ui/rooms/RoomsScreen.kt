@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.util.ZynaPerfLog
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -45,7 +47,8 @@ fun RoomsScreen(
     onOpenRoom: (MatrixRoomSummary) -> Unit,
     onLogout: (() -> Unit)?,
     title: String = "Chats",
-    onBack: (() -> Unit)? = null
+    onBack: (() -> Unit)? = null,
+    bottomContentPaddingDp: Int = 0
 ) {
     Scaffold(
         topBar = {
@@ -90,7 +93,8 @@ fun RoomsScreen(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(innerPadding)
+                    .padding(innerPadding),
+                contentPadding = PaddingValues(bottom = bottomContentPaddingDp.dp)
             ) {
                 items(
                     items = rooms,
@@ -98,7 +102,13 @@ fun RoomsScreen(
                 ) { room ->
                     RoomRow(
                         room = room,
-                        onClick = { onOpenRoom(room) }
+                        onClick = {
+                            ZynaPerfLog.mark {
+                                "rooms.tap roomId=${room.id} name=${room.displayName} " +
+                                    "rooms=${rooms.size}"
+                            }
+                            onOpenRoom(room)
+                        }
                     )
                     HorizontalDivider()
                 }

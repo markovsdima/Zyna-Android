@@ -26,6 +26,7 @@ import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
+import com.zyna.app.util.ZynaPerfLog
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -325,14 +326,30 @@ class AppViewModel(
         forwardTarget: MatrixForwardTarget?
     ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        val requestStart = ZynaPerfLog.start()
+        ZynaPerfLog.mark {
+            "openRoom.request roomId=${room.id} name=${room.displayName} " +
+                "route=${_uiState.value.route.perfName()} currentMessages=${_uiState.value.chatMessages.size}"
+        }
         stopChatTimeline()
+        ZynaPerfLog.end(
+            requestStart,
+            "openRoom.stopPrevious"
+        ) {
+            "roomId=${room.id}"
+        }
 
+        val storeStart = ZynaPerfLog.start()
         val timelineStore = RoomTimelineWindowStore(
             userId = userId,
             roomId = room.id,
             localCacheRepository = localCacheRepository
         )
+        ZynaPerfLog.end(storeStart, "openRoom.createStore") { "roomId=${room.id}" }
         openRoomJob = viewModelScope.launch {
+            val jobStart = ZynaPerfLog.start()
+            ZynaPerfLog.mark { "openRoom.job.start roomId=${room.id}" }
+            val snapshotStart = ZynaPerfLog.start()
             val initialMessages = try {
                 timelineStore.initialMessagesSnapshot()
             } catch (error: CancellationException) {
@@ -341,7 +358,14 @@ class AppViewModel(
                 Log.w(TAG, "Failed to load initial chat window from cache", error)
                 emptyList()
             }
+            ZynaPerfLog.end(
+                snapshotStart,
+                "openRoom.initialSnapshot"
+            ) {
+                "roomId=${room.id} count=${initialMessages.size}"
+            }
 
+            val stateUpdateStart = ZynaPerfLog.start()
             _uiState.update {
                 if (it.matrixState.userIdOrNull() != userId) {
                     it
@@ -370,17 +394,40 @@ class AppViewModel(
                     chatScrollToLiveEdgeRequested = false
                 )
             }
+            ZynaPerfLog.end(
+                stateUpdateStart,
+                "openRoom.stateUpdate"
+            ) {
+                "roomId=${room.id} count=${initialMessages.size}"
+            }
 
             if (_uiState.value.isRouteForRoom(userId, room.id)) {
+                val startTimelineStart = ZynaPerfLog.start()
                 startChatTimeline(
                     userId = userId,
                     roomId = room.id,
                     resetMessages = false,
                     timelineStore = timelineStore
                 )
+                ZynaPerfLog.end(
+                    startTimelineStart,
+                    "openRoom.startTimeline"
+                ) {
+                    "roomId=${room.id}"
+                }
+            }
+            ZynaPerfLog.end(
+                jobStart,
+                "openRoom.job.done"
+            ) {
+                "roomId=${room.id} count=${initialMessages.size}"
             }
         }.also { job ->
             job.invokeOnCompletion {
+                ZynaPerfLog.mark {
+                    "openRoom.job.complete roomId=${room.id} " +
+                        "cancelled=${job.isCancelled}"
+                }
                 if (openRoomJob == job) {
                     openRoomJob = null
                 }
@@ -1361,6 +1408,11 @@ class AppViewModel(
         chatCacheJob?.cancel()
         chatCacheJob = null
         chatTimelineWindowStore = timelineStore
+        ZynaPerfLog.mark {
+            "startChatTimeline.begin roomId=$roomId reset=$resetMessages " +
+                "currentMessages=${_uiState.value.chatMessages.size}"
+        }
+        val initialStateStart = ZynaPerfLog.start()
         _uiState.update {
             val nextMessages = if (resetMessages) emptyList() else it.chatMessages
             it.copy(
@@ -1385,8 +1437,15 @@ class AppViewModel(
                 }
             )
         }
+        ZynaPerfLog.end(
+            initialStateStart,
+            "startChatTimeline.initialState"
+        ) {
+            "roomId=$roomId reset=$resetMessages messages=${_uiState.value.chatMessages.size}"
+        }
         chatCacheJob = viewModelScope.launch {
             timelineStore.messages.collect { update ->
+                val cacheUpdateStart = ZynaPerfLog.start()
                 _uiState.update {
                     if (!it.isRouteForRoom(userId, roomId)) {
                         it
@@ -1399,19 +1458,45 @@ class AppViewModel(
                         isChatAtLiveEdge = timelineStore.isAtLiveEdge
                     )
                 }
+                ZynaPerfLog.end(
+                    cacheUpdateStart,
+                    "chatCache.collect.stateUpdate"
+                ) {
+                    "roomId=$roomId origin=${update.origin} count=${update.messages.size} " +
+                        "older=${update.hasOlderInDb} newer=${update.hasNewerInDb}"
+                }
             }
         }
         chatTimelineJob = viewModelScope.launch {
             try {
                 matrixClientService.roomTimelineMessageUpserts(roomId).collect { timelineUpdate ->
+                    ZynaPerfLog.mark {
+                        "chatTimeline.upsert.collect roomId=$roomId " +
+                            "messages=${timelineUpdate.messages.size} flush=${timelineUpdate.flushSummary}"
+                    }
                     val messages = timelineUpdate.messages
                     if (messages.isNotEmpty()) {
                         timelineStore.recordTimelineFlush(timelineUpdate.flushSummary)
+                        val cacheStart = ZynaPerfLog.start()
                         localCacheRepository.cacheRoomTimelineMessages(userId, roomId, messages)
+                        ZynaPerfLog.end(
+                            cacheStart,
+                            "chatTimeline.cacheMessages"
+                        ) {
+                            "roomId=$roomId count=${messages.size}"
+                        }
+                        val refreshStart = ZynaPerfLog.start()
                         timelineStore.refreshInitialWindowFromCacheIfNeeded(
                             timelineUpdate.flushSummary
                         )
+                        ZynaPerfLog.end(
+                            refreshStart,
+                            "chatTimeline.refreshInitialWindow"
+                        ) {
+                            "roomId=$roomId"
+                        }
                     }
+                    val timelineStateStart = ZynaPerfLog.start()
                     _uiState.update {
                         if (!it.isRouteForRoom(userId, roomId)) {
                             it
@@ -1420,6 +1505,12 @@ class AppViewModel(
                             isLoadingOlderChatMessages = false,
                             chatErrorMessage = null
                         )
+                    }
+                    ZynaPerfLog.end(
+                        timelineStateStart,
+                        "chatTimeline.stateUpdate"
+                    ) {
+                        "roomId=$roomId count=${messages.size}"
                     }
                 }
             } catch (error: CancellationException) {
@@ -1618,6 +1709,16 @@ class AppViewModel(
 
     private fun AppUiState.isRouteForRoom(userId: String, roomId: String): Boolean {
         return matrixState.userIdOrNull() == userId && isRouteForRoom(roomId)
+    }
+
+    private fun AppRoute.perfName(): String {
+        return when (this) {
+            AppRoute.ForwardPicker -> "ForwardPicker"
+            AppRoute.Login -> "Login"
+            is AppRoute.RecoveryKey -> "RecoveryKey"
+            AppRoute.Rooms -> "Rooms"
+            is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"
+        }
     }
 
     private fun MatrixClientState.userIdOrNull(): String? {

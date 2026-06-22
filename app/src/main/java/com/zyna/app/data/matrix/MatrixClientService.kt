@@ -51,6 +51,7 @@ import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.ProfileDetails
 import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
+import org.matrix.rustcomponents.sdk.RoomInfo
 import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
 import org.matrix.rustcomponents.sdk.RoomListEntriesListener
 import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
@@ -90,6 +91,7 @@ data class MatrixRoomSummary(
     val id: String,
     val displayName: String,
     val avatarUrl: String?,
+    val directUserId: String? = null,
     val lastMessageText: String? = null,
     val lastMessageSenderName: String? = null,
     val lastMessageAtMillis: Long? = null,
@@ -1141,6 +1143,7 @@ class MatrixClientService(
                     ?: roomInfo?.displayName?.takeIf { it.isNotBlank() }
                     ?: id(),
                 avatarUrl = avatarUrl() ?: roomInfo?.avatarUrl,
+                directUserId = roomInfo?.directUserId(),
                 lastMessageText = latestPreview.body,
                 lastMessageSenderName = latestPreview.senderName,
                 lastMessageAtMillis = latestPreview.timestampMillis,
@@ -1152,6 +1155,15 @@ class MatrixClientService(
         } finally {
             roomInfo?.destroy()
         }
+    }
+
+    private fun RoomInfo.directUserId(): String? {
+        if (!isDirect && !isDm) {
+            return null
+        }
+        return heroes.firstOrNull()
+            ?.userId
+            ?.takeIf { it.isNotBlank() }
     }
 
     private suspend fun Room.resolveLastOwnMessageStatus(

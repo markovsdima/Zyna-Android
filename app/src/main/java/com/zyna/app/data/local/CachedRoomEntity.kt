@@ -11,6 +11,7 @@ data class CachedRoomEntity(
     val id: String,
     val displayName: String,
     val avatarUrl: String?,
+    val directUserId: String?,
     val lastMessageText: String?,
     val lastMessageSenderName: String?,
     val lastMessageAtMillis: Long?,

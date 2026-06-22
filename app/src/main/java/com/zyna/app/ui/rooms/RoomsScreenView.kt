@@ -634,7 +634,11 @@ private fun MatrixRoomSummary.avatarInitial(): String {
 
 private fun MatrixRoomSummary.avatarColor(palette: RoomsPalette): Int {
     val colors = palette.avatarColors
-    return colors[id.djb2HashIndex(colors.size)]
+    return colors[stableAvatarId().djb2HashIndex(colors.size)]
+}
+
+private fun MatrixRoomSummary.stableAvatarId(): String {
+    return directUserId?.takeIf { it.isNotBlank() } ?: id
 }
 
 private fun MatrixRoomSummary.accessibilityText(): String {

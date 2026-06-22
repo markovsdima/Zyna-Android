@@ -60,6 +60,7 @@ class LocalCacheRepository(
                         id = room.id,
                         displayName = room.displayName,
                         avatarUrl = room.avatarUrl,
+                        directUserId = room.directUserId ?: existingRoom?.directUserId,
                         lastMessageText = room.lastMessageText ?: existingRoom?.lastMessageText,
                         lastMessageSenderName = room.lastMessageSenderName
                             ?: existingRoom?.lastMessageSenderName,
@@ -1056,6 +1057,7 @@ class LocalCacheRepository(
             id = id,
             displayName = displayName,
             avatarUrl = avatarUrl,
+            directUserId = directUserId,
             lastMessageText = lastMessageText,
             lastMessageSenderName = lastMessageSenderName,
             lastMessageAtMillis = lastMessageAtMillis,

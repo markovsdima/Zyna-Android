@@ -48,7 +48,7 @@ import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
-import com.zyna.app.ui.glass.VulkanChatOverlayView
+import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.util.ZynaPerfLog
 import java.time.Instant
 import java.time.ZoneId
@@ -110,8 +110,8 @@ data class ChatScreenViewActions(
 
 internal class ChatScreenView(
     context: Context,
-    vulkanOverlayHost: VulkanChatOverlayView?,
-    private val vulkanForegroundHost: FrameLayout?,
+    rootGlassOwnerKey: String,
+    rootGlassCoordinator: RootGlassLayerCoordinator,
     private val rootOverlayHost: FrameLayout?
 ) : FrameLayout(context) {
     private val initStart = ZynaPerfLog.start()
@@ -123,6 +123,11 @@ internal class ChatScreenView(
     private var sendErrorColor = nativeColors.sendError
     private var statusTopInset = 0
     private var photoViewerLayer: PhotoViewerLayer? = null
+    private var currentRoomId: String? = null
+
+    fun canReuseForRoom(roomId: String): Boolean {
+        return currentRoomId == null || currentRoomId == roomId
+    }
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -171,8 +176,8 @@ internal class ChatScreenView(
     private val chatLayoutStart = ZynaPerfLog.start()
     private val chatLayout = GlassChatLayout(
         context = context,
-        sharedVulkanOverlay = vulkanOverlayHost,
-        sharedForegroundHost = vulkanForegroundHost
+        rootGlassOwnerKey = rootGlassOwnerKey,
+        rootGlassCoordinator = rootGlassCoordinator
     ).also {
         ZynaPerfLog.end(chatLayoutStart, "chatView.createGlassChatLayout")
     }
@@ -398,15 +403,22 @@ internal class ChatScreenView(
                 !state.scrollToLiveEdgeRequested
         )
         chatLayout.setLiveEdgeState(state.isAtLiveEdge)
-        chatLayout.setEmptyState(state.messages.isEmpty(), state.isLoading)
+
+        val recyclerView = chatLayout.recyclerView
+        val adapter = recyclerView.adapter as ChatMessageAdapter
+        val shouldKeepCurrentMessagesForLoading = state.isLoading &&
+            state.messages.isEmpty() &&
+            currentRoomId == state.roomId &&
+            adapter.itemCount > 0
+        chatLayout.setEmptyState(
+            isEmpty = state.messages.isEmpty() && !shouldKeepCurrentMessagesForLoading,
+            isLoading = state.isLoading
+        )
         chatLayout.setComposerState(
             isSending = state.isSendingMessage,
             errorMessage = state.sendErrorMessage,
             errorColor = sendErrorColor
         )
-
-        val recyclerView = chatLayout.recyclerView
-        val adapter = recyclerView.adapter as ChatMessageAdapter
         adapter.onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture
         adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
         adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
@@ -510,6 +522,19 @@ internal class ChatScreenView(
                     "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
                     "firstVisible=$firstVisiblePosition didBegin=$didBeginLiveEdgeTeleport"
             )
+        }
+        currentRoomId = state.roomId
+        if (shouldKeepCurrentMessagesForLoading) {
+            ZynaPerfLog.mark {
+                "chatView.keepCurrentListForLoading roomId=${state.roomId} current=${adapter.itemCount}"
+            }
+            ZynaPerfLog.end(
+                layoutRenderStart,
+                "chatView.renderChatLayout.done"
+            ) {
+                "roomId=${state.roomId} displayed=${adapter.itemCount} kept=true"
+            }
+            return
         }
         adapter.messageTheme = messageTheme
         val submitStart = ZynaPerfLog.start()

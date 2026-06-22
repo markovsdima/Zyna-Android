@@ -346,6 +346,40 @@ class AppViewModel(
             localCacheRepository = localCacheRepository
         )
         ZynaPerfLog.end(storeStart, "openRoom.createStore") { "roomId=${room.id}" }
+
+        val routeUpdateStart = ZynaPerfLog.start()
+        _uiState.update {
+            if (it.matrixState.userIdOrNull() != userId) {
+                it
+            } else it.copy(
+                route = AppRoute.Chat(
+                    roomId = room.id,
+                    displayName = room.displayName
+                ),
+                chatMessages = emptyList(),
+                chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
+                chatTimelineFlushSummary = null,
+                isLoadingChat = true,
+                isLoadingOlderChatMessages = false,
+                canLoadOlderChatMessages = false,
+                canLoadNewerChatMessages = false,
+                isChatAtLiveEdge = true,
+                chatErrorMessage = null,
+                isSendingChatMessage = false,
+                chatSendErrorMessage = null,
+                chatReplyTarget = null,
+                chatEditTarget = null,
+                chatForwardTarget = forwardTarget,
+                pendingForwardTarget = null,
+                forwardReturnRoute = null,
+                chatJumpTargetEventId = null,
+                chatScrollToLiveEdgeRequested = false
+            )
+        }
+        ZynaPerfLog.end(routeUpdateStart, "openRoom.routeUpdate") {
+            "roomId=${room.id}"
+        }
+
         openRoomJob = viewModelScope.launch {
             val jobStart = ZynaPerfLog.start()
             ZynaPerfLog.mark { "openRoom.job.start roomId=${room.id}" }
@@ -367,13 +401,9 @@ class AppViewModel(
 
             val stateUpdateStart = ZynaPerfLog.start()
             _uiState.update {
-                if (it.matrixState.userIdOrNull() != userId) {
+                if (!it.isRouteForRoom(userId, room.id)) {
                     it
                 } else it.copy(
-                    route = AppRoute.Chat(
-                        roomId = room.id,
-                        displayName = room.displayName
-                    ),
                     chatMessages = initialMessages,
                     chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
                     chatTimelineFlushSummary = null,
@@ -382,16 +412,7 @@ class AppViewModel(
                     canLoadOlderChatMessages = true,
                     canLoadNewerChatMessages = false,
                     isChatAtLiveEdge = true,
-                    chatErrorMessage = null,
-                    isSendingChatMessage = false,
-                    chatSendErrorMessage = null,
-                    chatReplyTarget = null,
-                    chatEditTarget = null,
-                    chatForwardTarget = forwardTarget,
-                    pendingForwardTarget = null,
-                    forwardReturnRoute = null,
-                    chatJumpTargetEventId = null,
-                    chatScrollToLiveEdgeRequested = false
+                    chatErrorMessage = null
                 )
             }
             ZynaPerfLog.end(

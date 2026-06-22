@@ -5,7 +5,9 @@ import android.view.View
 
 data class ZynaScreenEntry(
     val key: String,
-    val ownsRootGlassLayers: Boolean = false,
+    val rootGlassOwnerKey: String? = null,
+    val retainViewOnRemove: Boolean = false,
     val createView: (Context) -> View,
-    val updateView: (View) -> Unit
+    val updateView: (View) -> Unit,
+    val onViewRemoved: (View) -> Unit = {}
 )

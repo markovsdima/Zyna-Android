@@ -18,11 +18,11 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
     )
 
     private val mountedEntries = mutableListOf<MountedEntry>()
-    private var rootGlassLayerOwnerDuringTransition: View? = null
+    private var rootGlassLayerOwnerDuringTransition: MountedEntry? = null
     private var transitionAnimator: ValueAnimator? = null
     private var isTransitionRunning = false
     private var pendingEntries: List<ZynaScreenEntry>? = null
-    var onRootGlassLayerStateChanged: (translationX: Float, isPresented: Boolean) -> Unit =
+    var onRootGlassLayerStateChanged: (ownerKey: String?, translationX: Float) -> Unit =
         { _, _ -> }
 
     fun topView(): View? {
@@ -133,13 +133,18 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
 
         val removed = mountedEntries.removeLast()
         val revealed = mountedEntries.lastOrNull()?.view
-        rootGlassLayerOwnerDuringTransition = if (removed.entry.ownsRootGlassLayers) {
-            removed.view
+        rootGlassLayerOwnerDuringTransition = if (removed.entry.rootGlassOwnerKey != null) {
+            removed
         } else {
             null
         }
         runPopAnimation(removed.view, revealed) {
-            removeView(removed.view)
+            if (removed.entry.retainViewOnRemove) {
+                parkRetainedView(removed.view)
+            } else {
+                removeView(removed.view)
+            }
+            removed.entry.onViewRemoved(removed.view)
             rootGlassLayerOwnerDuringTransition = null
             syncRootGlassLayerTranslation()
             popToSize(targetSize)
@@ -150,7 +155,15 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         transitionAnimator?.cancel()
         transitionAnimator = null
         rootGlassLayerOwnerDuringTransition = null
-        removeAllViews()
+        val removedEntries = mountedEntries.toList()
+        removedEntries.forEach { mounted ->
+            if (mounted.entry.retainViewOnRemove) {
+                parkRetainedView(mounted.view)
+            } else {
+                removeView(mounted.view)
+            }
+            mounted.entry.onViewRemoved(mounted.view)
+        }
         mountedEntries.clear()
         mountInitial(entries)
         syncRootGlassLayerTranslation()
@@ -257,9 +270,11 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         val owner = rootGlassLayerOwnerDuringTransition
             ?: mountedEntries
                 .lastOrNull()
-                ?.takeIf { it.entry.ownsRootGlassLayers }
-                ?.view
-        onRootGlassLayerStateChanged(owner?.translationX ?: 0f, owner != null)
+                ?.takeIf { it.entry.rootGlassOwnerKey != null }
+        onRootGlassLayerStateChanged(
+            owner?.entry?.rootGlassOwnerKey,
+            owner?.view?.translationX ?: 0f
+        )
     }
 
     private fun lerp(start: Float, end: Float, progress: Float): Float {
@@ -273,6 +288,19 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
     }
 
     private fun addFullSizeView(view: View) {
+        if (view.parent === this) {
+            view.layoutParams = LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            view.visibility = View.VISIBLE
+            view.isEnabled = true
+            bringChildToFront(view)
+            return
+        }
+        (view.parent as? ViewGroup)?.removeView(view)
+        view.visibility = View.VISIBLE
+        view.isEnabled = true
         addView(
             view,
             LayoutParams(
@@ -280,6 +308,23 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+    }
+
+    fun removeRetainedView(view: View) {
+        if (mountedEntries.any { it.view === view }) {
+            return
+        }
+        if (view.parent === this) {
+            removeView(view)
+        }
+    }
+
+    private fun parkRetainedView(view: View) {
+        view.translationX = 0f
+        view.translationY = 0f
+        view.alpha = 1f
+        view.visibility = View.INVISIBLE
+        view.isEnabled = false
     }
 
     private fun commonPrefixLength(left: List<String>, right: List<String>): Int {

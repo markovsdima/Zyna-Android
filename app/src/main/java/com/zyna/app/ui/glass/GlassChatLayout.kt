@@ -52,8 +52,8 @@ import kotlin.math.sqrt
 internal class GlassChatLayout @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
-    private val sharedVulkanOverlay: VulkanChatOverlayView? = null,
-    private val sharedForegroundHost: FrameLayout? = null
+    private val rootGlassOwnerKey: String? = null,
+    private val rootGlassCoordinator: RootGlassLayerCoordinator? = null
 ) : FrameLayout(context, attrs) {
     private val density = resources.displayMetrics.density
     val glassController = GlassBackdropController(this)
@@ -140,13 +140,12 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private var layoutLogCount = 0
     private var dispatchDrawLogCount = 0
     private var didLogFirstRecyclerPreDraw = false
-    private val layoutLocationOnScreen = IntArray(2)
-    private val overlayLocationOnScreen = IntArray(2)
-    private val foregroundHostLocationOnScreen = IntArray(2)
+    private val rootGlassOffset = IntArray(2)
     private var inputBarLocalLeft = 0
     private var inputBarLocalTop = 0
     private var inputBarLocalRight = 0
     private var inputBarLocalBottom = 0
+    private var isRootGlassOwnerRegistered = false
     private var externalInputBarPreDrawListenerAttached = false
     private val externalInputBarPreDrawListener = ViewTreeObserver.OnPreDrawListener {
         syncExternalInputBarLayout()
@@ -184,15 +183,19 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private val chatLayoutManager = LockableLinearLayoutManager(context).apply {
         reverseLayout = true
     }
-    private val ownsVulkanOverlay = sharedVulkanOverlay == null
-    private val usesExternalInputBar = sharedVulkanOverlay != null && sharedForegroundHost != null
-    private val usesExternalContextMenuLayer = sharedForegroundHost != null
-    private val vulkanOverlay = (sharedVulkanOverlay ?: VulkanChatOverlayView(context).apply {
-        setOverlayEnabled(BuildConfig.VULKAN_CHAT_GLASS_ENABLED && ENABLE_VULKAN_CHAT_OVERLAY)
-    }).apply {
-        onBackdropStats = { stats ->
-            handleVulkanGlassBackdropStats(stats)
+    private val usesRootGlassCoordinator = rootGlassOwnerKey != null && rootGlassCoordinator != null
+    private val ownsVulkanOverlay = !usesRootGlassCoordinator
+    private val usesExternalInputBar = usesRootGlassCoordinator
+    private val usesExternalContextMenuLayer = usesRootGlassCoordinator
+    private val localVulkanOverlay = if (ownsVulkanOverlay) {
+        VulkanChatOverlayView(context).apply {
+            setOverlayEnabled(BuildConfig.VULKAN_CHAT_GLASS_ENABLED && ENABLE_VULKAN_CHAT_OVERLAY)
+            onBackdropStats = { stats ->
+                handleVulkanGlassBackdropStats(stats)
+            }
         }
+    } else {
+        null
     }
     private val scrollToLiveButton = ScrollToLiveButtonView(context).apply {
         alpha = 0f
@@ -299,8 +302,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
 
         glassController.source = source
         addView(backdropContentLayer)
-        if (ownsVulkanOverlay) {
-            addView(vulkanOverlay)
+        localVulkanOverlay?.let { overlay ->
+            addView(overlay)
         }
         addView(emptyView)
         addView(composerErrorView)
@@ -351,9 +354,12 @@ internal class GlassChatLayout @JvmOverloads constructor(
                 "vulkanBackdrop=${isVulkanGlassBackdropEnabled()} " +
                 "vulkanInput=${isVulkanChatInputGlassEnabled()}"
         }
-        attachExternalInputBarIfNeeded()
-        attachExternalContextMenuLayerIfNeeded()
-        attachExternalInputBarPreDrawListener()
+        registerRootGlassOwnerIfNeeded()
+        if (isRootGlassActive()) {
+            syncExternalInputBarLayout()
+            syncExternalContextMenuLayerLayout()
+            attachExternalInputBarPreDrawListener()
+        }
         attachRecyclerDrawListener()
         attachFirstRecyclerPreDrawLogger()
         ViewCompat.requestApplyInsets(this)
@@ -364,8 +370,6 @@ internal class GlassChatLayout @JvmOverloads constructor(
         scrollToLiveButtonAnimator?.cancel()
         scrollToLiveButtonAnimator = null
         detachExternalInputBarPreDrawListener()
-        detachExternalContextMenuLayer()
-        detachExternalInputBar()
         detachRecyclerDrawListener()
         removeCallbacks(readReceiptCandidateEvaluationRunnable)
         removeCallbacks(hardwareBackdropCaptureRunnable)
@@ -374,7 +378,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
         hardwareBackdropCaptureScheduled = false
         hardwareBackdropCaptureRequiresFreshImage = false
         vulkanGlassAdaptiveRenderScheduled = false
-        vulkanOverlay.clearBackdropFrame()
+        clearVulkanBackdropFrame()
+        unregisterRootGlassOwnerIfNeeded()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             hardwareBackdropCapture?.close()
         }
@@ -430,131 +435,68 @@ internal class GlassChatLayout @JvmOverloads constructor(
         lastRecyclerDrawScrollOffset = Int.MIN_VALUE
     }
 
-    private fun attachExternalInputBarIfNeeded(): Boolean {
-        if (!usesExternalInputBar) {
-            return false
-        }
-        val host = sharedForegroundHost ?: return false
-        val localWidth = inputBarLocalRight - inputBarLocalLeft
-        val localHeight = inputBarLocalBottom - inputBarLocalTop
-        if (localWidth <= 0 || localHeight <= 0) {
-            return false
-        }
-        if (inputBar.parent === host) {
-            bringExternalForegroundChildrenToFront()
-            return true
-        }
-        (inputBar.parent as? ViewGroup)?.removeView(inputBar)
-        host.addView(
-            inputBar,
-            FrameLayout.LayoutParams(localWidth, localHeight).apply {
-                gravity = Gravity.START or Gravity.TOP
-            }
-        )
-        bringExternalForegroundChildrenToFront()
-        return true
-    }
-
-    private fun detachExternalInputBar() {
-        if (!usesExternalInputBar) {
+    private fun registerRootGlassOwnerIfNeeded() {
+        if (!usesRootGlassCoordinator || isRootGlassOwnerRegistered) {
             return
         }
-        if (inputBar.parent === sharedForegroundHost) {
-            sharedForegroundHost?.removeView(inputBar)
-        }
-    }
-
-    private fun attachExternalContextMenuLayerIfNeeded(): Boolean {
-        if (!usesExternalContextMenuLayer) {
-            return false
-        }
-        val host = sharedForegroundHost ?: return false
-        if (width <= 0 || height <= 0) {
-            return false
-        }
-        if (contextMenuLayer.parent === host) {
-            bringExternalForegroundChildrenToFront()
-            return true
-        }
-        (contextMenuLayer.parent as? ViewGroup)?.removeView(contextMenuLayer)
-        host.addView(
-            contextMenuLayer,
-            FrameLayout.LayoutParams(width, height).apply {
-                gravity = Gravity.START or Gravity.TOP
-            }
+        val ownerKey = rootGlassOwnerKey ?: return
+        val coordinator = rootGlassCoordinator ?: return
+        coordinator.registerOwner(
+            key = ownerKey,
+            rootView = this,
+            inputBar = inputBar,
+            contextMenuLayer = contextMenuLayer,
+            onBackdropStats = ::handleVulkanGlassBackdropStats,
+            onActiveChanged = ::handleRootGlassActiveChanged
         )
-        bringExternalForegroundChildrenToFront()
-        return true
+        isRootGlassOwnerRegistered = true
     }
 
-    private fun detachExternalContextMenuLayer() {
-        if (!usesExternalContextMenuLayer) {
+    private fun unregisterRootGlassOwnerIfNeeded() {
+        if (!usesRootGlassCoordinator || !isRootGlassOwnerRegistered) {
             return
         }
-        if (contextMenuLayer.parent === sharedForegroundHost) {
-            sharedForegroundHost?.removeView(contextMenuLayer)
+        val ownerKey = rootGlassOwnerKey ?: return
+        rootGlassCoordinator?.unregisterOwner(ownerKey, this)
+        isRootGlassOwnerRegistered = false
+    }
+
+    private fun handleRootGlassActiveChanged(isActive: Boolean) {
+        updateInputBarVulkanGlassEnabled()
+        if (isActive) {
+            attachExternalInputBarPreDrawListener()
+            syncExternalInputBarLayout()
+            syncExternalContextMenuLayerLayout()
+            updateVulkanGlassRects()
+        } else {
+            detachExternalInputBarPreDrawListener()
+            resetVulkanGlassCaptureState(clearNativeBackdrop = false)
         }
+    }
+
+    private fun isRootGlassActive(): Boolean {
+        if (!usesRootGlassCoordinator) {
+            return true
+        }
+        val ownerKey = rootGlassOwnerKey ?: return false
+        return rootGlassCoordinator?.isOwnerActive(ownerKey) == true
+    }
+
+    private fun invalidateRootGlassGeometry() {
+        val ownerKey = rootGlassOwnerKey ?: return
+        rootGlassCoordinator?.invalidateGeometry(ownerKey)
     }
 
     private fun syncExternalContextMenuLayerLayout() {
         if (!usesExternalContextMenuLayer || !isAttachedToWindow || width <= 0 || height <= 0) {
             return
         }
-        val host = sharedForegroundHost ?: return
-        if (!attachExternalContextMenuLayerIfNeeded()) {
-            return
-        }
-
-        getLocationOnScreen(layoutLocationOnScreen)
-        host.getLocationOnScreen(foregroundHostLocationOnScreen)
-        val hostLeft = layoutLocationOnScreen[0] - foregroundHostLocationOnScreen[0]
-        val hostTop = layoutLocationOnScreen[1] - foregroundHostLocationOnScreen[1]
-        val hostRight = hostLeft + width
-        val hostBottom = hostTop + height
-
-        val params = (contextMenuLayer.layoutParams as? FrameLayout.LayoutParams)
-            ?: FrameLayout.LayoutParams(0, 0)
-        if (
-            params.width != width ||
-            params.height != height ||
-            params.leftMargin != hostLeft ||
-            params.topMargin != hostTop
-        ) {
-            params.width = width
-            params.height = height
-            params.leftMargin = hostLeft
-            params.topMargin = hostTop
-            params.gravity = Gravity.START or Gravity.TOP
-            contextMenuLayer.layoutParams = params
-        }
-        if (
-            contextMenuLayer.measuredWidth != width ||
-            contextMenuLayer.measuredHeight != height ||
-            contextMenuLayer.width != width ||
-            contextMenuLayer.height != height ||
-            contextMenuLayer.isLayoutRequested
-        ) {
-            contextMenuLayer.forceLayout()
-            contextMenuLayer.measure(
-                MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
-                MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
-            )
-        }
-        contextMenuLayer.layout(hostLeft, hostTop, hostRight, hostBottom)
-        bringExternalForegroundChildrenToFront()
-    }
-
-    private fun bringExternalForegroundChildrenToFront() {
-        if (usesExternalInputBar && inputBar.parent === sharedForegroundHost) {
-            inputBar.bringToFront()
-        }
-        if (
-            usesExternalContextMenuLayer &&
-            contextMenuLayer.parent === sharedForegroundHost &&
-            contextMenuLayer.visibility == VISIBLE
-        ) {
-            contextMenuLayer.bringToFront()
-        }
+        val ownerKey = rootGlassOwnerKey ?: return
+        rootGlassCoordinator?.syncContextMenuLayerLayout(
+            ownerKey = ownerKey,
+            width = width,
+            height = height
+        )
     }
 
     private fun attachExternalInputBarPreDrawListener() {
@@ -590,6 +532,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
         scrollToLiveButton.setPalette(newPalette)
         glassController.invalidateBackdrop()
         scheduleVulkanGlassBackdropCapture()
+    }
+
+    private fun updateInputBarVulkanGlassEnabled() {
+        inputBar.setVulkanGlassBackgroundEnabled(isVulkanChatInputGlassEnabled())
     }
 
     fun setEmptyState(isEmpty: Boolean, isLoading: Boolean) {
@@ -946,8 +892,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
             MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
         )
-        if (ownsVulkanOverlay) {
-            vulkanOverlay.measure(
+        localVulkanOverlay?.let { overlay ->
+            overlay.measure(
                 MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY),
                 MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY)
             )
@@ -998,6 +944,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         val start = ZynaPerfLog.start()
         val width = right - left
         val height = bottom - top
+        invalidateRootGlassGeometry()
 
         val bottomInset = if (imeBottomInset > 0) imeBottomInset else navBottomInset
         val bottomMargin = 6.dpToPx(density)
@@ -1007,8 +954,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
         updateRecyclerPadding(contentBottom)
 
         backdropContentLayer.layout(0, 0, width, height)
-        if (ownsVulkanOverlay) {
-            vulkanOverlay.layout(0, 0, width, height)
+        localVulkanOverlay?.let { overlay ->
+            overlay.layout(0, 0, width, height)
         }
         layoutTeleportSnapshot()
 
@@ -1027,7 +974,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             )
         }
         val overlayOffset = vulkanOverlayOffset()
-        vulkanOverlay.setInputBarBounds(
+        setVulkanInputBarBounds(
             inputBarLocalLeft + overlayOffset.x,
             inputBarLocalTop + overlayOffset.y,
             inputBarLocalRight + overlayOffset.x,
@@ -1099,71 +1046,121 @@ internal class GlassChatLayout @JvmOverloads constructor(
             return VulkanOverlayOffset.Zero
         }
 
-        getLocationOnScreen(layoutLocationOnScreen)
-        vulkanOverlay.getLocationOnScreen(overlayLocationOnScreen)
+        val ownerKey = rootGlassOwnerKey ?: return VulkanOverlayOffset.Zero
+        if (rootGlassCoordinator?.overlayOffset(ownerKey, this, rootGlassOffset) != true) {
+            return VulkanOverlayOffset.Zero
+        }
         return VulkanOverlayOffset(
-            x = layoutLocationOnScreen[0] - overlayLocationOnScreen[0],
-            y = layoutLocationOnScreen[1] - overlayLocationOnScreen[1]
+            x = rootGlassOffset[0],
+            y = rootGlassOffset[1]
         )
+    }
+
+    private fun setVulkanInputBarBounds(left: Int, top: Int, right: Int, bottom: Int) {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            rootGlassCoordinator?.setInputBarBounds(ownerKey, left, top, right, bottom)
+            return
+        }
+        localVulkanOverlay?.setInputBarBounds(left, top, right, bottom)
+    }
+
+    private fun setVulkanBackdropFrame(
+        frame: HardwareBufferChatCapture.CapturedFrame,
+        rects: List<VulkanChatGlassRect>,
+        textureLeft: Float,
+        textureTop: Float
+    ): BackdropFrameResult {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            return rootGlassCoordinator?.setBackdropFrame(
+                ownerKey = ownerKey,
+                frame = frame,
+                rects = rects,
+                textureLeft = textureLeft,
+                textureTop = textureTop
+            ) ?: BackdropFrameResult(imported = false)
+        }
+        return localVulkanOverlay?.setBackdropFrame(
+            frame = frame,
+            rects = rects,
+            textureLeft = textureLeft,
+            textureTop = textureTop
+        ) ?: run {
+            frame.close()
+            BackdropFrameResult(imported = false)
+        }
+    }
+
+    private fun updateVulkanBackdropRects(
+        rects: List<VulkanChatGlassRect>,
+        textureLeft: Float,
+        textureTop: Float
+    ): BackdropFrameResult {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            return rootGlassCoordinator?.updateBackdropRects(
+                ownerKey = ownerKey,
+                rects = rects,
+                textureLeft = textureLeft,
+                textureTop = textureTop
+            ) ?: BackdropFrameResult(imported = false)
+        }
+        return localVulkanOverlay?.updateBackdropRects(
+            rects = rects,
+            textureLeft = textureLeft,
+            textureTop = textureTop
+        ) ?: BackdropFrameResult(imported = false)
+    }
+
+    private fun addVulkanPaintSplash(target: PaintSplashTarget) {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            rootGlassCoordinator?.addPaintSplash(ownerKey, target) ?: target.bitmap.recycle()
+            return
+        }
+        localVulkanOverlay?.addPaintSplash(target) ?: target.bitmap.recycle()
+    }
+
+    private fun clearVulkanBackdropFrame() {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            rootGlassCoordinator?.clearBackdropFrame(ownerKey)
+            return
+        }
+        localVulkanOverlay?.clearBackdropFrame()
+    }
+
+    private fun resetVulkanGlassCaptureState(clearNativeBackdrop: Boolean) {
+        vulkanGlassRects = emptyList()
+        vulkanGlassCaptureBounds.setEmpty()
+        removeCallbacks(hardwareBackdropCaptureRunnable)
+        removeCallbacks(vulkanGlassAdaptiveRenderRunnable)
+        hardwareBackdropCaptureScheduled = false
+        hardwareBackdropCaptureRequiresFreshImage = false
+        vulkanGlassAdaptiveRenderScheduled = false
+        if (clearNativeBackdrop) {
+            clearVulkanBackdropFrame()
+        }
     }
 
     private fun syncExternalInputBarLayout() {
         if (!usesExternalInputBar || !isAttachedToWindow) {
             return
         }
-        val host = sharedForegroundHost ?: return
         val localWidth = inputBarLocalRight - inputBarLocalLeft
         val localHeight = inputBarLocalBottom - inputBarLocalTop
         if (localWidth <= 0 || localHeight <= 0) {
             return
         }
-        if (!attachExternalInputBarIfNeeded()) {
-            return
-        }
-
-        getLocationOnScreen(layoutLocationOnScreen)
-        host.getLocationOnScreen(foregroundHostLocationOnScreen)
-        val hostLeft = layoutLocationOnScreen[0] -
-            foregroundHostLocationOnScreen[0] +
-            inputBarLocalLeft
-        val hostTop = layoutLocationOnScreen[1] -
-            foregroundHostLocationOnScreen[1] +
-            inputBarLocalTop
-        val hostRight = hostLeft + (inputBarLocalRight - inputBarLocalLeft)
-        val hostBottom = hostTop + (inputBarLocalBottom - inputBarLocalTop)
-
-        val params = (inputBar.layoutParams as? FrameLayout.LayoutParams)
-            ?: FrameLayout.LayoutParams(0, 0)
-        val nextWidth = (hostRight - hostLeft).coerceAtLeast(0)
-        val nextHeight = (hostBottom - hostTop).coerceAtLeast(0)
-        if (
-            params.width != nextWidth ||
-            params.height != nextHeight ||
-            params.leftMargin != hostLeft ||
-            params.topMargin != hostTop
-        ) {
-            params.width = nextWidth
-            params.height = nextHeight
-            params.leftMargin = hostLeft
-            params.topMargin = hostTop
-            params.gravity = Gravity.START or Gravity.TOP
-            inputBar.layoutParams = params
-        }
-        if (
-            inputBar.measuredWidth != nextWidth ||
-            inputBar.measuredHeight != nextHeight ||
-            inputBar.width != nextWidth ||
-            inputBar.height != nextHeight ||
-            inputBar.isLayoutRequested
-        ) {
-            inputBar.forceLayout()
-            inputBar.measure(
-                MeasureSpec.makeMeasureSpec(nextWidth, MeasureSpec.EXACTLY),
-                MeasureSpec.makeMeasureSpec(nextHeight, MeasureSpec.EXACTLY)
-            )
-        }
-        inputBar.layout(hostLeft, hostTop, hostRight, hostBottom)
-        bringExternalForegroundChildrenToFront()
+        val ownerKey = rootGlassOwnerKey ?: return
+        rootGlassCoordinator?.syncInputBarLayout(
+            ownerKey = ownerKey,
+            localLeft = inputBarLocalLeft,
+            localTop = inputBarLocalTop,
+            localRight = inputBarLocalRight,
+            localBottom = inputBarLocalBottom
+        )
     }
 
     private fun List<VulkanChatGlassRect>.toVulkanOverlayCoordinates(
@@ -1194,9 +1191,12 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     private fun updateVulkanGlassRects() {
-        if (!isVulkanGlassBackdropEnabled() || width <= 0 || height <= 0) {
-            vulkanGlassRects = emptyList()
-            vulkanOverlay.clearBackdropFrame()
+        if (!isVulkanGlassBackdropEnabled()) {
+            resetVulkanGlassCaptureState(clearNativeBackdrop = true)
+            return
+        }
+        if (width <= 0 || height <= 0) {
+            resetVulkanGlassCaptureState(clearNativeBackdrop = false)
             return
         }
 
@@ -1232,12 +1232,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             )
         }
         if (nextRects.isEmpty() || nextCaptureBounds.isEmpty) {
-            removeCallbacks(hardwareBackdropCaptureRunnable)
-            removeCallbacks(vulkanGlassAdaptiveRenderRunnable)
-            hardwareBackdropCaptureScheduled = false
-            hardwareBackdropCaptureRequiresFreshImage = false
-            vulkanGlassAdaptiveRenderScheduled = false
-            vulkanOverlay.clearBackdropFrame()
+            resetVulkanGlassCaptureState(clearNativeBackdrop = true)
         } else {
             scheduleVulkanGlassBackdropCapture(delayMillis = 0L)
         }
@@ -1399,7 +1394,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             nowNanos = overlayStartNanos
         )
         val overlayOffset = vulkanOverlayOffset()
-        val overlayResult = vulkanOverlay.setBackdropFrame(
+        val overlayResult = setVulkanBackdropFrame(
             frame = frame,
             rects = adaptiveRects.toVulkanOverlayCoordinates(overlayOffset),
             textureLeft = (captureBounds.left + overlayOffset.x).toFloat(),
@@ -1549,7 +1544,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private fun renderVulkanGlassMaterial(material: GlassAdaptiveMaterial): Boolean {
         val adaptedRects = applyVulkanGlassMaterialToRects(vulkanGlassRects, material)
         val overlayOffset = vulkanOverlayOffset()
-        return vulkanOverlay.updateBackdropRects(
+        return updateVulkanBackdropRects(
             rects = adaptedRects.toVulkanOverlayCoordinates(overlayOffset),
             textureLeft = (vulkanGlassCaptureBounds.left + overlayOffset.x).toFloat(),
             textureTop = (vulkanGlassCaptureBounds.top + overlayOffset.y).toFloat()
@@ -1677,7 +1672,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private fun isVulkanGlassBackdropEnabled(): Boolean {
         return BuildConfig.VULKAN_CHAT_GLASS_ENABLED &&
             ENABLE_VULKAN_CHAT_GLASS_BACKDROP &&
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            isRootGlassActive()
     }
 
     private fun isVulkanChatInputGlassEnabled(): Boolean {
@@ -1757,7 +1753,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         val startBurst = {
             dismissMessageContextMenu(animated = false)
             target.hideSource()
-            vulkanOverlay.addPaintSplash(
+            addVulkanPaintSplash(
                 target.toVulkanOverlayCoordinates(vulkanOverlayOffset())
             )
             onRedactMessages(redactionIds)

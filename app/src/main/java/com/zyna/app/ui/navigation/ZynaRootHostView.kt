@@ -18,6 +18,7 @@ import com.zyna.app.ui.auth.LoginScreen
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
+import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
 import com.zyna.app.ui.rooms.RoomsScreen
 import com.zyna.app.ui.security.RecoveryKeyScreen
@@ -35,6 +36,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
     private val chatOverlayContainer = FrameLayout(context)
     private val overlayContainer = FrameLayout(context)
+    private val rootGlassCoordinator = RootGlassLayerCoordinator(
+        vulkanOverlay = vulkanOverlayHost,
+        foregroundHost = foregroundContainer
+    )
     private val tabBar = ZynaTabBarView(context)
     private var bottomInset = 0
     private var lastRouteKey: String? = null
@@ -43,14 +48,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var selectedTab = ZynaTabBarView.Tab.CHATS
     private var renderSequence = 0L
     private var didScheduleVulkanWarmup = false
+    private var didScheduleChatViewWarmup = false
+    private var prewarmedChatView: ChatScreenView? = null
 
     init {
         setBackgroundColor(Color.BLACK)
-        navigationStack.onRootGlassLayerStateChanged = { translationX, isPresented ->
-            vulkanOverlayHost.translationX = translationX
-            foregroundContainer.translationX = translationX
-            vulkanOverlayHost.setPresentationSuppressed(!isPresented)
-            foregroundContainer.visibility = if (isPresented) View.VISIBLE else View.GONE
+        navigationStack.onRootGlassLayerStateChanged = { ownerKey, translationX ->
+            rootGlassCoordinator.setPresentedOwner(ownerKey, translationX)
         }
         addView(
             navigationStack,
@@ -210,6 +214,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         ) {
             "route=${state.route.perfName()} animate=$shouldAnimate key=$nextRouteKey"
         }
+        if (
+            state.route != AppRoute.Rooms &&
+            state.route !is AppRoute.Chat &&
+            state.route != AppRoute.ForwardPicker
+        ) {
+            discardPrewarmedChatView()
+        }
         lastRouteKey = nextRouteKey
 
         val showTabs = state.route == AppRoute.Rooms
@@ -220,6 +231,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
         if (state.route == AppRoute.Rooms) {
             scheduleVulkanWarmup()
+            scheduleChatViewWarmup()
         }
     }
 
@@ -320,10 +332,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "chat:${route.roomId}",
-            ownsRootGlassLayers = true,
+            rootGlassOwnerKey = chatGlassOwnerKey(),
+            retainViewOnRemove = true,
             createView = { context ->
-                ZynaPerfLog.mark { "root.chatEntry.createView roomId=${route.roomId}" }
-                ChatScreenView(context, vulkanOverlayHost, foregroundContainer, chatOverlayContainer)
+                takeOrCreateChatScreenView(context, roomId = route.roomId)
+            },
+            onViewRemoved = { view ->
+                recycleChatScreenViewIfPossible(view)
             },
             updateView = { view ->
                 val updateStart = ZynaPerfLog.start()
@@ -438,11 +453,103 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         postDelayed(
             {
                 val start = ZynaPerfLog.start()
-                vulkanOverlayHost.warmSurface()
+                rootGlassCoordinator.warmSurface()
                 ZynaPerfLog.end(start, "root.vulkanWarmup")
             },
             VULKAN_WARMUP_DELAY_MS
         )
+    }
+
+    private fun scheduleChatViewWarmup() {
+        if (didScheduleChatViewWarmup || prewarmedChatView != null) {
+            return
+        }
+        didScheduleChatViewWarmup = true
+        postDelayed(
+            {
+                didScheduleChatViewWarmup = false
+                if (prewarmedChatView != null || latestState?.route != AppRoute.Rooms) {
+                    return@postDelayed
+                }
+                val start = ZynaPerfLog.start()
+                prewarmedChatView = createChatScreenView(context)
+                ZynaPerfLog.end(start, "root.chatViewWarmup")
+            },
+            CHAT_VIEW_WARMUP_DELAY_MS
+        )
+    }
+
+    private fun takeOrCreateChatScreenView(context: Context, roomId: String): ChatScreenView {
+        val prewarmed = prewarmedChatView
+        if (prewarmed != null && prewarmed.canReuseForRoom(roomId)) {
+            prewarmedChatView = null
+            if (prewarmed.parent !== navigationStack) {
+                (prewarmed.parent as? ViewGroup)?.removeView(prewarmed)
+            }
+            prewarmed.visibility = View.VISIBLE
+            prewarmed.isEnabled = true
+            ZynaPerfLog.mark {
+                "root.chatEntry.createView roomId=$roomId reused=true"
+            }
+            return prewarmed
+        }
+        if (prewarmed != null) {
+            prewarmedChatView = null
+            navigationStack.removeRetainedView(prewarmed)
+            ZynaPerfLog.mark {
+                "root.chatEntry.createView roomId=$roomId reused=false wrongRoom=true"
+            }
+            return createChatScreenView(context)
+        }
+
+        ZynaPerfLog.mark {
+            "root.chatEntry.createView roomId=$roomId reused=false"
+        }
+        return createChatScreenView(context)
+    }
+
+    private fun recycleChatScreenViewIfPossible(view: View) {
+        val chatView = view as? ChatScreenView ?: return
+        if (latestState?.route != AppRoute.Rooms) {
+            discardPrewarmedChatView(chatView)
+            return
+        }
+        if (chatView.parent !== navigationStack) {
+            (chatView.parent as? ViewGroup)?.removeView(chatView)
+        }
+        chatView.visibility = View.INVISIBLE
+        chatView.isEnabled = false
+        chatView.translationX = 0f
+        chatView.translationY = 0f
+        chatView.alpha = 1f
+        prewarmedChatView = chatView
+        ZynaPerfLog.mark {
+            "root.chatViewRecycled"
+        }
+    }
+
+    private fun discardPrewarmedChatView(view: ChatScreenView? = prewarmedChatView) {
+        val chatView = view ?: return
+        if (prewarmedChatView === chatView) {
+            prewarmedChatView = null
+        }
+        navigationStack.removeRetainedView(chatView)
+        if (chatView.parent !== navigationStack) {
+            (chatView.parent as? ViewGroup)?.removeView(chatView)
+        }
+    }
+
+    private fun createChatScreenView(context: Context): ChatScreenView {
+        return ChatScreenView(
+            context = context,
+            rootGlassOwnerKey = chatGlassOwnerKey(),
+            rootGlassCoordinator = rootGlassCoordinator,
+            rootOverlayHost = chatOverlayContainer
+        )
+    }
+
+    private fun chatGlassOwnerKey(): String {
+        return CHAT_GLASS_OWNER_KEY
     }
 
     private fun AppRoute.perfName(): String {
@@ -457,5 +564,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private companion object {
         const val VULKAN_WARMUP_DELAY_MS = 350L
+        const val CHAT_VIEW_WARMUP_DELAY_MS = 900L
+        const val CHAT_GLASS_OWNER_KEY = "chat"
     }
 }

@@ -316,7 +316,7 @@ internal class RootGlassLayerCoordinator(
         }
 
         if (previousOwner != null) {
-            vulkanOverlay.clearBackdropFrame()
+            vulkanOverlay.discardBackdropFrame()
         }
         geometrySnapshot = null
         previousOwner?.onActiveChanged?.invoke(false)

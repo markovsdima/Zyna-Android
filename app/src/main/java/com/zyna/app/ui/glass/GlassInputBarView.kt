@@ -95,6 +95,7 @@ class GlassInputBarView @JvmOverloads constructor(
     var onAttachClicked: () -> Unit = {}
     var onPreviewCancelled: () -> Unit = {}
     var onEditCancelled: () -> Unit = {}
+    var onContentLayoutChanged: () -> Unit = {}
     var allowEmptySend: Boolean = false
     private var isSending = false
     private var pendingSentText: String? = null
@@ -123,8 +124,7 @@ class GlassInputBarView @JvmOverloads constructor(
         editText.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                requestLayout()
-                controller.invalidateRegions()
+                requestContentLayout()
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
@@ -300,7 +300,12 @@ class GlassInputBarView @JvmOverloads constructor(
         previewBody.visibility = if (isVisible) VISIBLE else GONE
         previewCancel.visibility = if (isVisible) VISIBLE else GONE
         applyInputGlassState()
+        requestContentLayout()
+    }
+
+    private fun requestContentLayout() {
         requestLayout()
+        onContentLayoutChanged()
         controller.invalidateRegions()
     }
 

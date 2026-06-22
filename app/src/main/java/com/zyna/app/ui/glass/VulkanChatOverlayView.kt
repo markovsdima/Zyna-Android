@@ -333,6 +333,17 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         }
     }
 
+    fun discardBackdropFrame() {
+        clearPendingBackdropFrame()
+        clearBackdropFrame(clearNative = false)
+        if (pendingPaintSplash == null) {
+            stopFrameCallback()
+            stopBackdropStatsPollCallback()
+            idleClearFramesRemaining = 0
+            alpha = 0f
+        }
+    }
+
     override fun onAttachedToWindow() {
         val start = ZynaPerfLog.start()
         super.onAttachedToWindow()

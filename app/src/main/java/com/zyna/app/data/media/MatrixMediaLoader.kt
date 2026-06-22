@@ -103,6 +103,14 @@ class MatrixMediaLoader(
             ?.takeIf { !it.isRecycled }
     }
 
+    fun cachedAvatar(
+        avatarUrl: String,
+        sizePx: Int
+    ): Bitmap? {
+        return memoryCache.get(avatarMemoryCacheKey(avatarUrl, sizePx))
+            ?.takeIf { !it.isRecycled }
+    }
+
     fun hasCellImageCovering(
         imageInfo: MatrixImageInfo,
         targetWidthPx: Int,
@@ -162,6 +170,34 @@ class MatrixMediaLoader(
                 targetWidthPx = targetWidthPx,
                 targetHeightPx = targetHeightPx,
                 quality = quality
+            ).await()
+            withContext(Dispatchers.Main.immediate) {
+                onLoaded(bitmap)
+            }
+        }
+        return AutoCloseable { waiter.cancel() }
+    }
+
+    fun loadAvatar(
+        avatarUrl: String,
+        sizePx: Int,
+        onLoaded: (Bitmap?) -> Unit
+    ): AutoCloseable {
+        val key = avatarMemoryCacheKey(avatarUrl, sizePx)
+        memoryCache.get(key)?.takeIf { !it.isRecycled }?.let { bitmap ->
+            val waiter = scope.launch {
+                withContext(Dispatchers.Main.immediate) {
+                    onLoaded(bitmap)
+                }
+            }
+            return AutoCloseable { waiter.cancel() }
+        }
+
+        val waiter = scope.launch {
+            val bitmap = deferredForAvatar(
+                memoryKey = key,
+                avatarUrl = avatarUrl,
+                sizePx = sizePx
             ).await()
             withContext(Dispatchers.Main.immediate) {
                 onLoaded(bitmap)
@@ -291,6 +327,117 @@ class MatrixMediaLoader(
             inFlightPolicies[flightKey] = policy
             return deferred
         }
+    }
+
+    private fun deferredForAvatar(
+        memoryKey: String,
+        avatarUrl: String,
+        sizePx: Int
+    ): Deferred<Bitmap?> {
+        memoryCache.get(memoryKey)?.takeIf { !it.isRecycled }?.let { bitmap ->
+            return CompletableDeferred(bitmap)
+        }
+
+        synchronized(lock) {
+            memoryCache.get(memoryKey)?.takeIf { !it.isRecycled }?.let { bitmap ->
+                return CompletableDeferred(bitmap)
+            }
+            inFlight[memoryKey]?.let { return it }
+
+            val policy = MediaLoadPolicy(
+                allowFullFallback = true,
+                allowRemoteLoad = true,
+                isPrefetch = false
+            )
+            val deferred = scope.async {
+                val bitmap = loadAvatarBitmap(
+                    avatarUrl = avatarUrl,
+                    sizePx = sizePx,
+                    policy = policy
+                )
+                if (bitmap != null) {
+                    memoryCache.put(memoryKey, bitmap)
+                }
+                bitmap
+            }
+            deferred.invokeOnCompletion {
+                synchronized(lock) {
+                    if (inFlight[memoryKey] === deferred) {
+                        inFlight.remove(memoryKey)
+                    }
+                }
+            }
+            inFlight[memoryKey] = deferred
+            return deferred
+        }
+    }
+
+    private suspend fun loadAvatarBitmap(
+        avatarUrl: String,
+        sizePx: Int,
+        policy: MediaLoadPolicy
+    ): Bitmap? {
+        val size = sizePx.coerceAtLeast(1)
+        val bytes = loadAvatarBytes(
+            avatarUrl = avatarUrl,
+            sizePx = size,
+            policy = policy
+        )
+        if (bytes == null) {
+            Log.d(TAG, "Failed to load avatar media")
+            return null
+        }
+        return decodeBitmap(bytes, size, size, policy)
+    }
+
+    private suspend fun loadAvatarBytes(
+        avatarUrl: String,
+        sizePx: Int,
+        policy: MediaLoadPolicy
+    ): ByteArray? {
+        val requests = avatarMediaRequests(
+            avatarUrl = avatarUrl,
+            sizePx = sizePx
+        )
+        requests.forEach { request ->
+            diskCache.read(request.cacheKey)?.let { bytes ->
+                return bytes
+            }
+        }
+
+        if (!policy.allowRemoteLoad) {
+            return null
+        }
+
+        requests.forEach { request ->
+            val bytes = runMediaLoad(request.load) ?: return@forEach
+            diskCache.write(request.cacheKey, bytes)
+            return bytes
+        }
+        return null
+    }
+
+    private fun avatarMediaRequests(
+        avatarUrl: String,
+        sizePx: Int
+    ): List<MediaBytesRequest> {
+        val size = sizePx.coerceAtLeast(1)
+        return listOf(
+            MediaBytesRequest(
+                cacheKey = "avatar-thumbnail:$size:$avatarUrl",
+                load = {
+                    matrixClientService.loadMediaThumbnailFromUrl(
+                        url = avatarUrl,
+                        width = size,
+                        height = size
+                    )
+                }
+            ),
+            MediaBytesRequest(
+                cacheKey = "avatar-content:$avatarUrl",
+                load = { matrixClientService.loadMediaContentFromUrl(avatarUrl) }
+            )
+        )
     }
 
     private suspend fun loadBitmap(
@@ -637,6 +784,10 @@ class MatrixMediaLoader(
 
     private fun contentDiskCacheKey(sourceJson: String): String {
         return "content:$sourceJson"
+    }
+
+    private fun avatarMemoryCacheKey(avatarUrl: String, sizePx: Int): String {
+        return "avatar:${sizePx.coerceAtLeast(1)}:$avatarUrl"
     }
 
     private fun prefetchInFlightKey(memoryKey: String): String {

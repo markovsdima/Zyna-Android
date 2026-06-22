@@ -317,6 +317,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         title = title,
                         showLogout = title != "Forward to",
                         showBack = onBack != null,
+                        matrixMediaLoader = actions.matrixMediaLoader,
                         bottomContentPaddingPx = if (withBottomPadding) {
                             dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                         } else {

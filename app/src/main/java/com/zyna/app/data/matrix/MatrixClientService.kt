@@ -834,6 +834,14 @@ class MatrixClientService(
         }
     }
 
+    suspend fun loadMediaContentFromUrl(url: String): ByteArray = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val source = MediaSource.fromUrl(url)
+        source.use { mediaSource ->
+            activeClient.getMediaContent(mediaSource)
+        }
+    }
+
     suspend fun loadMediaThumbnail(
         sourceJson: String,
         width: Int,
@@ -841,6 +849,22 @@ class MatrixClientService(
     ): ByteArray = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         val source = MediaSource.fromJson(sourceJson)
+        source.use { mediaSource ->
+            activeClient.getMediaThumbnail(
+                mediaSource = mediaSource,
+                width = width.coerceAtLeast(1).toULong(),
+                height = height.coerceAtLeast(1).toULong()
+            )
+        }
+    }
+
+    suspend fun loadMediaThumbnailFromUrl(
+        url: String,
+        width: Int,
+        height: Int
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val source = MediaSource.fromUrl(url)
         source.use { mediaSource ->
             activeClient.getMediaThumbnail(
                 mediaSource = mediaSource,

@@ -2,10 +2,14 @@ package com.zyna.app.ui.rooms
 
 import android.content.Context
 import android.content.res.Configuration
+import android.graphics.Bitmap
+import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.Typeface
 import android.text.TextPaint
 import android.text.TextUtils
@@ -25,6 +29,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.SimpleItemAnimator
+import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.util.ZynaPerfLog
@@ -41,6 +46,7 @@ data class RoomsScreenViewState(
     val title: String,
     val showLogout: Boolean,
     val showBack: Boolean,
+    val matrixMediaLoader: MatrixMediaLoader?,
     val bottomContentPaddingPx: Int
 )
 
@@ -201,6 +207,12 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         ViewCompat.requestApplyInsets(this)
+        adapter.restartAvatarLoads()
+    }
+
+    override fun onDetachedFromWindow() {
+        adapter.cancelAvatarLoads()
+        super.onDetachedFromWindow()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration?) {
@@ -238,6 +250,7 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             }
             actions.onOpenRoom(room)
         }
+        adapter.setMatrixMediaLoader(state.matrixMediaLoader)
         adapter.submitList(state.rooms)
         ZynaPerfLog.end(renderStart, "roomsView.render") {
             "title=${state.title} rooms=${state.rooms.size} refreshing=${state.isRefreshing}"
@@ -279,6 +292,8 @@ private class RoomsAdapter(
     private var palette: RoomsPalette
 ) : ListAdapter<MatrixRoomSummary, RoomViewHolder>(RoomDiffCallback) {
     var onRoomClicked: (MatrixRoomSummary) -> Unit = {}
+    private var matrixMediaLoader: MatrixMediaLoader? = null
+    private val boundHolders = mutableSetOf<RoomViewHolder>()
 
     init {
         setHasStableIds(true)
@@ -293,11 +308,45 @@ private class RoomsAdapter(
     }
 
     override fun onBindViewHolder(holder: RoomViewHolder, position: Int) {
+        boundHolders += holder
         holder.bind(
             room = getItem(position),
             palette = palette,
+            matrixMediaLoader = matrixMediaLoader,
             onClick = onRoomClicked
         )
+    }
+
+    override fun onViewRecycled(holder: RoomViewHolder) {
+        boundHolders -= holder
+        holder.recycle()
+    }
+
+    override fun onDetachedFromRecyclerView(recyclerView: RecyclerView) {
+        cancelAvatarLoads()
+        boundHolders.clear()
+    }
+
+    fun cancelAvatarLoads() {
+        boundHolders.forEach { holder ->
+            holder.cancelAvatarLoad()
+        }
+    }
+
+    fun restartAvatarLoads() {
+        boundHolders.forEach { holder ->
+            holder.restartAvatarLoad()
+        }
+    }
+
+    fun setMatrixMediaLoader(nextLoader: MatrixMediaLoader?) {
+        if (matrixMediaLoader === nextLoader) {
+            return
+        }
+        matrixMediaLoader = nextLoader
+        if (itemCount > 0) {
+            notifyItemRangeChanged(0, itemCount)
+        }
     }
 
     fun setPalette(nextPalette: RoomsPalette) {
@@ -324,10 +373,23 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
     fun bind(
         room: MatrixRoomSummary,
         palette: RoomsPalette,
+        matrixMediaLoader: MatrixMediaLoader?,
         onClick: (MatrixRoomSummary) -> Unit
     ) {
-        rowView.bind(room, palette)
+        rowView.bind(room, palette, matrixMediaLoader)
         rowView.setOnClickListener { onClick(room) }
+    }
+
+    fun recycle() {
+        rowView.recycle()
+    }
+
+    fun cancelAvatarLoad() {
+        rowView.cancelAvatarLoad()
+    }
+
+    fun restartAvatarLoad() {
+        rowView.restartAvatarLoad()
     }
 }
 
@@ -361,9 +423,16 @@ private class RoomRowView(context: Context) : View(context) {
         typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     }
     private val badgeRect = RectF()
+    private val avatarShaderMatrix = Matrix()
     private var room: MatrixRoomSummary? = null
     private var palette = RoomsPalette.from(context.resources.configuration.isNightMode())
     private var avatarFillColor = palette.avatarColors.first()
+    private var avatarBitmap: Bitmap? = null
+    private var avatarBitmapShader: BitmapShader? = null
+    private var avatarBitmapShaderSource: Bitmap? = null
+    private var avatarLoadHandle: AutoCloseable? = null
+    private var avatarLoadUrl: String? = null
+    private var avatarLoadLoader: MatrixMediaLoader? = null
 
     init {
         isClickable = true
@@ -372,13 +441,43 @@ private class RoomRowView(context: Context) : View(context) {
         applySelectableForeground()
     }
 
-    fun bind(room: MatrixRoomSummary, palette: RoomsPalette) {
+    fun bind(
+        room: MatrixRoomSummary,
+        palette: RoomsPalette,
+        matrixMediaLoader: MatrixMediaLoader?
+    ) {
         this.room = room
         this.palette = palette
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
         contentDescription = room.accessibilityText()
+        bindAvatar(
+            avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
+            matrixMediaLoader = matrixMediaLoader
+        )
         invalidate()
+    }
+
+    fun recycle() {
+        cancelAvatarLoad()
+        avatarLoadUrl = null
+        avatarLoadLoader = null
+        avatarBitmap = null
+        avatarBitmapShader = null
+        avatarBitmapShaderSource = null
+    }
+
+    fun cancelAvatarLoad() {
+        avatarLoadHandle?.close()
+        avatarLoadHandle = null
+    }
+
+    fun restartAvatarLoad() {
+        val currentRoom = room ?: return
+        bindAvatar(
+            avatarUrl = currentRoom.avatarUrl?.takeIf { it.isNotBlank() },
+            matrixMediaLoader = avatarLoadLoader
+        )
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -411,17 +510,19 @@ private class RoomRowView(context: Context) : View(context) {
 
         val left = dp(20).toFloat()
         val right = widthPx - dp(20).toFloat()
-        val avatarSize = dp(46).toFloat()
+        val avatarSize = dp(AVATAR_SIZE_DP).toFloat()
         val avatarCenterX = left + avatarSize / 2f
         val avatarCenterY = height / 2f
-        avatarPaint.color = avatarFillColor
-        canvas.drawCircle(avatarCenterX, avatarCenterY, avatarSize / 2f, avatarPaint)
-        canvas.drawText(
-            room.avatarInitial(),
-            avatarCenterX,
-            centerBaseline(avatarCenterY, avatarTextPaint),
-            avatarTextPaint
-        )
+        if (!drawAvatarBitmap(canvas, avatarCenterX, avatarCenterY, avatarSize)) {
+            avatarPaint.color = avatarFillColor
+            canvas.drawCircle(avatarCenterX, avatarCenterY, avatarSize / 2f, avatarPaint)
+            canvas.drawText(
+                room.avatarInitial(),
+                avatarCenterX,
+                centerBaseline(avatarCenterY, avatarTextPaint),
+                avatarTextPaint
+            )
+        }
 
         val textLeft = left + avatarSize + dp(12)
         val timeText = room.lastMessageAtMillis?.formatRoomTimestamp().orEmpty()
@@ -475,6 +576,122 @@ private class RoomRowView(context: Context) : View(context) {
         }
         drawUnreadIndicator(canvas, room, right, trailingWidth)
         canvas.drawLine(textLeft, height - 0.5f, widthPx.toFloat(), height - 0.5f, dividerPaint)
+    }
+
+    private fun bindAvatar(
+        avatarUrl: String?,
+        matrixMediaLoader: MatrixMediaLoader?
+    ) {
+        if (avatarUrl == null || matrixMediaLoader == null) {
+            avatarLoadHandle?.close()
+            avatarLoadHandle = null
+            avatarLoadUrl = avatarUrl
+            avatarLoadLoader = matrixMediaLoader
+            clearAvatarBitmap()
+            return
+        }
+
+        if (
+            avatarLoadUrl == avatarUrl &&
+            avatarLoadLoader === matrixMediaLoader &&
+            avatarBitmap?.isRecycled == false
+        ) {
+            return
+        }
+        if (
+            avatarLoadUrl == avatarUrl &&
+            avatarLoadLoader === matrixMediaLoader &&
+            avatarLoadHandle != null
+        ) {
+            return
+        }
+
+        avatarLoadHandle?.close()
+        avatarLoadUrl = avatarUrl
+        avatarLoadLoader = matrixMediaLoader
+        clearAvatarBitmap()
+
+        val avatarSizePx = dp(AVATAR_SIZE_DP)
+        matrixMediaLoader.cachedAvatar(avatarUrl, avatarSizePx)?.let { cached ->
+            setAvatarBitmap(
+                avatarUrl = avatarUrl,
+                matrixMediaLoader = matrixMediaLoader,
+                bitmap = cached
+            )
+            return
+        }
+
+        avatarLoadHandle = matrixMediaLoader.loadAvatar(avatarUrl, avatarSizePx) { bitmap ->
+            if (avatarLoadUrl == avatarUrl && avatarLoadLoader === matrixMediaLoader) {
+                avatarLoadHandle = null
+                setAvatarBitmap(
+                    avatarUrl = avatarUrl,
+                    matrixMediaLoader = matrixMediaLoader,
+                    bitmap = bitmap
+                )
+            }
+        }
+    }
+
+    private fun setAvatarBitmap(
+        avatarUrl: String,
+        matrixMediaLoader: MatrixMediaLoader,
+        bitmap: Bitmap?
+    ) {
+        if (avatarLoadUrl != avatarUrl || avatarLoadLoader !== matrixMediaLoader) {
+            return
+        }
+        avatarBitmap = bitmap?.takeIf { !it.isRecycled }
+        avatarBitmapShader = null
+        avatarBitmapShaderSource = null
+        invalidate()
+    }
+
+    private fun clearAvatarBitmap() {
+        if (avatarBitmap == null && avatarBitmapShader == null && avatarBitmapShaderSource == null) {
+            return
+        }
+        avatarBitmap = null
+        avatarBitmapShader = null
+        avatarBitmapShaderSource = null
+        invalidate()
+    }
+
+    private fun drawAvatarBitmap(
+        canvas: Canvas,
+        centerX: Float,
+        centerY: Float,
+        size: Float
+    ): Boolean {
+        val bitmap = avatarBitmap?.takeIf { !it.isRecycled } ?: return false
+        val shader = avatarShaderFor(bitmap)
+        val scale = max(
+            size / bitmap.width.coerceAtLeast(1).toFloat(),
+            size / bitmap.height.coerceAtLeast(1).toFloat()
+        )
+        avatarShaderMatrix.reset()
+        avatarShaderMatrix.setScale(scale, scale)
+        avatarShaderMatrix.postTranslate(
+            centerX - bitmap.width * scale / 2f,
+            centerY - bitmap.height * scale / 2f
+        )
+        shader.setLocalMatrix(avatarShaderMatrix)
+        avatarPaint.shader = shader
+        canvas.drawCircle(centerX, centerY, size / 2f, avatarPaint)
+        avatarPaint.shader = null
+        return true
+    }
+
+    private fun avatarShaderFor(bitmap: Bitmap): BitmapShader {
+        if (avatarBitmapShaderSource !== bitmap || avatarBitmapShader == null) {
+            avatarBitmapShader = BitmapShader(
+                bitmap,
+                Shader.TileMode.CLAMP,
+                Shader.TileMode.CLAMP
+            )
+            avatarBitmapShaderSource = bitmap
+        }
+        return requireNotNull(avatarBitmapShader)
     }
 
     private fun drawUnreadIndicator(
@@ -719,6 +936,7 @@ private val DARK_IOS_SYSTEM_AVATAR_COLORS = listOf(
     Color.rgb(94, 92, 230),
     Color.rgb(255, 55, 95)
 )
+private const val AVATAR_SIZE_DP = 46
 private const val ROW_HEIGHT_DP = 76
 private const val DJB2_OFFSET = 5381L
 private const val DJB2_MULTIPLIER = 33L

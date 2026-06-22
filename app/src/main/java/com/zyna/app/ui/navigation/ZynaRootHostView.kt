@@ -23,6 +23,7 @@ import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
 import com.zyna.app.ui.rooms.RoomsScreenView
 import com.zyna.app.ui.rooms.RoomsScreenViewActions
+import com.zyna.app.ui.rooms.RoomsScrollAnchor
 import com.zyna.app.ui.rooms.RoomsScreenViewState
 import com.zyna.app.ui.security.RecoveryKeyScreen
 import com.zyna.app.ui.theme.ZynaAndroidTheme
@@ -53,6 +54,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var didScheduleVulkanWarmup = false
     private var didScheduleChatViewWarmup = false
     private var prewarmedChatView: ChatScreenView? = null
+    private val roomsScrollAnchors = mutableMapOf<String, RoomsScrollAnchor>()
 
     init {
         setBackgroundColor(Color.BLACK)
@@ -199,6 +201,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val actions = latestActions ?: return
+        if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
+            roomsScrollAnchors.clear()
+        }
         val entriesStart = ZynaPerfLog.start()
         val entries = entriesFor(state, actions)
         ZynaPerfLog.end(
@@ -303,10 +308,23 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         onBack: (() -> Unit)?,
         withBottomPadding: Boolean
     ): ZynaScreenEntry {
+        val entryKey = roomsEntryKey(title = title, onBack = onBack)
         return ZynaScreenEntry(
-            key = "rooms:$title:${onBack != null}",
+            key = entryKey,
             createView = { context ->
                 RoomsScreenView(context)
+            },
+            onViewRemoved = { view ->
+                val anchor = (view as? RoomsScreenView)?.captureScrollAnchor()
+                if (shouldRetainRoomsScrollAnchor()) {
+                    if (anchor != null) {
+                        roomsScrollAnchors[entryKey] = anchor
+                    } else {
+                        roomsScrollAnchors.remove(entryKey)
+                    }
+                } else {
+                    roomsScrollAnchors.remove(entryKey)
+                }
             },
             updateView = { view ->
                 val updateStart = ZynaPerfLog.start()
@@ -318,6 +336,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         showLogout = title != "Forward to",
                         showBack = onBack != null,
                         matrixMediaLoader = actions.matrixMediaLoader,
+                        initialScrollAnchor = roomsScrollAnchors[entryKey],
                         bottomContentPaddingPx = if (withBottomPadding) {
                             dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                         } else {
@@ -340,6 +359,21 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 }
             }
         )
+    }
+
+    private fun roomsEntryKey(title: String, onBack: (() -> Unit)?): String {
+        return "rooms:$title:${onBack != null}"
+    }
+
+    private fun shouldRetainRoomsScrollAnchor(): Boolean {
+        return when (latestState?.route) {
+            AppRoute.Rooms,
+            AppRoute.ForwardPicker,
+            is AppRoute.Chat -> true
+            AppRoute.Login,
+            is AppRoute.RecoveryKey,
+            null -> false
+        }
     }
 
     private fun chatEntry(

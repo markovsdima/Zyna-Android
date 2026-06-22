@@ -47,7 +47,13 @@ data class RoomsScreenViewState(
     val showLogout: Boolean,
     val showBack: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?,
+    val initialScrollAnchor: RoomsScrollAnchor?,
     val bottomContentPaddingPx: Int
+)
+
+data class RoomsScrollAnchor(
+    val roomId: String,
+    val offsetPx: Int
 )
 
 data class RoomsScreenViewActions(
@@ -119,6 +125,7 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         includeFontPadding = true
     }
     private val adapter = RoomsAdapter(palette)
+    private var consumedInitialScrollAnchor: RoomsScrollAnchor? = null
 
     init {
         setBackgroundColor(palette.background)
@@ -223,6 +230,10 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     fun render(state: RoomsScreenViewState, actions: RoomsScreenViewActions) {
         updateThemeIfNeeded(force = false)
         val renderStart = ZynaPerfLog.start()
+        val pendingInitialScrollAnchor = state.initialScrollAnchor
+            ?.takeUnless { it == consumedInitialScrollAnchor }
+        val listMutationScrollAnchor = pendingInitialScrollAnchor
+            ?: captureScrollAnchorForListMutation()
         titleText.text = state.title
         backButton.visibility = if (state.showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { actions.onBack?.invoke() }
@@ -251,10 +262,34 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             actions.onOpenRoom(room)
         }
         adapter.setMatrixMediaLoader(state.matrixMediaLoader)
-        adapter.submitList(state.rooms)
+        adapter.submitList(state.rooms) {
+            if (listMutationScrollAnchor != null) {
+                val didRestore = restoreScrollAnchor(listMutationScrollAnchor, state.rooms)
+                if (pendingInitialScrollAnchor != null) {
+                    val userStartedScrolling = recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE
+                    if (didRestore || userStartedScrolling) {
+                        consumedInitialScrollAnchor = pendingInitialScrollAnchor
+                    }
+                }
+            }
+        }
         ZynaPerfLog.end(renderStart, "roomsView.render") {
             "title=${state.title} rooms=${state.rooms.size} refreshing=${state.isRefreshing}"
         }
+    }
+
+    fun captureScrollAnchor(): RoomsScrollAnchor? {
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return null
+        val position = layoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) {
+            return null
+        }
+        val room = adapter.currentList.getOrNull(position) ?: return null
+        val child = layoutManager.findViewByPosition(position) ?: return null
+        return RoomsScrollAnchor(
+            roomId = room.id,
+            offsetPx = child.top - recyclerView.paddingTop
+        )
     }
 
     private fun updateThemeIfNeeded(force: Boolean) {
@@ -277,6 +312,39 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         logoutButton.setTextColor(palette.actionText)
         emptyView.setTextColor(palette.secondaryText)
         adapter.setPalette(palette)
+    }
+
+    private fun captureScrollAnchorForListMutation(): RoomsScrollAnchor? {
+        if (recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
+            return null
+        }
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return null
+        val position = layoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) {
+            return null
+        }
+        val child = layoutManager.findViewByPosition(position) ?: return null
+        val isScrolledFromTop = position > 0 || child.top < recyclerView.paddingTop
+        if (!isScrolledFromTop) {
+            return null
+        }
+        return captureScrollAnchor()
+    }
+
+    private fun restoreScrollAnchor(anchor: RoomsScrollAnchor, rooms: List<MatrixRoomSummary>): Boolean {
+        if (recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE) {
+            return false
+        }
+        val index = rooms.indexOfFirst { room -> room.id == anchor.roomId }
+        if (index < 0) {
+            return false
+        }
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return false
+        layoutManager.scrollToPositionWithOffset(
+            index,
+            recyclerView.paddingTop + anchor.offsetPx
+        )
+        return true
     }
 
     private fun dp(value: Int): Int {
@@ -317,6 +385,27 @@ private class RoomsAdapter(
         )
     }
 
+    override fun onBindViewHolder(
+        holder: RoomViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        val payload = payloads.roomRowPayloadOrNull()
+        if (payload == null) {
+            onBindViewHolder(holder, position)
+            return
+        }
+
+        boundHolders += holder
+        holder.update(
+            room = getItem(position),
+            palette = palette,
+            matrixMediaLoader = matrixMediaLoader,
+            payload = payload,
+            onClick = onRoomClicked
+        )
+    }
+
     override fun onViewRecycled(holder: RoomViewHolder) {
         boundHolders -= holder
         holder.recycle()
@@ -345,7 +434,11 @@ private class RoomsAdapter(
         }
         matrixMediaLoader = nextLoader
         if (itemCount > 0) {
-            notifyItemRangeChanged(0, itemCount)
+            notifyItemRangeChanged(
+                0,
+                itemCount,
+                RoomRowPayload(reloadAvatar = true)
+            )
         }
     }
 
@@ -355,7 +448,11 @@ private class RoomsAdapter(
         }
         palette = nextPalette
         if (itemCount > 0) {
-            notifyItemRangeChanged(0, itemCount)
+            notifyItemRangeChanged(
+                0,
+                itemCount,
+                RoomRowPayload(reloadAvatar = false)
+            )
         }
     }
 }
@@ -377,6 +474,17 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
         onClick: (MatrixRoomSummary) -> Unit
     ) {
         rowView.bind(room, palette, matrixMediaLoader)
+        rowView.setOnClickListener { onClick(room) }
+    }
+
+    fun update(
+        room: MatrixRoomSummary,
+        palette: RoomsPalette,
+        matrixMediaLoader: MatrixMediaLoader?,
+        payload: RoomRowPayload,
+        onClick: (MatrixRoomSummary) -> Unit
+    ) {
+        rowView.update(room, palette, matrixMediaLoader, payload.reloadAvatar)
         rowView.setOnClickListener { onClick(room) }
     }
 
@@ -455,6 +563,26 @@ private class RoomRowView(context: Context) : View(context) {
             avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
             matrixMediaLoader = matrixMediaLoader
         )
+        invalidate()
+    }
+
+    fun update(
+        room: MatrixRoomSummary,
+        palette: RoomsPalette,
+        matrixMediaLoader: MatrixMediaLoader?,
+        reloadAvatar: Boolean
+    ) {
+        this.room = room
+        this.palette = palette
+        avatarFillColor = room.avatarColor(palette)
+        setBackgroundColor(palette.background)
+        contentDescription = room.accessibilityText()
+        if (reloadAvatar) {
+            bindAvatar(
+                avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
+                matrixMediaLoader = matrixMediaLoader
+            )
+        }
         invalidate()
     }
 
@@ -780,6 +908,34 @@ private object RoomDiffCallback : DiffUtil.ItemCallback<MatrixRoomSummary>() {
 
     override fun areContentsTheSame(oldItem: MatrixRoomSummary, newItem: MatrixRoomSummary): Boolean {
         return oldItem == newItem
+    }
+
+    override fun getChangePayload(oldItem: MatrixRoomSummary, newItem: MatrixRoomSummary): Any? {
+        if (oldItem == newItem) {
+            return null
+        }
+        return RoomRowPayload(
+            reloadAvatar = oldItem.avatarUrl != newItem.avatarUrl
+        )
+    }
+}
+
+private data class RoomRowPayload(
+    val reloadAvatar: Boolean
+)
+
+private fun List<Any>.roomRowPayloadOrNull(): RoomRowPayload? {
+    var hasPayload = false
+    var reloadAvatar = false
+    forEach { payload ->
+        val roomPayload = payload as? RoomRowPayload ?: return null
+        hasPayload = true
+        reloadAvatar = reloadAvatar || roomPayload.reloadAvatar
+    }
+    return if (hasPayload) {
+        RoomRowPayload(reloadAvatar = reloadAvatar)
+    } else {
+        null
     }
 }
 

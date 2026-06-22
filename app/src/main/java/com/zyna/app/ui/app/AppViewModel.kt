@@ -349,31 +349,10 @@ class AppViewModel(
 
         val routeUpdateStart = ZynaPerfLog.start()
         _uiState.update {
-            if (it.matrixState.userIdOrNull() != userId) {
-                it
-            } else it.copy(
-                route = AppRoute.Chat(
-                    roomId = room.id,
-                    displayName = room.displayName
-                ),
-                chatMessages = emptyList(),
-                chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
-                chatTimelineFlushSummary = null,
-                isLoadingChat = true,
-                isLoadingOlderChatMessages = false,
-                canLoadOlderChatMessages = false,
-                canLoadNewerChatMessages = false,
-                isChatAtLiveEdge = true,
-                chatErrorMessage = null,
-                isSendingChatMessage = false,
-                chatSendErrorMessage = null,
-                chatReplyTarget = null,
-                chatEditTarget = null,
-                chatForwardTarget = forwardTarget,
-                pendingForwardTarget = null,
-                forwardReturnRoute = null,
-                chatJumpTargetEventId = null,
-                chatScrollToLiveEdgeRequested = false
+            it.enterChatLoadingState(
+                userId = userId,
+                room = room,
+                forwardTarget = forwardTarget
             )
         }
         ZynaPerfLog.end(routeUpdateStart, "openRoom.routeUpdate") {
@@ -401,18 +380,10 @@ class AppViewModel(
 
             val stateUpdateStart = ZynaPerfLog.start()
             _uiState.update {
-                if (!it.isRouteForRoom(userId, room.id)) {
-                    it
-                } else it.copy(
-                    chatMessages = initialMessages,
-                    chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
-                    chatTimelineFlushSummary = null,
-                    isLoadingChat = initialMessages.isEmpty(),
-                    isLoadingOlderChatMessages = false,
-                    canLoadOlderChatMessages = true,
-                    canLoadNewerChatMessages = false,
-                    isChatAtLiveEdge = true,
-                    chatErrorMessage = null
+                it.applyInitialChatSnapshot(
+                    userId = userId,
+                    roomId = room.id,
+                    initialMessages = initialMessages
                 )
             }
             ZynaPerfLog.end(
@@ -1730,6 +1701,61 @@ class AppViewModel(
 
     private fun AppUiState.isRouteForRoom(userId: String, roomId: String): Boolean {
         return matrixState.userIdOrNull() == userId && isRouteForRoom(roomId)
+    }
+
+    private fun AppUiState.enterChatLoadingState(
+        userId: String,
+        room: MatrixRoomSummary,
+        forwardTarget: MatrixForwardTarget?
+    ): AppUiState {
+        if (matrixState.userIdOrNull() != userId) {
+            return this
+        }
+        return copy(
+            route = AppRoute.Chat(
+                roomId = room.id,
+                displayName = room.displayName
+            ),
+            chatMessages = emptyList(),
+            chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
+            chatTimelineFlushSummary = null,
+            isLoadingChat = true,
+            isLoadingOlderChatMessages = false,
+            canLoadOlderChatMessages = false,
+            canLoadNewerChatMessages = false,
+            isChatAtLiveEdge = true,
+            chatErrorMessage = null,
+            isSendingChatMessage = false,
+            chatSendErrorMessage = null,
+            chatReplyTarget = null,
+            chatEditTarget = null,
+            chatForwardTarget = forwardTarget,
+            pendingForwardTarget = null,
+            forwardReturnRoute = null,
+            chatJumpTargetEventId = null,
+            chatScrollToLiveEdgeRequested = false
+        )
+    }
+
+    private fun AppUiState.applyInitialChatSnapshot(
+        userId: String,
+        roomId: String,
+        initialMessages: List<MatrixChatMessage>
+    ): AppUiState {
+        if (!isRouteForRoom(userId, roomId)) {
+            return this
+        }
+        return copy(
+            chatMessages = initialMessages,
+            chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
+            chatTimelineFlushSummary = null,
+            isLoadingChat = initialMessages.isEmpty(),
+            isLoadingOlderChatMessages = false,
+            canLoadOlderChatMessages = true,
+            canLoadNewerChatMessages = false,
+            isChatAtLiveEdge = true,
+            chatErrorMessage = null
+        )
     }
 
     private fun AppRoute.perfName(): String {

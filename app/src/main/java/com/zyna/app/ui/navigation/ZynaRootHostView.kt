@@ -2,6 +2,7 @@ package com.zyna.app.ui.navigation
 
 import android.content.Context
 import android.graphics.Color
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -467,13 +468,19 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         didScheduleChatViewWarmup = true
         postDelayed(
             {
-                didScheduleChatViewWarmup = false
                 if (prewarmedChatView != null || latestState?.route != AppRoute.Rooms) {
+                    didScheduleChatViewWarmup = false
                     return@postDelayed
                 }
-                val start = ZynaPerfLog.start()
-                prewarmedChatView = createChatScreenView(context)
-                ZynaPerfLog.end(start, "root.chatViewWarmup")
+                Looper.myQueue().addIdleHandler {
+                    didScheduleChatViewWarmup = false
+                    if (prewarmedChatView == null && latestState?.route == AppRoute.Rooms) {
+                        val start = ZynaPerfLog.start()
+                        prewarmedChatView = createChatScreenView(context)
+                        ZynaPerfLog.end(start, "root.chatViewWarmup")
+                    }
+                    false
+                }
             },
             CHAT_VIEW_WARMUP_DELAY_MS
         )

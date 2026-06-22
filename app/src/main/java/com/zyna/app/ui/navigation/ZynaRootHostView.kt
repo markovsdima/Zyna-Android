@@ -21,7 +21,9 @@ import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
-import com.zyna.app.ui.rooms.RoomsScreen
+import com.zyna.app.ui.rooms.RoomsScreenView
+import com.zyna.app.ui.rooms.RoomsScreenViewActions
+import com.zyna.app.ui.rooms.RoomsScreenViewState
 import com.zyna.app.ui.security.RecoveryKeyScreen
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
@@ -301,29 +303,42 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         onBack: (() -> Unit)?,
         withBottomPadding: Boolean
     ): ZynaScreenEntry {
-        return composeEntry("rooms:$title:${onBack != null}") {
-            ZynaAndroidTheme {
-                RoomsScreen(
-                    rooms = state.rooms,
-                    isRefreshing = state.isRefreshingRooms,
-                    onRefresh = actions.onRefreshRooms,
-                    onOpenRoom = if (title == "Forward to") {
-                        actions.onForwardRoomSelected
-                    } else {
-                        actions.onOpenRoom
-                    },
-                    onLogout = if (title == "Forward to") null else actions.onLogout,
-                    title = title,
-                    onBack = onBack,
-                    bottomContentPaddingDp = if (withBottomPadding) {
-                        ZynaTabBarView.BASE_HEIGHT_DP +
-                            (bottomInset / resources.displayMetrics.density).toInt()
-                    } else {
-                        0
-                    }
+        return ZynaScreenEntry(
+            key = "rooms:$title:${onBack != null}",
+            createView = { context ->
+                RoomsScreenView(context)
+            },
+            updateView = { view ->
+                val updateStart = ZynaPerfLog.start()
+                (view as RoomsScreenView).render(
+                    state = RoomsScreenViewState(
+                        rooms = state.rooms,
+                        isRefreshing = state.isRefreshingRooms,
+                        title = title,
+                        showLogout = title != "Forward to",
+                        showBack = onBack != null,
+                        bottomContentPaddingPx = if (withBottomPadding) {
+                            dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                        } else {
+                            0
+                        }
+                    ),
+                    actions = RoomsScreenViewActions(
+                        onRefresh = actions.onRefreshRooms,
+                        onOpenRoom = if (title == "Forward to") {
+                            actions.onForwardRoomSelected
+                        } else {
+                            actions.onOpenRoom
+                        },
+                        onLogout = if (title == "Forward to") null else actions.onLogout,
+                        onBack = onBack
+                    )
                 )
+                ZynaPerfLog.end(updateStart, "root.roomsEntry.updateView") {
+                    "title=$title rooms=${state.rooms.size} refreshing=${state.isRefreshingRooms}"
+                }
             }
-        }
+        )
     }
 
     private fun chatEntry(

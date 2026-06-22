@@ -84,6 +84,7 @@ class MainActivity : ComponentActivity() {
 
         val actions = ZynaAppActions(
             matrixMediaLoader = appContainer.matrixMediaLoader,
+            audioPlaybackController = appContainer.audioPlaybackController,
             onLogin = appViewModel::login,
             onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
             onRefreshRooms = appViewModel::refreshRooms,
@@ -112,7 +113,11 @@ class MainActivity : ComponentActivity() {
             onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
             onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
-            onLogout = appViewModel::logout
+            onLogout = {
+                appContainer.audioPlaybackController.stop()
+                appContainer.matrixAudioMediaLoader.clear()
+                appViewModel.logout()
+            }
         )
 
         onBackPressedDispatcher.addCallback(

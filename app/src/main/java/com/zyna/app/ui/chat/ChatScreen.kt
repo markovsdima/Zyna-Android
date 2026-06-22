@@ -23,7 +23,10 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
+import com.zyna.app.data.media.AudioPlaybackController
+import com.zyna.app.data.media.AudioPlaybackSnapshot
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
@@ -76,6 +79,7 @@ data class ChatScreenViewState(
     val editTarget: MatrixEditTarget?,
     val forwardTarget: MatrixForwardTarget?,
     val matrixMediaLoader: MatrixMediaLoader?,
+    val audioPlaybackController: AudioPlaybackController?,
     val jumpTargetEventId: String?
 )
 
@@ -124,6 +128,8 @@ internal class ChatScreenView(
     private var statusTopInset = 0
     private var photoViewerLayer: PhotoViewerLayer? = null
     private var currentRoomId: String? = null
+    private var currentAudioPlaybackController: AudioPlaybackController? = null
+    private var audioPlaybackListenerHandle: AutoCloseable? = null
 
     fun canReuseForRoom(roomId: String): Boolean {
         return currentRoomId == null || currentRoomId == roomId
@@ -261,7 +267,8 @@ internal class ChatScreenView(
             onContextMenuRequested = chatLayout::showMessageContextMenu,
             onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
             onReplyHeaderClicked = {},
-            onPhotoViewerRequested = {}
+            onPhotoViewerRequested = {},
+            onVoicePlaybackRequested = { _, _ -> }
         )
         chatLayout.recyclerView.addOnScrollListener(MediaPrefetchScrollListener)
         ZynaPerfLog.end(adapterStart, "chatView.initAdapter")
@@ -301,6 +308,9 @@ internal class ChatScreenView(
 
     override fun onDetachedFromWindow() {
         removePhotoViewer()
+        audioPlaybackListenerHandle?.close()
+        audioPlaybackListenerHandle = null
+        currentAudioPlaybackController = null
         super.onDetachedFromWindow()
     }
 
@@ -426,7 +436,11 @@ internal class ChatScreenView(
         adapter.onPhotoViewerRequested = { request ->
             openPhotoViewer(request, state.matrixMediaLoader)
         }
+        adapter.onVoicePlaybackRequested = { messageId, audioInfo ->
+            state.audioPlaybackController?.toggle(messageId, audioInfo)
+        }
         adapter.matrixMediaLoader = state.matrixMediaLoader
+        bindAudioPlaybackController(state.audioPlaybackController)
         val presentationStart = ZynaPerfLog.start()
         val displayedMessages = state.messages
             .asReversed()
@@ -686,6 +700,24 @@ internal class ChatScreenView(
         val layer = photoViewerLayer ?: return
         photoViewerLayer = null
         (layer.parent as? ViewGroup)?.removeView(layer)
+    }
+
+    private fun bindAudioPlaybackController(controller: AudioPlaybackController?) {
+        if (currentAudioPlaybackController === controller) {
+            return
+        }
+        audioPlaybackListenerHandle?.close()
+        audioPlaybackListenerHandle = null
+        currentAudioPlaybackController = controller
+        val adapter = chatLayout.recyclerView.adapter as? ChatMessageAdapter
+        if (controller == null) {
+            adapter?.setAudioPlaybackSnapshot(AudioPlaybackSnapshot())
+            return
+        }
+        audioPlaybackListenerHandle = controller.addListener { snapshot ->
+            (chatLayout.recyclerView.adapter as? ChatMessageAdapter)
+                ?.setAudioPlaybackSnapshot(snapshot)
+        }
     }
 
     private fun updateNativeThemeIfNeeded() {
@@ -1008,10 +1040,12 @@ private class ChatMessageAdapter(
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
     var onReplyHeaderClicked: (String) -> Unit,
-    var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit
+    var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
+    var onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
     private var lastMediaPrefetchWindowSignature: String? = null
     private var lastMediaPrefetchSignature: String? = null
+    private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
     var matrixMediaLoader: MatrixMediaLoader? = matrixMediaLoader
         set(value) {
             if (field !== value) {
@@ -1048,7 +1082,9 @@ private class ChatMessageAdapter(
             onContextMenuRequested = onContextMenuRequested,
             onContextMenuGestureEvent = onContextMenuGestureEvent,
             onReplyHeaderClicked = onReplyHeaderClicked,
-            onPhotoViewerRequested = onPhotoViewerRequested
+            onPhotoViewerRequested = onPhotoViewerRequested,
+            onVoicePlaybackRequested = onVoicePlaybackRequested,
+            audioPlaybackSnapshot = audioPlaybackSnapshot
         )
         ZynaPerfLog.endIfSlow(
             start,
@@ -1057,6 +1093,18 @@ private class ChatMessageAdapter(
         ) {
             "position=$position id=${getItem(position).id}"
         }
+    }
+
+    override fun onBindViewHolder(
+        holder: ChatMessageViewHolder,
+        position: Int,
+        payloads: MutableList<Any>
+    ) {
+        if (payloads.isNotEmpty() && payloads.all { it === AudioPlaybackPayload }) {
+            holder.updateAudioPlaybackSnapshot(audioPlaybackSnapshot)
+            return
+        }
+        super.onBindViewHolder(holder, position, payloads)
     }
 
     override fun onCurrentListChanged(
@@ -1120,6 +1168,22 @@ private class ChatMessageAdapter(
         lastMediaPrefetchWindowSignature = null
         lastMediaPrefetchSignature = null
     }
+
+    fun setAudioPlaybackSnapshot(snapshot: AudioPlaybackSnapshot) {
+        val previous = audioPlaybackSnapshot
+        if (previous == snapshot) {
+            return
+        }
+        audioPlaybackSnapshot = snapshot
+        listOfNotNull(previous.messageId, snapshot.messageId)
+            .distinct()
+            .forEach { messageId ->
+                val position = currentList.indexOfFirst { it.id == messageId }
+                if (position != -1) {
+                    notifyItemChanged(position, AudioPlaybackPayload)
+                }
+            }
+    }
 }
 
 private class ChatMessageViewHolder(
@@ -1142,16 +1206,26 @@ private class ChatMessageViewHolder(
         onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
         onReplyHeaderClicked: (String) -> Unit,
-        onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit
+        onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
+        onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit,
+        audioPlaybackSnapshot: AudioPlaybackSnapshot
     ) {
         messageView.onContextMenuPreviewRequested = onContextMenuPreviewRequested
         messageView.onContextMenuRequested = onContextMenuRequested
         messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
         messageView.onReplyHeaderClicked = onReplyHeaderClicked
         messageView.onPhotoViewerRequested = onPhotoViewerRequested
+        messageView.onVoicePlaybackRequested = onVoicePlaybackRequested
+        messageView.setAudioPlaybackSnapshot(audioPlaybackSnapshot)
         messageView.bind(message, theme)
     }
+
+    fun updateAudioPlaybackSnapshot(snapshot: AudioPlaybackSnapshot) {
+        messageView.setAudioPlaybackSnapshot(snapshot)
+    }
 }
+
+private object AudioPlaybackPayload
 
 private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
     return MessageRenderModel(
@@ -1205,6 +1279,9 @@ private fun MatrixChatMessage.renderContent(): MessageContent {
                 )
             }
             ?: MessageContent.Text(body.ifBlank { "Photo" })
+        MatrixMessageContentType.AUDIO -> audioInfo
+            ?.let { MessageContent.Voice(it) }
+            ?: MessageContent.Text(body.ifBlank { "Audio" })
         else -> MessageContent.Text(body)
     }
 }

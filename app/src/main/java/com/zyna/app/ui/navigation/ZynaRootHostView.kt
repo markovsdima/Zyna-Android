@@ -412,6 +412,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         editTarget = state.chatEditTarget,
                         forwardTarget = state.chatForwardTarget,
                         matrixMediaLoader = actions.matrixMediaLoader,
+                        audioPlaybackController = actions.audioPlaybackController,
                         jumpTargetEventId = state.chatJumpTargetEventId
                     ),
                     actions = ChatScreenViewActions(

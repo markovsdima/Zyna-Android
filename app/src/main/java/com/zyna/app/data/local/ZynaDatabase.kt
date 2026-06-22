@@ -16,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -61,7 +61,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_12_13,
                     MIGRATION_13_14,
                     MIGRATION_14_15,
-                    MIGRATION_15_16
+                    MIGRATION_15_16,
+                    MIGRATION_16_17
                 )
                 .build()
         }
@@ -290,6 +291,24 @@ abstract class ZynaDatabase : RoomDatabase() {
         private val MIGRATION_15_16 = object : Migration(15, 16) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE rooms ADD COLUMN directUserId TEXT")
+            }
+        }
+
+        private val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioSourceJson TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioFilename TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioCaption TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioMimeType TEXT")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioSizeBytes INTEGER")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioDurationMillis INTEGER")
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN audioWaveform TEXT")
+                db.execSQL(
+                    """
+                    ALTER TABLE timeline_messages
+                    ADD COLUMN audioIsVoice INTEGER NOT NULL DEFAULT 0
+                    """.trimIndent()
+                )
             }
         }
     }

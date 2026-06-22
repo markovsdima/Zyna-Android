@@ -1,5 +1,6 @@
 package com.zyna.app.ui.navigation
 
+import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
@@ -8,6 +9,7 @@ import com.zyna.app.data.matrix.MatrixRoomSummary
 
 data class ZynaAppActions(
     val matrixMediaLoader: MatrixMediaLoader?,
+    val audioPlaybackController: AudioPlaybackController?,
     val onLogin: (homeserver: String, username: String, password: String) -> Unit,
     val onSubmitRecoveryKey: (String) -> Unit,
     val onRefreshRooms: () -> Unit,

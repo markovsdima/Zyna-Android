@@ -1773,6 +1773,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             is MessageContent.Text -> content.body
             is MessageContent.Image -> content.caption.normalizedMessageCaption()
             is MessageContent.PhotoGroup -> content.caption.normalizedMessageCaption()
+            is MessageContent.Voice -> null
             MessageContent.Redacted -> null
         }?.takeIf { it.isNotBlank() } ?: return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -1791,6 +1792,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             is MessageContent.Text -> currentContent.body
             is MessageContent.Image -> currentContent.caption.normalizedMessageCaption() ?: "Photo"
             is MessageContent.PhotoGroup -> currentContent.caption.normalizedMessageCaption() ?: "Photo group"
+            is MessageContent.Voice -> "Voice message"
             MessageContent.Redacted -> return null
         }.takeIf { it.isNotBlank() } ?: return null
         return MessageReplyPreview(
@@ -1837,6 +1839,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
                     layoutOverride = currentContent.layoutOverride
                 )
             }
+            is MessageContent.Voice -> return null
             MessageContent.Redacted -> return null
         }
     }

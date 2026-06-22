@@ -343,6 +343,7 @@ private fun MessageContent.renderText(): String {
         is MessageContent.Text -> body
         is MessageContent.Image -> caption.normalizedMessageCaption() ?: "Photo"
         is MessageContent.PhotoGroup -> caption.normalizedMessageCaption() ?: "Photo group"
+        is MessageContent.Voice -> "Voice message"
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
 }

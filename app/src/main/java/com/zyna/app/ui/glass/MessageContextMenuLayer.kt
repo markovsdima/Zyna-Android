@@ -847,6 +847,7 @@ private fun MessageRenderModel.copyableText(): String? {
         is MessageContent.Text -> messageContent.body
         is MessageContent.Image -> messageContent.caption.normalizedMessageCaption()
         is MessageContent.PhotoGroup -> messageContent.caption.normalizedMessageCaption()
+        is MessageContent.Voice -> null
         MessageContent.Redacted -> null
     }
     return text?.takeIf { it.isNotBlank() }

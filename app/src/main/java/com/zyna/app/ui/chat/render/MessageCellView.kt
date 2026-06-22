@@ -15,7 +15,9 @@ import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import android.util.Log
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.media.AudioPlaybackSnapshot
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.messaging.CaptionPlacement
@@ -34,12 +36,15 @@ internal class MessageCellView(
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val contextCancelDistance = touchSlop * 2f
     private val bubbleRenderer = BubbleRenderer(density)
+    private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
     private val textRenderer = TextMessageRenderer(context)
     private val imageRenderer = ImageMessageRenderer(context, imageLoader)
     private val photoGroupRenderer = PhotoGroupMessageRenderer(context, imageLoader)
+    private val voiceRenderer = VoiceMessageRenderer(context) { audioPlaybackSnapshot }
     private val contentRenderers: List<MessageContentRenderer> = listOf(
         photoGroupRenderer,
         imageRenderer,
+        voiceRenderer,
         textRenderer
     )
     private val bubbleRect = RectF()
@@ -63,6 +68,7 @@ internal class MessageCellView(
     private var isDrawingContextMenuCopy = false
     private var drawsContextPhotoSelection = true
     private var isPhotoTapCandidate = false
+    private var isVoiceTapCandidate = false
     private var replyHeaderTapEventId: String? = null
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
@@ -86,6 +92,7 @@ internal class MessageCellView(
     var onContextMenuGestureEvent: ((action: Int, rawX: Float, rawY: Float) -> Unit)? = null
     var onReplyHeaderClicked: ((eventId: String) -> Unit)? = null
     var onPhotoViewerRequested: ((request: PhotoViewerOpenRequest) -> Unit)? = null
+    var onVoicePlaybackRequested: ((messageId: String, audioInfo: MatrixAudioInfo) -> Unit)? = null
 
     override val isPhotoViewerSourceAvailable: Boolean
         get() = isAttachedToWindow && isShown
@@ -125,6 +132,21 @@ internal class MessageCellView(
         }
         startImageLoadIfNeeded(model)
         invalidate()
+    }
+
+    fun setAudioPlaybackSnapshot(snapshot: AudioPlaybackSnapshot) {
+        if (audioPlaybackSnapshot == snapshot) {
+            return
+        }
+        val previous = audioPlaybackSnapshot
+        audioPlaybackSnapshot = snapshot
+        val model = renderModel ?: return
+        if (model.content !is MessageContent.Voice) {
+            return
+        }
+        if (previous.messageId == model.id || snapshot.messageId == model.id) {
+            invalidate()
+        }
     }
 
     fun highlightBubble() {
@@ -217,6 +239,7 @@ internal class MessageCellView(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 isPhotoTapCandidate = photoViewerRequestAt(event.x, event.y) != null
+                isVoiceTapCandidate = voicePlaybackTargetAt(event.x, event.y) != null
                 replyHeaderTapEventId = replyHeaderEventIdAt(event.x, event.y)
                 if (hitTest(event.x, event.y) == MessageHitTarget.BUBBLE && renderModel != null) {
                     downTouchX = event.x
@@ -237,6 +260,9 @@ internal class MessageCellView(
                 if (isPhotoTapCandidate && movedPastTouchSlop(event.x, event.y)) {
                     isPhotoTapCandidate = false
                 }
+                if (isVoiceTapCandidate && movedPastTouchSlop(event.x, event.y)) {
+                    isVoiceTapCandidate = false
+                }
                 if (isContextMenuCandidate && !isContextMenuPreviewing && movedPastTouchSlop(event.x, event.y)) {
                     cancelContextMenuCandidate()
                 }
@@ -253,6 +279,7 @@ internal class MessageCellView(
             MotionEvent.ACTION_CANCEL -> {
                 val wasContextMenuGesture = isContextMenuPreviewing || isContextMenuOpened
                 val wasPhotoTapCandidate = isPhotoTapCandidate
+                val wasVoiceTapCandidate = isVoiceTapCandidate
                 val replyHeaderClickEventId = if (
                     event.actionMasked == MotionEvent.ACTION_UP &&
                     !wasContextMenuGesture &&
@@ -278,6 +305,18 @@ internal class MessageCellView(
                     onReplyHeaderClicked?.invoke(replyHeaderClickEventId)
                     performClick()
                     return true
+                }
+                if (
+                    event.actionMasked == MotionEvent.ACTION_UP &&
+                    wasVoiceTapCandidate &&
+                    !movedPastTouchSlop(event.x, event.y)
+                ) {
+                    val target = voicePlaybackTargetAt(event.x, event.y)
+                    if (target != null) {
+                        onVoicePlaybackRequested?.invoke(target.messageId, target.audioInfo)
+                        performClick()
+                        return true
+                    }
                 }
                 if (
                     event.actionMasked == MotionEvent.ACTION_UP &&
@@ -340,6 +379,7 @@ internal class MessageCellView(
             is TextMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
             is ImageMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
             is PhotoGroupMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
+            is VoiceMessageLayout -> contentLayout.replyHeaderLayout to contentLayout.replyY
             else -> null to 0
         }
         val replyHeaderLayout = replyLayout ?: return null
@@ -590,6 +630,7 @@ internal class MessageCellView(
         isContextMenuPreviewing = false
         isContextMenuOpened = false
         isPhotoTapCandidate = false
+        isVoiceTapCandidate = false
         replyHeaderTapEventId = null
     }
 
@@ -717,6 +758,27 @@ internal class MessageCellView(
             sourceBoundsInScreen = viewRectToScreen(hit.boundsInView),
             sourceCornerRadiusPx = PHOTO_SOURCE_CORNER_RADIUS_DP.dpToPx(density).toFloat()
         )
+    }
+
+    private fun voicePlaybackTargetAt(x: Float, y: Float): VoicePlaybackTarget? {
+        val currentLayout = layout ?: return null
+        val model = renderModel ?: return null
+        val content = model.content as? MessageContent.Voice ?: return null
+        if (currentLayout.contentLayout !is VoiceMessageLayout) {
+            return null
+        }
+        val left = currentLayout.contentLeft.toFloat()
+        val top = currentLayout.contentTop.toFloat()
+        val right = left + currentLayout.contentLayout.width
+        val bottom = top + currentLayout.contentLayout.height
+        return if (x >= left && x <= right && y >= top && y <= bottom) {
+            VoicePlaybackTarget(
+                messageId = model.id,
+                audioInfo = content.audioInfo
+            )
+        } else {
+            null
+        }
     }
 
     private fun photoHitTargets(
@@ -926,6 +988,11 @@ private data class ImageLoadRequest(
     val targetHeightPx: Int
 )
 
+private data class VoicePlaybackTarget(
+    val messageId: String,
+    val audioInfo: MatrixAudioInfo
+)
+
 internal data class MessageContextMenuRequest(
     val cell: MessageCellView,
     val message: MessageRenderModel,
@@ -973,6 +1040,10 @@ private fun MessageContent.debugSummary(): String {
             "groupItems=${items.size} totalHint=$totalHint " +
                 "groupCaption=${caption.debugCaption()} placement=$captionPlacement " +
                 "layoutOverride=$layoutOverride"
+        }
+        is MessageContent.Voice -> {
+            "voice duration=${audioInfo.durationMillis} waveform=${audioInfo.waveform.size} " +
+                "isVoice=${audioInfo.isVoice}"
         }
         is MessageContent.Text -> "textLength=${body.length}"
         MessageContent.Redacted -> "redacted=true"

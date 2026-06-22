@@ -1,5 +1,6 @@
 package com.zyna.app.ui.chat.render
 
+import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.matrix.MatrixMediaGroupItem
@@ -68,6 +69,7 @@ internal sealed interface MessageContent {
         val captionPlacement: CaptionPlacement,
         val layoutOverride: MediaGroupLayoutOverride?
     ) : MessageContent
+    data class Voice(val audioInfo: MatrixAudioInfo) : MessageContent
     data object Redacted : MessageContent
 }
 
@@ -126,6 +128,7 @@ internal fun MessageRenderModel.accessibilityText(): String {
         is MessageContent.Text -> content.body
         is MessageContent.Image -> content.caption.normalizedMessageCaption() ?: "Photo"
         is MessageContent.PhotoGroup -> content.caption.normalizedMessageCaption() ?: "Photo group"
+        is MessageContent.Voice -> content.audioInfo.accessibilityText()
         MessageContent.Redacted -> REDACTED_MESSAGE_TEXT
     }
     val reply = replyInfo?.let { ", in reply to ${it.senderText}: ${it.body}" }.orEmpty()
@@ -148,3 +151,22 @@ internal val MessageRenderModel.isRedacted: Boolean
     get() = content is MessageContent.Redacted
 
 internal const val REDACTED_MESSAGE_TEXT = "Deleted message"
+
+private fun MatrixAudioInfo.accessibilityText(): String {
+    val label = if (isVoice) "Voice message" else "Audio"
+    val duration = durationMillis
+        ?.takeIf { it > 0L }
+        ?.let { ", ${it.formatAudioDuration()}" }
+        .orEmpty()
+    val captionText = caption.normalizedMessageCaption()
+        ?.let { ": $it" }
+        .orEmpty()
+    return "$label$duration$captionText"
+}
+
+private fun Long.formatAudioDuration(): String {
+    val totalSeconds = (this / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "$minutes:${seconds.toString().padStart(2, '0')}"
+}

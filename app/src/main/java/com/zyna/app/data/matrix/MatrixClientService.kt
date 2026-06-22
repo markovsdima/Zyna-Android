@@ -42,6 +42,7 @@ import org.matrix.rustcomponents.sdk.FormattedBody
 import org.matrix.rustcomponents.sdk.ImageInfo
 import org.matrix.rustcomponents.sdk.ImageMessageContent
 import org.matrix.rustcomponents.sdk.LatestEventValue
+import org.matrix.rustcomponents.sdk.MediaFileHandle
 import org.matrix.rustcomponents.sdk.MediaSource
 import org.matrix.rustcomponents.sdk.MessageFormat
 import org.matrix.rustcomponents.sdk.MessageContent
@@ -172,6 +173,17 @@ data class MatrixImageInfo(
     val localPath: String? = null
 )
 
+data class MatrixAudioInfo(
+    val sourceJson: String,
+    val filename: String?,
+    val caption: String?,
+    val mimeType: String?,
+    val sizeBytes: Long?,
+    val durationMillis: Long?,
+    val waveform: List<Float> = emptyList(),
+    val isVoice: Boolean = false
+)
+
 data class MatrixMediaGroupItem(
     val messageId: String,
     val eventId: String?,
@@ -204,6 +216,7 @@ data class MatrixChatMessage(
     val isOwn: Boolean,
     val contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
     val imageInfo: MatrixImageInfo? = null,
+    val audioInfo: MatrixAudioInfo? = null,
     val deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
     val replyInfo: MatrixReplyInfo? = null,
     val forwardedFrom: String? = null,
@@ -834,6 +847,25 @@ class MatrixClientService(
         }
     }
 
+    suspend fun loadMediaFile(
+        sourceJson: String,
+        filename: String?,
+        mimeType: String?,
+        tempDir: File?
+    ): MediaFileHandle = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val source = MediaSource.fromJson(sourceJson)
+        source.use { mediaSource ->
+            activeClient.getMediaFile(
+                mediaSource = mediaSource,
+                filename = filename?.takeIf { it.isNotBlank() },
+                mimeType = mimeType?.takeIf { it.isNotBlank() } ?: DEFAULT_AUDIO_MIME_TYPE,
+                useCache = true,
+                tempDir = tempDir?.absolutePath
+            )
+        }
+    }
+
     suspend fun loadMediaContentFromUrl(url: String): ByteArray = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         val source = MediaSource.fromUrl(url)
@@ -887,17 +919,20 @@ class MatrixClientService(
             is MsgLikeKind.Message -> MatrixMessageBody(
                 body = kind.content.displayBody(),
                 contentType = kind.content.contentType(),
-                imageInfo = kind.content.imageInfoOrNull()
+                imageInfo = kind.content.imageInfoOrNull(),
+                audioInfo = kind.content.audioInfoOrNull()
             )
             MsgLikeKind.Redacted -> MatrixMessageBody(
                 body = "Deleted message",
                 contentType = MatrixMessageContentType.REDACTED,
-                imageInfo = null
+                imageInfo = null,
+                audioInfo = null
             )
             is MsgLikeKind.UnableToDecrypt -> MatrixMessageBody(
                 body = "Unable to decrypt message",
                 contentType = MatrixMessageContentType.UNABLE_TO_DECRYPT,
-                imageInfo = null
+                imageInfo = null,
+                audioInfo = null
             )
             else -> return null
         }
@@ -926,6 +961,7 @@ class MatrixClientService(
             isOwn = isOwn,
             contentType = messageBody.contentType,
             imageInfo = messageBody.imageInfo,
+            audioInfo = messageBody.audioInfo,
             replyInfo = replyInfo,
             forwardedFrom = zynaAttributes.forwardedFrom,
             zynaAttributes = zynaAttributes,
@@ -1029,6 +1065,29 @@ class MatrixClientService(
             caption = image.caption.normalizedMessageCaption(),
             mimeType = info?.mimetype?.takeIf { it.isNotBlank() },
             blurhash = info?.blurhash?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun MessageContent.audioInfoOrNull(): MatrixAudioInfo? {
+        val audio = (msgType as? MessageType.Audio)?.content ?: return null
+        val sourceJson = runCatching { audio.source.toJson() }
+            .getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val info = audio.info
+        val details = audio.audio
+        return MatrixAudioInfo(
+            sourceJson = sourceJson,
+            filename = audio.filename.takeIf { it.isNotBlank() },
+            caption = audio.caption.normalizedMessageCaption(),
+            mimeType = info?.mimetype?.takeIf { it.isNotBlank() },
+            sizeBytes = info?.size?.toLongOrNull(),
+            durationMillis = info?.duration
+                ?.toMillis()
+                ?.takeIf { it > 0L }
+                ?: details?.duration?.toMillis()?.takeIf { it > 0L },
+            waveform = details?.waveform.normalizedWaveform(),
+            isVoice = audio.voice != null
         )
     }
 
@@ -1285,6 +1344,20 @@ class MatrixClientService(
         return takeIf { it in 1UL..Int.MAX_VALUE.toULong() }?.toInt()
     }
 
+    private fun ULong.toLongOrNull(): Long? {
+        return takeIf { it in 1UL..Long.MAX_VALUE.toULong() }?.toLong()
+    }
+
+    private fun List<UShort>?.normalizedWaveform(): List<Float> {
+        if (isNullOrEmpty()) {
+            return emptyList()
+        }
+        val maxValue = maxOf { it.toInt() }.coerceAtLeast(MATRIX_WAVEFORM_DEFAULT_PEAK)
+        return map { sample ->
+            (sample.toInt().toFloat() / maxValue.toFloat()).coerceIn(0f, 1f)
+        }
+    }
+
     private fun LatestEventValueLocalState.toLastOwnMessageStatus(): MatrixLastOwnMessageStatus {
         return when (this) {
             LatestEventValueLocalState.IS_SENDING -> MatrixLastOwnMessageStatus.PENDING
@@ -1414,7 +1487,8 @@ class MatrixClientService(
     private data class MatrixMessageBody(
         val body: String,
         val contentType: MatrixMessageContentType,
-        val imageInfo: MatrixImageInfo?
+        val imageInfo: MatrixImageInfo?,
+        val audioInfo: MatrixAudioInfo?
     )
 
     private companion object {
@@ -1428,6 +1502,8 @@ class MatrixClientService(
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
         const val ZERO_WIDTH_SPACE = "\u200B"
+        const val DEFAULT_AUDIO_MIME_TYPE = "audio/mpeg"
+        const val MATRIX_WAVEFORM_DEFAULT_PEAK = 1024
     }
 }
 

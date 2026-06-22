@@ -2,6 +2,7 @@ package com.zyna.app.data.local
 
 import android.content.Context
 import androidx.room.withTransaction
+import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixImageInfo
@@ -23,6 +24,7 @@ import com.zyna.app.data.outgoing.OutgoingTransportState
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -1083,6 +1085,7 @@ class LocalCacheRepository(
             isOwn = isOwn,
             contentType = contentType.toMatrixContentType(),
             imageInfo = imageInfoOrNull(),
+            audioInfo = audioInfoOrNull(),
             deliveryState = deliveryState.toMatrixDeliveryState(),
             replyInfo = replyInfoOrNull(),
             forwardedFrom = forwardedFrom,
@@ -1132,6 +1135,14 @@ class LocalCacheRepository(
             imageCaption = imageInfo?.caption.normalizedMessageCaption(),
             imageMimeType = imageInfo?.mimeType,
             imageBlurhash = imageInfo?.blurhash,
+            audioSourceJson = audioInfo?.sourceJson,
+            audioFilename = audioInfo?.filename,
+            audioCaption = audioInfo?.caption.normalizedMessageCaption(),
+            audioMimeType = audioInfo?.mimeType,
+            audioSizeBytes = audioInfo?.sizeBytes,
+            audioDurationMillis = audioInfo?.durationMillis,
+            audioWaveform = audioInfo?.waveform.toWaveformCacheString(),
+            audioIsVoice = audioInfo?.isVoice == true,
             deliveryState = deliveryState.name,
             replyEventId = replyInfo?.eventId,
             replySenderId = replyInfo?.senderId,
@@ -1544,6 +1555,20 @@ class LocalCacheRepository(
         )
     }
 
+    private fun CachedTimelineMessageEntity.audioInfoOrNull(): MatrixAudioInfo? {
+        val sourceJson = audioSourceJson?.takeIf { it.isNotBlank() } ?: return null
+        return MatrixAudioInfo(
+            sourceJson = sourceJson,
+            filename = audioFilename?.takeIf { it.isNotBlank() },
+            caption = audioCaption.normalizedMessageCaption(),
+            mimeType = audioMimeType?.takeIf { it.isNotBlank() },
+            sizeBytes = audioSizeBytes?.takeIf { it > 0L },
+            durationMillis = audioDurationMillis?.takeIf { it > 0L },
+            waveform = audioWaveform.toWaveformList(),
+            isVoice = audioIsVoice
+        )
+    }
+
     private fun OutgoingEnvelopeEntity.replyInfoOrNull(): MatrixReplyInfo? {
         val eventId = replyEventId?.takeIf { it.isNotBlank() } ?: return null
         return MatrixReplyInfo(
@@ -1692,6 +1717,14 @@ class LocalCacheRepository(
                 imageCaption = incoming.imageCaption ?: existing.imageCaption.normalizedMessageCaption(),
                 imageMimeType = incoming.imageMimeType ?: existing.imageMimeType,
                 imageBlurhash = incoming.imageBlurhash ?: existing.imageBlurhash,
+                audioSourceJson = incoming.audioSourceJson ?: existing.audioSourceJson,
+                audioFilename = incoming.audioFilename ?: existing.audioFilename,
+                audioCaption = incoming.audioCaption ?: existing.audioCaption.normalizedMessageCaption(),
+                audioMimeType = incoming.audioMimeType ?: existing.audioMimeType,
+                audioSizeBytes = incoming.audioSizeBytes ?: existing.audioSizeBytes,
+                audioDurationMillis = incoming.audioDurationMillis ?: existing.audioDurationMillis,
+                audioWaveform = incoming.audioWaveform ?: existing.audioWaveform,
+                audioIsVoice = incoming.audioIsVoice || existing.audioIsVoice,
                 replyEventId = incoming.replyEventId ?: existing.replyEventId,
                 replySenderId = incoming.replySenderId ?: existing.replySenderId,
                 replySenderDisplayName = incoming.replySenderDisplayName
@@ -1821,6 +1854,27 @@ class LocalCacheRepository(
         }
     }
 
+    private fun List<Float>?.toWaveformCacheString(): String? {
+        if (isNullOrEmpty()) {
+            return null
+        }
+        return joinToString(separator = ",") { sample ->
+            (sample.coerceIn(0f, 1f) * WAVEFORM_CACHE_SCALE).roundToInt().toString()
+        }
+    }
+
+    private fun String?.toWaveformList(): List<Float> {
+        if (isNullOrBlank()) {
+            return emptyList()
+        }
+        return split(',')
+            .mapNotNull { token ->
+                token.toIntOrNull()
+                    ?.coerceIn(0, WAVEFORM_CACHE_SCALE)
+                    ?.let { it.toFloat() / WAVEFORM_CACHE_SCALE.toFloat() }
+            }
+    }
+
     private companion object {
         val RoomSummaryComparator = compareByDescending<MatrixRoomSummary> { it.lastMessageAtMillis }
             .thenBy { it.displayName.lowercase(Locale.ROOT) }
@@ -1833,5 +1887,6 @@ class LocalCacheRepository(
         const val REDACTION_ID_QUERY_CHUNK_SIZE = 250
         const val DEDUPE_TIMESTAMP_TOLERANCE_MS = 50L
         const val REDACTED_MESSAGE_BODY = "Deleted message"
+        const val WAVEFORM_CACHE_SCALE = 1000
     }
 }

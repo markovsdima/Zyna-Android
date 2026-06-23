@@ -5,6 +5,9 @@ import android.util.Log
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCustomToDeviceEncrypting
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcOwnDevice
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
+import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcCallNotificationClient
+import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcLiveKitFocusClient
+import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcMembershipClient
 import com.zyna.app.data.media.BlurHashCodec
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
@@ -373,6 +376,22 @@ class MatrixClientService(
     fun matrixRtcToDeviceClient(): MatrixRtcCustomToDeviceEncrypting {
         val activeClient = client ?: error("Matrix client is not ready")
         return MatrixRustSdkRtcToDeviceClient(activeClient)
+    }
+
+    fun matrixRtcMembershipClient(): MatrixRustSdkRtcMembershipClient {
+        val activeClient = client ?: error("Matrix client is not ready")
+        return MatrixRustSdkRtcMembershipClient(activeClient)
+    }
+
+    fun matrixRtcLiveKitFocusClient(): MatrixRustSdkRtcLiveKitFocusClient {
+        val activeClient = client ?: error("Matrix client is not ready")
+        return MatrixRustSdkRtcLiveKitFocusClient(activeClient)
+    }
+
+    fun matrixRtcCallNotificationClient(roomId: String): MatrixRustSdkRtcCallNotificationClient {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        return MatrixRustSdkRtcCallNotificationClient(room)
     }
 
     suspend fun roomsSnapshot(): List<MatrixRoomSummary> = withContext(Dispatchers.IO) {

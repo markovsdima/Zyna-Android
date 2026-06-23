@@ -8,6 +8,7 @@ import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcCallNotificationClient
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcLiveKitFocusClient
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcMembershipClient
+import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcSessionMembershipClient
 import com.zyna.app.data.media.BlurHashCodec
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
@@ -392,6 +393,15 @@ class MatrixClientService(
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         return MatrixRustSdkRtcCallNotificationClient(room)
+    }
+
+    fun matrixRtcSessionMembershipClient(roomId: String): MatrixRustSdkRtcSessionMembershipClient {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        return MatrixRustSdkRtcSessionMembershipClient(
+            membershipClient = MatrixRustSdkRtcMembershipClient(activeClient),
+            room = room
+        )
     }
 
     suspend fun roomsSnapshot(): List<MatrixRoomSummary> = withContext(Dispatchers.IO) {

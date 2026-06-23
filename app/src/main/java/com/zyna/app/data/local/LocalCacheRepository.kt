@@ -21,6 +21,7 @@ import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingTextEnvelope
 import com.zyna.app.data.outgoing.OutgoingTransportState
+import com.zyna.app.data.outgoing.OutgoingVoiceEnvelope
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
@@ -614,6 +615,72 @@ class LocalCacheRepository(
         }
     }
 
+    suspend fun createOutgoingVoiceEnvelope(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        transactionId: String,
+        localPath: String,
+        mimeType: String,
+        sizeBytes: Long,
+        durationMillis: Long,
+        waveform: List<Float>,
+        replyInfo: MatrixReplyInfo?
+    ) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            outgoingDao.upsertEnvelope(
+                OutgoingEnvelopeEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = envelopeId,
+                    kind = OutgoingEnvelopeKind.VOICE.name,
+                    transportState = OutgoingTransportState.QUEUED.name,
+                    transactionId = transactionId,
+                    eventId = null,
+                    targetEventId = null,
+                    targetTransactionId = null,
+                    targetBody = null,
+                    targetContentType = null,
+                    replyEventId = replyInfo?.eventId,
+                    replySenderId = replyInfo?.senderId,
+                    replySenderDisplayName = replyInfo?.senderDisplayName,
+                    replyBody = replyInfo?.body,
+                    forwardedFrom = null,
+                    imageLocalPath = null,
+                    imageMimeType = null,
+                    imageWidth = null,
+                    imageHeight = null,
+                    imageSizeBytes = null,
+                    imageThumbnailLocalPath = null,
+                    imageThumbnailMimeType = null,
+                    imageThumbnailWidth = null,
+                    imageThumbnailHeight = null,
+                    imageThumbnailSizeBytes = null,
+                    imageCaption = null,
+                    zynaAttributesJson = null,
+                    imageSourceJson = null,
+                    imageThumbnailSourceJson = null,
+                    imageBlurhash = null,
+                    imageUploadedJson = null,
+                    imageUploadedAtMillis = null,
+                    body = VOICE_MESSAGE_BODY,
+                    createdAtMillis = now,
+                    updatedAtMillis = now,
+                    failureMessage = null,
+                    voiceLocalPath = localPath,
+                    voiceMimeType = mimeType,
+                    voiceSizeBytes = sizeBytes,
+                    voiceDurationMillis = durationMillis,
+                    voiceWaveform = waveform.toWaveformCacheString(),
+                    voiceUploadedJson = null,
+                    voiceUploadedAtMillis = null
+                )
+            )
+            updateRoomPreview(userId, roomId, now)
+        }
+    }
+
     suspend fun createOutgoingRedactionEnvelope(
         userId: String,
         roomId: String,
@@ -766,6 +833,28 @@ class LocalCacheRepository(
         }
     }
 
+    suspend fun markOutgoingVoiceUploadAccepted(
+        userId: String,
+        roomId: String,
+        envelopeId: String,
+        uploadedVoiceJson: String
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val didUpdate = outgoingDao.markVoiceUploadAccepted(
+                userId = userId,
+                roomId = roomId,
+                id = envelopeId,
+                uploadedVoiceJson = uploadedVoiceJson,
+                updatedAtMillis = now
+            ) > 0
+            if (didUpdate) {
+                updateRoomPreview(userId, roomId, now)
+            }
+            didUpdate
+        }
+    }
+
     suspend fun markOutgoingDispatchAccepted(
         userId: String,
         roomId: String,
@@ -872,7 +961,8 @@ class LocalCacheRepository(
                 deleteLocalFiles(
                     listOfNotNull(
                         envelope.imageLocalPath,
-                        envelope.imageThumbnailLocalPath
+                        envelope.imageThumbnailLocalPath,
+                        envelope.voiceLocalPath
                     )
                 )
                 updateRoomPreview(userId, roomId, System.currentTimeMillis())
@@ -903,6 +993,18 @@ class LocalCacheRepository(
             envelopeIds.mapNotNull { id -> outgoingDao.imageDispatchCandidate(userId, id) }
         }
         return entities.mapNotNull { it.toOutgoingImageEnvelopeOrNull() }
+    }
+
+    suspend fun outgoingVoiceDispatchCandidates(
+        userId: String,
+        envelopeIds: Set<String>? = null
+    ): List<OutgoingVoiceEnvelope> {
+        val entities = if (envelopeIds == null) {
+            outgoingDao.voiceDispatchCandidates(userId)
+        } else {
+            envelopeIds.mapNotNull { id -> outgoingDao.voiceDispatchCandidate(userId, id) }
+        }
+        return entities.mapNotNull { it.toOutgoingVoiceEnvelopeOrNull() }
     }
 
     suspend fun outgoingRedactionDispatchCandidates(
@@ -1046,7 +1148,7 @@ class LocalCacheRepository(
         val files = mediaDir.listFiles()?.filter { it.isFile }.orEmpty()
         if (files.isEmpty()) return@withContext
 
-        val activePaths = outgoingDao.activeImageLocalPaths().toSet()
+        val activePaths = outgoingDao.activeMediaLocalPaths().toSet()
         files.forEach { file ->
             if (file.absolutePath !in activePaths) {
                 runCatching { file.delete() }
@@ -1187,7 +1289,7 @@ class LocalCacheRepository(
             roomId = roomId,
             eventIds = eventIds
         )
-        val imageLocalPaths = outgoingDao.imageLocalPathsForEventIds(
+        val mediaLocalPaths = outgoingDao.mediaLocalPathsForEventIds(
             userId = userId,
             roomId = roomId,
             eventIds = eventIds
@@ -1201,7 +1303,7 @@ class LocalCacheRepository(
         if (transactionIds.isNotEmpty()) {
             messageDao.deleteMessagesByIds(userId, roomId, transactionIds)
         }
-        deleteLocalFiles(imageLocalPaths)
+        deleteLocalFiles(mediaLocalPaths)
     }
 
     private suspend fun updateRoomPreview(
@@ -1333,6 +1435,35 @@ class LocalCacheRepository(
                     canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
                 )
             }
+            OutgoingEnvelopeKind.VOICE.name -> {
+                val localPath = voiceLocalPath?.takeIf { it.isNotBlank() } ?: return null
+                MatrixChatMessage(
+                    id = "outgoing:$id",
+                    eventId = eventId,
+                    transactionId = transactionId,
+                    sender = userId,
+                    body = VOICE_MESSAGE_BODY,
+                    timestampMillis = createdAtMillis,
+                    isOwn = true,
+                    contentType = MatrixMessageContentType.AUDIO,
+                    audioInfo = MatrixAudioInfo(
+                        sourceJson = "local:$localPath",
+                        filename = File(localPath).name,
+                        caption = null,
+                        mimeType = voiceMimeType?.takeIf { it.isNotBlank() } ?: "audio/mp4",
+                        sizeBytes = voiceSizeBytes?.takeIf { it > 0L },
+                        durationMillis = voiceDurationMillis?.takeIf { it > 0L },
+                        waveform = voiceWaveform.toWaveformList(),
+                        isVoice = true,
+                        localPath = localPath
+                    ),
+                    deliveryState = state.toOutgoingDeliveryState(),
+                    replyInfo = replyInfoOrNull(),
+                    outgoingEnvelopeId = id,
+                    canRetryOutgoingEnvelope = state == OutgoingTransportState.FAILED,
+                    canDiscardOutgoingEnvelope = state == OutgoingTransportState.FAILED
+                )
+            }
             else -> null
         }
     }
@@ -1448,6 +1579,29 @@ class LocalCacheRepository(
             thumbnailSourceJson = imageThumbnailSourceJson?.takeIf { it.isNotBlank() },
             blurhash = imageBlurhash?.takeIf { it.isNotBlank() },
             uploadedImageJson = uploadedImageJson,
+            createdAtMillis = createdAtMillis,
+            failureMessage = failureMessage
+        )
+    }
+
+    private fun OutgoingEnvelopeEntity.toOutgoingVoiceEnvelopeOrNull(): OutgoingVoiceEnvelope? {
+        if (kind != OutgoingEnvelopeKind.VOICE.name) return null
+        val localPath = voiceLocalPath?.takeIf { it.isNotBlank() } ?: return null
+
+        return OutgoingVoiceEnvelope(
+            userId = userId,
+            roomId = roomId,
+            id = id,
+            transportState = transportState.toOutgoingTransportState(),
+            transactionId = transactionId,
+            eventId = eventId,
+            localPath = localPath,
+            mimeType = voiceMimeType?.takeIf { it.isNotBlank() } ?: "audio/mp4",
+            sizeBytes = voiceSizeBytes?.takeIf { it > 0L } ?: 0L,
+            durationMillis = voiceDurationMillis?.takeIf { it > 0L } ?: 1L,
+            waveform = voiceWaveform.toWaveformList(),
+            replyInfo = replyInfoOrNull(),
+            uploadedVoiceJson = voiceUploadedJson?.takeIf { it.isNotBlank() },
             createdAtMillis = createdAtMillis,
             failureMessage = failureMessage
         )
@@ -1887,6 +2041,7 @@ class LocalCacheRepository(
         const val REDACTION_ID_QUERY_CHUNK_SIZE = 250
         const val DEDUPE_TIMESTAMP_TOLERANCE_MS = 50L
         const val REDACTED_MESSAGE_BODY = "Deleted message"
+        const val VOICE_MESSAGE_BODY = "Voice message"
         const val WAVEFORM_CACHE_SCALE = 1000
     }
 }

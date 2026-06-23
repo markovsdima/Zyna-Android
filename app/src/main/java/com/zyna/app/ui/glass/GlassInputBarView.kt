@@ -1,17 +1,28 @@
 package com.zyna.app.ui.glass
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.Editable
 import android.text.InputType
 import android.text.TextUtils
 import android.text.TextWatcher
+import android.text.TextPaint
 import android.util.AttributeSet
+import android.util.DisplayMetrics
+import android.util.TypedValue
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.TextView
+import com.zyna.app.R
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -20,6 +31,42 @@ data class GlassComposerPreview(
     val title: String,
     val body: String
 )
+
+sealed interface GlassVoiceComposerState {
+    data object Idle : GlassVoiceComposerState
+
+    data class Recording(
+        val durationMillis: Long,
+        val waveform: List<Float>
+    ) : GlassVoiceComposerState
+
+    data class Preview(
+        val durationMillis: Long,
+        val waveform: List<Float>,
+        val isLoading: Boolean,
+        val isPlaying: Boolean
+    ) : GlassVoiceComposerState
+
+    data class Error(
+        val message: String
+    ) : GlassVoiceComposerState
+}
+
+private enum class VoiceActionMode {
+    IDLE,
+    RECORDING,
+    PREVIEW,
+    ERROR
+}
+
+private fun GlassVoiceComposerState.actionMode(): VoiceActionMode {
+    return when (this) {
+        GlassVoiceComposerState.Idle -> VoiceActionMode.IDLE
+        is GlassVoiceComposerState.Recording -> VoiceActionMode.RECORDING
+        is GlassVoiceComposerState.Preview -> VoiceActionMode.PREVIEW
+        is GlassVoiceComposerState.Error -> VoiceActionMode.ERROR
+    }
+}
 
 class GlassInputBarView @JvmOverloads constructor(
     context: Context,
@@ -77,6 +124,13 @@ class GlassInputBarView @JvmOverloads constructor(
         setText(">")
         contentDescription = "Send"
     }
+    private val voiceContentView = VoiceComposerContentView(context).apply {
+        visibility = GONE
+    }
+    private val voiceLockIndicator = VoiceLockIndicatorView(context).apply {
+        visibility = GONE
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
     private val editText = EditText(context).apply {
         background = null
         minLines = 1
@@ -93,18 +147,51 @@ class GlassInputBarView @JvmOverloads constructor(
 
     var onSendMessage: (String) -> Boolean = { false }
     var onAttachClicked: () -> Unit = {}
+    var onVoiceRecordClicked: () -> Boolean = { false }
+    var onVoiceStopClicked: () -> Unit = {}
+    var onVoiceCancelClicked: () -> Unit = {}
+    var onVoiceFinishForSendClicked: () -> Boolean = { false }
+    var onVoiceSendClicked: () -> Boolean = { false }
+    var onVoicePreviewPlaybackClicked: () -> Unit = {}
     var onPreviewCancelled: () -> Unit = {}
     var onEditCancelled: () -> Unit = {}
     var onContentLayoutChanged: () -> Unit = {}
     var allowEmptySend: Boolean = false
+        set(value) {
+            if (field == value) {
+                return
+            }
+            field = value
+            updateActionButtons()
+        }
     private var isSending = false
     private var pendingSentText: String? = null
     private var preview: GlassComposerPreview? = null
     private var editPreview: GlassComposerPreview? = null
     private var editDraftKey: String? = null
+    private var voiceState: GlassVoiceComposerState = GlassVoiceComposerState.Idle
     private var palette: GlassPalette? = null
     private var vulkanGlassBackgroundEnabled = false
     private var adaptiveMaterial = GlassAdaptiveMaterial.Light
+    private var voiceGesturePhase = VoiceGesturePhase.Idle
+    private var voiceGestureTouchActive = false
+    private var voiceGestureStartX = 0f
+    private var voiceGestureStartY = 0f
+    private var voiceCancelProgress = 0f
+    private var voiceLockProgress = 0f
+    private val voiceRecordStartRunnable = Runnable {
+        if (voiceGesturePhase != VoiceGesturePhase.Pending) {
+            return@Runnable
+        }
+        if (onVoiceRecordClicked()) {
+            voiceGesturePhase = VoiceGesturePhase.Holding
+            updateVoiceGestureProgress(cancelProgress = 0f, lockProgress = 0f)
+            updatePreviewViews()
+            updateActionButtons()
+        } else {
+            resetVoiceGesture()
+        }
+    }
 
     init {
         clipChildren = false
@@ -116,6 +203,8 @@ class GlassInputBarView @JvmOverloads constructor(
         addView(attachButton)
         addView(sendButton)
         addView(editText)
+        addView(voiceContentView)
+        addView(voiceLockIndicator)
         addView(previewTitle)
         addView(previewBody)
         addView(previewCancel)
@@ -124,6 +213,7 @@ class GlassInputBarView @JvmOverloads constructor(
         editText.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                updateActionButtons()
                 requestContentLayout()
             }
             override fun afterTextChanged(s: Editable?) = Unit
@@ -136,8 +226,12 @@ class GlassInputBarView @JvmOverloads constructor(
                 false
             }
         }
-        sendButton.setOnClickListener { sendDraft() }
-        attachButton.setOnClickListener { onAttachClicked() }
+        sendButton.setOnTouchListener { _, event -> handleSendButtonTouch(event) }
+        sendButton.setOnClickListener { handleSendButtonClicked() }
+        attachButton.setOnClickListener { handleAttachButtonClicked() }
+        voiceContentView.onPreviewPlaybackClicked = {
+            onVoicePreviewPlaybackClicked()
+        }
         previewCancel.setOnClickListener {
             if (editPreview != null) {
                 onEditCancelled()
@@ -145,6 +239,7 @@ class GlassInputBarView @JvmOverloads constructor(
                 onPreviewCancelled()
             }
         }
+        updateActionButtons()
     }
 
     fun setPalette(palette: GlassPalette) {
@@ -253,9 +348,7 @@ class GlassInputBarView @JvmOverloads constructor(
 
         if (isSending != sending) {
             isSending = sending
-            sendButton.isEnabled = !sending
-            sendButton.alpha = if (sending) 0.48f else 1f
-            sendButton.setText(if (sending) "..." else ">")
+            updateActionButtons()
         }
     }
 
@@ -265,6 +358,7 @@ class GlassInputBarView @JvmOverloads constructor(
         }
         this.preview = preview
         updatePreviewViews()
+        updateActionButtons()
     }
 
     fun setEditPreview(preview: GlassComposerPreview?) {
@@ -273,6 +367,7 @@ class GlassInputBarView @JvmOverloads constructor(
         }
         editPreview = preview
         updatePreviewViews()
+        updateActionButtons()
     }
 
     fun setEditDraft(key: String?, body: String?) {
@@ -289,6 +384,22 @@ class GlassInputBarView @JvmOverloads constructor(
         } else if (hadEditDraft && pendingSentText == null) {
             editText.text?.clear()
         }
+        updateActionButtons()
+    }
+
+    fun setVoiceComposerState(state: GlassVoiceComposerState) {
+        if (voiceState == state) {
+            return
+        }
+        val previousActionMode = voiceState.actionMode()
+        voiceState = state
+        if (state !is GlassVoiceComposerState.Recording) {
+            resetVoiceGesture(updateLayout = false)
+        }
+        updateVoiceGestureOverlay()
+        if (previousActionMode != state.actionMode()) {
+            updateActionButtons()
+        }
     }
 
     private fun updatePreviewViews() {
@@ -299,6 +410,7 @@ class GlassInputBarView @JvmOverloads constructor(
         previewTitle.visibility = if (isVisible) VISIBLE else GONE
         previewBody.visibility = if (isVisible) VISIBLE else GONE
         previewCancel.visibility = if (isVisible) VISIBLE else GONE
+        updateVoiceGestureOverlay()
         applyInputGlassState()
         requestContentLayout()
     }
@@ -353,9 +465,8 @@ class GlassInputBarView @JvmOverloads constructor(
             glassThickness = 48f.dpToPx(density),
             shapeKind = VulkanChatGlassRect.SHAPE_CIRCLE
         )
-        addChildGlassRect(
+        addInputGlassRect(
             out = out,
-            child = editText,
             originLeft = originLeft,
             originTop = originTop,
             cornerRadius = radius,
@@ -457,6 +568,14 @@ class GlassInputBarView @JvmOverloads constructor(
             MeasureSpec.makeMeasureSpec(availableEditWidth, MeasureSpec.EXACTLY),
             MeasureSpec.makeMeasureSpec(editHeight, MeasureSpec.EXACTLY)
         )
+        voiceContentView.measure(
+            MeasureSpec.makeMeasureSpec(availableEditWidth, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(editHeight, MeasureSpec.EXACTLY)
+        )
+        voiceLockIndicator.measure(
+            MeasureSpec.makeMeasureSpec(VOICE_LOCK_INDICATOR_WIDTH_DP.dpToPx(density), MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(VOICE_LOCK_INDICATOR_HEIGHT_DP.dpToPx(density), MeasureSpec.EXACTLY)
+        )
 
         setMeasuredDimension(width, totalHeight)
     }
@@ -514,9 +633,303 @@ class GlassInputBarView @JvmOverloads constructor(
 
         editGlass.layout(x, editTop, x + editGlass.measuredWidth, editTop + editHeight)
         editText.layout(x, editTop, x + editText.measuredWidth, editTop + editHeight)
+        voiceContentView.layout(x, editTop, x + voiceContentView.measuredWidth, editTop + editHeight)
         x += editGlass.measuredWidth + gap
 
         sendButton.layout(x, buttonTop, x + buttonSize, buttonTop + buttonSize)
+        val lockLeft = sendButton.left + sendButton.width / 2 - voiceLockIndicator.measuredWidth / 2
+        val lockTop = buttonTop - voiceLockIndicator.measuredHeight - 8.dpToPx(density)
+        voiceLockIndicator.layout(
+            lockLeft,
+            lockTop,
+            lockLeft + voiceLockIndicator.measuredWidth,
+            lockTop + voiceLockIndicator.measuredHeight
+        )
+        updateVoiceGestureOverlay()
+    }
+
+    private fun handleAttachButtonClicked() {
+        when (voiceState) {
+            GlassVoiceComposerState.Idle -> onAttachClicked()
+            is GlassVoiceComposerState.Recording,
+            is GlassVoiceComposerState.Error,
+            is GlassVoiceComposerState.Preview -> onVoiceCancelClicked()
+        }
+    }
+
+    private fun handleSendButtonTouch(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (!shouldHandleVoiceGesture()) {
+                    return false
+                }
+                voiceGestureStartX = event.x
+                voiceGestureStartY = event.y
+                voiceGesturePhase = VoiceGesturePhase.Pending
+                voiceGestureTouchActive = true
+                sendButton.isPressed = true
+                parent?.requestDisallowInterceptTouchEvent(true)
+                removeCallbacks(voiceRecordStartRunnable)
+                postDelayed(voiceRecordStartRunnable, VOICE_RECORD_START_DELAY_MS)
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!voiceGestureTouchActive) {
+                    return false
+                }
+                handleVoiceGestureMove(event)
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (!voiceGestureTouchActive) {
+                    return false
+                }
+                handleVoiceGestureUp()
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (!voiceGestureTouchActive) {
+                    return false
+                }
+                handleVoiceGestureCancel()
+                return true
+            }
+        }
+        return voiceGestureTouchActive
+    }
+
+    private fun handleVoiceGestureMove(event: MotionEvent) {
+        when (voiceGesturePhase) {
+            VoiceGesturePhase.Idle,
+            VoiceGesturePhase.Cancelled -> return
+            VoiceGesturePhase.Locked -> return
+            VoiceGesturePhase.Pending -> {
+                val horizontalMovement = abs(event.x - voiceGestureStartX)
+                val verticalMovement = abs(event.y - voiceGestureStartY)
+                if (
+                    horizontalMovement > VOICE_RECORD_PRE_START_SLOP_DP.dpToPx(density) ||
+                    verticalMovement > VOICE_RECORD_PRE_START_SLOP_DP.dpToPx(density)
+                ) {
+                    resetVoiceGesture()
+                }
+            }
+            VoiceGesturePhase.Holding -> {
+                val dx = voiceGestureStartX - event.x
+                val dy = voiceGestureStartY - event.y
+                val deadZone = VOICE_SLIDE_DEAD_ZONE_DP.dpToPx(density).toFloat()
+                val cancelDistance = VOICE_CANCEL_DISTANCE_DP.dpToPx(density).toFloat()
+                val lockDistance = VOICE_LOCK_DISTANCE_DP.dpToPx(density).toFloat()
+                when {
+                    dy > lockDistance -> {
+                        voiceGesturePhase = VoiceGesturePhase.Locked
+                        sendButton.isPressed = false
+                        updateVoiceGestureProgress(cancelProgress = 0f, lockProgress = 1f)
+                        updatePreviewViews()
+                        updateActionButtons()
+                    }
+                    dy > deadZone -> {
+                        val lockProgress = (dy / lockDistance).coerceIn(0f, 1f)
+                        updateVoiceGestureProgress(cancelProgress = 0f, lockProgress = lockProgress)
+                    }
+                    dx > deadZone -> {
+                        val cancelProgress = ((dx - deadZone) / cancelDistance).coerceIn(0f, 1f)
+                        updateVoiceGestureProgress(cancelProgress = cancelProgress, lockProgress = 0f)
+                        if (cancelProgress >= 1f) {
+                            voiceGesturePhase = VoiceGesturePhase.Cancelled
+                            onVoiceCancelClicked()
+                            resetVoiceGesture()
+                        }
+                    }
+                    else -> {
+                        updateVoiceGestureProgress(cancelProgress = 0f, lockProgress = 0f)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleVoiceGestureUp() {
+        when (voiceGesturePhase) {
+            VoiceGesturePhase.Pending -> resetVoiceGesture()
+            VoiceGesturePhase.Holding -> {
+                onVoiceFinishForSendClicked()
+                resetVoiceGesture()
+            }
+            VoiceGesturePhase.Locked -> {
+                voiceGestureTouchActive = false
+                sendButton.isPressed = false
+                parent?.requestDisallowInterceptTouchEvent(false)
+                updatePreviewViews()
+                updateActionButtons()
+            }
+            VoiceGesturePhase.Cancelled,
+            VoiceGesturePhase.Idle -> resetVoiceGesture()
+        }
+    }
+
+    private fun handleVoiceGestureCancel() {
+        when (voiceGesturePhase) {
+            VoiceGesturePhase.Pending -> Unit
+            VoiceGesturePhase.Holding -> {
+                // ACTION_CANCEL is system-owned, not an explicit user cancel.
+                onVoiceStopClicked()
+            }
+            VoiceGesturePhase.Locked -> {
+                voiceGestureTouchActive = false
+                sendButton.isPressed = false
+                parent?.requestDisallowInterceptTouchEvent(false)
+                updatePreviewViews()
+                updateActionButtons()
+                return
+            }
+            VoiceGesturePhase.Cancelled,
+            VoiceGesturePhase.Idle -> Unit
+        }
+        resetVoiceGesture()
+    }
+
+    private fun resetVoiceGesture(updateLayout: Boolean = true) {
+        removeCallbacks(voiceRecordStartRunnable)
+        if (
+            voiceGesturePhase == VoiceGesturePhase.Idle &&
+            !voiceGestureTouchActive &&
+            !sendButton.isPressed
+        ) {
+            return
+        }
+        voiceGesturePhase = VoiceGesturePhase.Idle
+        voiceGestureTouchActive = false
+        voiceCancelProgress = 0f
+        voiceLockProgress = 0f
+        sendButton.isPressed = false
+        parent?.requestDisallowInterceptTouchEvent(false)
+        if (updateLayout) {
+            updatePreviewViews()
+        } else {
+            updateVoiceGestureOverlay()
+        }
+        updateActionButtons()
+    }
+
+    private fun updateVoiceGestureProgress(cancelProgress: Float, lockProgress: Float) {
+        val nextCancelProgress = cancelProgress.coerceIn(0f, 1f)
+        val nextLockProgress = lockProgress.coerceIn(0f, 1f)
+        if (
+            voiceCancelProgress == nextCancelProgress &&
+            voiceLockProgress == nextLockProgress
+        ) {
+            return
+        }
+        voiceCancelProgress = nextCancelProgress
+        voiceLockProgress = nextLockProgress
+        updateVoiceGestureOverlay()
+    }
+
+    private fun updateVoiceGestureOverlay() {
+        val isVisible = voiceState !is GlassVoiceComposerState.Idle
+        voiceContentView.visibility = if (isVisible) VISIBLE else GONE
+        voiceContentView.setContentState(
+            state = voiceState,
+            locked = voiceGesturePhase == VoiceGesturePhase.Locked,
+            cancelProgress = voiceCancelProgress,
+            lockProgress = voiceLockProgress
+        )
+        val showLockIndicator = voiceState is GlassVoiceComposerState.Recording &&
+            voiceGesturePhase != VoiceGesturePhase.Idle &&
+            voiceCancelProgress <= 0.01f
+        voiceLockIndicator.visibility = if (showLockIndicator) VISIBLE else GONE
+        voiceLockIndicator.setLockProgress(
+            if (voiceGesturePhase == VoiceGesturePhase.Locked) 1f else voiceLockProgress
+        )
+    }
+
+    private fun shouldHandleVoiceGesture(): Boolean {
+        return !isSending &&
+            voiceState is GlassVoiceComposerState.Idle &&
+            shouldRecordVoice()
+    }
+
+    private fun handleSendButtonClicked() {
+        if (isSending) {
+            return
+        }
+        when (voiceState) {
+            GlassVoiceComposerState.Idle -> {
+                if (!shouldRecordVoice()) {
+                    sendDraft()
+                }
+            }
+            is GlassVoiceComposerState.Recording -> onVoiceStopClicked()
+            is GlassVoiceComposerState.Preview -> {
+                if (onVoiceSendClicked()) {
+                    setSending(sending = true, sendFailed = false)
+                }
+            }
+            is GlassVoiceComposerState.Error -> onVoiceCancelClicked()
+        }
+    }
+
+    private fun updateActionButtons() {
+        val sending = isSending
+        val state = voiceState
+        val voiceActive = state !is GlassVoiceComposerState.Idle
+        editText.isEnabled = !voiceActive && !sending
+        editText.hint = if (voiceActive) "" else "Message"
+        editText.visibility = if (voiceActive) INVISIBLE else VISIBLE
+        sendButton.isEnabled = !sending
+        sendButton.alpha = if (sending) 0.48f else 1f
+        attachButton.isEnabled = !sending
+        attachButton.alpha = if (sending) 0.48f else 1f
+
+        if (sending) {
+            sendButton.setText("...")
+            sendButton.contentDescription = "Sending"
+            return
+        }
+
+        when (state) {
+            GlassVoiceComposerState.Idle -> {
+                attachButton.setText("+")
+                attachButton.contentDescription = "Attach"
+                if (shouldRecordVoice()) {
+                    sendButton.setIconResource(R.drawable.ic_input_mic_24)
+                    sendButton.contentDescription = "Record voice"
+                } else {
+                    sendButton.setText(">")
+                    sendButton.contentDescription = "Send"
+                }
+            }
+            is GlassVoiceComposerState.Recording -> {
+                attachButton.setIconResource(R.drawable.ic_input_trash_24)
+                attachButton.contentDescription = "Cancel voice recording"
+                if (voiceGesturePhase == VoiceGesturePhase.Locked) {
+                    sendButton.setIconResource(R.drawable.ic_input_pause_24)
+                    sendButton.contentDescription = "Stop voice recording"
+                } else {
+                    sendButton.setIconResource(R.drawable.ic_input_mic_24)
+                    sendButton.contentDescription = "Recording voice"
+                }
+            }
+            is GlassVoiceComposerState.Preview -> {
+                attachButton.setIconResource(R.drawable.ic_input_trash_24)
+                attachButton.contentDescription = "Delete voice preview"
+                sendButton.setIconResource(R.drawable.ic_input_send_24)
+                sendButton.contentDescription = "Send voice"
+            }
+            is GlassVoiceComposerState.Error -> {
+                attachButton.setText("x")
+                attachButton.contentDescription = "Dismiss voice error"
+                sendButton.setText("x")
+                sendButton.contentDescription = "Dismiss voice error"
+            }
+        }
+    }
+
+    private fun shouldRecordVoice(): Boolean {
+        return editText.text?.toString()?.trim().orEmpty().isEmpty() &&
+            !allowEmptySend &&
+            editPreview == null &&
+            editDraftKey == null
     }
 
     private fun sendDraft() {
@@ -556,6 +969,15 @@ class GlassInputBarView @JvmOverloads constructor(
             previewCancel.setTextColor(adaptiveMaterial.glyphForeground)
             attachButton.setTextColor(adaptiveMaterial.glyphForeground)
             sendButton.setTextColor(adaptiveMaterial.glyphForeground)
+            voiceContentView.setColors(
+                primary = adaptiveMaterial.primaryForeground,
+                secondary = adaptiveMaterial.secondaryForeground,
+                destructive = VOICE_DESTRUCTIVE_COLOR
+            )
+            voiceLockIndicator.setColors(
+                primary = adaptiveMaterial.primaryForeground,
+                secondary = adaptiveMaterial.secondaryForeground
+            )
         } else {
             editText.setTextColor(currentPalette.text)
             editText.setHintTextColor(currentPalette.hint)
@@ -564,6 +986,15 @@ class GlassInputBarView @JvmOverloads constructor(
             previewCancel.setTextColor(currentPalette.text)
             attachButton.setTextColor(currentPalette.text)
             sendButton.setTextColor(currentPalette.text)
+            voiceContentView.setColors(
+                primary = currentPalette.text,
+                secondary = currentPalette.hint,
+                destructive = VOICE_DESTRUCTIVE_COLOR
+            )
+            voiceLockIndicator.setColors(
+                primary = currentPalette.text,
+                secondary = currentPalette.hint
+            )
         }
     }
 
@@ -594,11 +1025,554 @@ class GlassInputBarView @JvmOverloads constructor(
             )
         )
     }
+
+    private fun addInputGlassRect(
+        out: MutableList<VulkanChatGlassRect>,
+        originLeft: Int,
+        originTop: Int,
+        cornerRadius: Float,
+        bevelWidth: Float,
+        glassThickness: Float,
+        shapeKind: Float
+    ) {
+        if (editGlass.width <= 0 || editGlass.height <= 0) {
+            return
+        }
+        out.add(
+            VulkanChatGlassRect(
+                left = (originLeft + editGlass.left).toFloat(),
+                top = (originTop + editGlass.top).toFloat(),
+                right = (originLeft + editGlass.right).toFloat(),
+                bottom = (originTop + editGlass.bottom).toFloat(),
+                cornerRadius = cornerRadius,
+                opacity = 1f,
+                bezelWidth = bevelWidth,
+                glassThickness = glassThickness,
+                shapeKind = shapeKind
+            )
+        )
+    }
 }
 
 private const val DISABLE_CHAT_INPUT_HWUI_GLASS = false
+private const val VOICE_RECORD_START_DELAY_MS = 50L
+private const val VOICE_RECORD_PRE_START_SLOP_DP = 20
+private const val VOICE_SLIDE_DEAD_ZONE_DP = 15
+private const val VOICE_CANCEL_DISTANCE_DP = 120
+private const val VOICE_LOCK_DISTANCE_DP = 80
+private const val VOICE_DESTRUCTIVE_COLOR = 0xFFE5484D.toInt()
+private const val VOICE_CANCEL_LABEL_TEXT_SP = 14f
+private const val VOICE_TIMER_TEXT_SP = 16f
+private const val VOICE_PREVIEW_DURATION_TEXT_SP = 14f
+private const val VOICE_MESSAGE_TEXT_SP = 14f
+private const val VOICE_RECORDING_MAX_BARS = 24
+private const val VOICE_PREVIEW_MAX_BARS = 32
+private const val VOICE_HOLDING_WAVEFORM_WIDTH_DP = 38f
+private const val VOICE_HOLDING_WAVEFORM_GAP_DP = 6f
+private const val VOICE_LOCK_INDICATOR_WIDTH_DP = 40
+private const val VOICE_LOCK_INDICATOR_HEIGHT_DP = 80
+private const val VOICE_SLIDE_CHEVRON_WIDTH_DP = 8f
+private const val VOICE_SLIDE_CHEVRON_GAP_DP = 6f
+private const val SLIDE_TO_CANCEL_LABEL = "Slide to cancel"
+
+private enum class VoiceGesturePhase {
+    Idle,
+    Pending,
+    Holding,
+    Locked,
+    Cancelled
+}
+
+private class VoiceLockIndicatorView(context: Context) : View(context) {
+    private val density = resources.displayMetrics.density
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val chevronPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.8f.dpToPx(density)
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val rect = RectF()
+    private var lockProgress = 0f
+    private var primary = 0xFFFFFFFF.toInt()
+    private var secondary = 0xB3FFFFFF.toInt()
+
+    fun setColors(primary: Int, secondary: Int) {
+        if (this.primary == primary && this.secondary == secondary) {
+            return
+        }
+        this.primary = primary
+        this.secondary = secondary
+        invalidate()
+    }
+
+    fun setLockProgress(progress: Float) {
+        val next = progress.coerceIn(0f, 1f)
+        if (lockProgress == next) {
+            return
+        }
+        lockProgress = next
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) {
+            return
+        }
+        val radius = w / 2f
+        fillPaint.color = secondary.withAlpha(42)
+        rect.set(0f, 0f, w, h)
+        canvas.drawRoundRect(rect, radius, radius, fillPaint)
+
+        val locked = lockProgress >= 0.7f
+        val iconColor = if (locked) primary else secondary
+        drawLock(canvas, w / 2f, 27f.dpToPx(density), locked, iconColor)
+        drawChevron(canvas, w / 2f, 57f.dpToPx(density), secondary)
+    }
+
+    private fun drawLock(canvas: Canvas, cx: Float, cy: Float, locked: Boolean, color: Int) {
+        val bodyWidth = 14f.dpToPx(density)
+        val bodyHeight = 10f.dpToPx(density)
+        val bodyTop = cy + 2f.dpToPx(density)
+        iconPaint.style = Paint.Style.FILL
+        iconPaint.color = color.withAlpha(245)
+        rect.set(
+            cx - bodyWidth / 2f,
+            bodyTop,
+            cx + bodyWidth / 2f,
+            bodyTop + bodyHeight
+        )
+        canvas.drawRoundRect(rect, 2.5f.dpToPx(density), 2.5f.dpToPx(density), iconPaint)
+
+        iconPaint.style = Paint.Style.STROKE
+        iconPaint.strokeWidth = 2f.dpToPx(density)
+        iconPaint.color = color.withAlpha(245)
+        val shackleWidth = 12f.dpToPx(density)
+        val shackleHeight = 12f.dpToPx(density)
+        val shackleTop = bodyTop - shackleHeight * 0.76f
+        val shackleBottom = bodyTop + shackleHeight * 0.48f
+        if (locked) {
+            rect.set(
+                cx - shackleWidth / 2f,
+                shackleTop,
+                cx + shackleWidth / 2f,
+                shackleBottom
+            )
+            canvas.drawArc(rect, 205f, 130f, false, iconPaint)
+        } else {
+            val bodyLeft = cx - bodyWidth / 2f
+            val leftX = bodyLeft - shackleWidth * 0.82f
+            val rightX = bodyLeft + shackleWidth * 0.18f
+            rect.set(
+                leftX,
+                shackleTop,
+                rightX,
+                shackleBottom
+            )
+            canvas.drawArc(rect, 205f, 130f, false, iconPaint)
+        }
+    }
+
+    private fun drawChevron(canvas: Canvas, cx: Float, cy: Float, color: Int) {
+        val alpha = ((1f - lockProgress * 1.8f).coerceIn(0f, 1f) * 210f).toInt()
+        if (alpha <= 0) {
+            return
+        }
+        chevronPaint.color = color.withAlpha(alpha)
+        val halfWidth = 5f.dpToPx(density)
+        val halfHeight = 4f.dpToPx(density)
+        canvas.drawLine(cx - halfWidth, cy + halfHeight, cx, cy - halfHeight, chevronPaint)
+        canvas.drawLine(cx, cy - halfHeight, cx + halfWidth, cy + halfHeight, chevronPaint)
+    }
+}
+
+private class VoiceComposerContentView(context: Context) : View(context) {
+    private val density = resources.displayMetrics.density
+    private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+        textSize = VOICE_CANCEL_LABEL_TEXT_SP.spToPx(resources.displayMetrics)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    }
+    private val timerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+        textSize = VOICE_TIMER_TEXT_SP.spToPx(resources.displayMetrics)
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+    }
+    private val durationPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+        textSize = VOICE_PREVIEW_DURATION_TEXT_SP.spToPx(resources.displayMetrics)
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+    }
+    private val messagePaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+        textSize = VOICE_MESSAGE_TEXT_SP.spToPx(resources.displayMetrics)
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        textAlign = Paint.Align.CENTER
+    }
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val waveformPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val buttonFillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val chevronPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeWidth = 1.8f.dpToPx(density)
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        style = Paint.Style.STROKE
+    }
+    private val rect = RectF()
+    private val iconPath = Path()
+    private val playButtonRect = RectF()
+
+    var onPreviewPlaybackClicked: () -> Unit = {}
+
+    private var state: GlassVoiceComposerState = GlassVoiceComposerState.Idle
+    private var locked = false
+    private var cancelProgress = 0f
+    private var lockProgress = 0f
+    private var primary = 0xFFFFFFFF.toInt()
+    private var secondary = 0xB3FFFFFF.toInt()
+    private var destructive = VOICE_DESTRUCTIVE_COLOR
+    private var playPressed = false
+
+    init {
+        isClickable = true
+    }
+
+    fun setColors(primary: Int, secondary: Int, destructive: Int) {
+        if (
+            this.primary == primary &&
+            this.secondary == secondary &&
+            this.destructive == destructive
+        ) {
+            return
+        }
+        this.primary = primary
+        this.secondary = secondary
+        this.destructive = destructive
+        invalidate()
+    }
+
+    fun setContentState(
+        state: GlassVoiceComposerState,
+        locked: Boolean,
+        cancelProgress: Float,
+        lockProgress: Float
+    ) {
+        val nextCancelProgress = cancelProgress.coerceIn(0f, 1f)
+        val nextLockProgress = lockProgress.coerceIn(0f, 1f)
+        val previousState = this.state
+        if (
+            previousState == state &&
+            this.locked == locked &&
+            this.cancelProgress == nextCancelProgress &&
+            this.lockProgress == nextLockProgress
+        ) {
+            return
+        }
+        this.state = state
+        this.locked = locked
+        this.cancelProgress = nextCancelProgress
+        this.lockProgress = nextLockProgress
+        if (previousState !is GlassVoiceComposerState.Preview ||
+            state !is GlassVoiceComposerState.Preview
+        ) {
+            playPressed = false
+        }
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        when (val current = state) {
+            GlassVoiceComposerState.Idle -> return
+            is GlassVoiceComposerState.Recording -> drawRecording(canvas, current)
+            is GlassVoiceComposerState.Preview -> drawPreview(canvas, current)
+            is GlassVoiceComposerState.Error -> drawError(canvas, current.message)
+        }
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (state !is GlassVoiceComposerState.Preview) {
+            return false
+        }
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                if (!playButtonRect.contains(event.x, event.y)) {
+                    return false
+                }
+                playPressed = true
+                invalidate()
+                parent?.requestDisallowInterceptTouchEvent(true)
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                val wasPressed = playPressed
+                playPressed = false
+                invalidate()
+                parent?.requestDisallowInterceptTouchEvent(false)
+                if (wasPressed && playButtonRect.contains(event.x, event.y)) {
+                    onPreviewPlaybackClicked()
+                }
+                return wasPressed
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (playPressed) {
+                    playPressed = false
+                    invalidate()
+                    parent?.requestDisallowInterceptTouchEvent(false)
+                    return true
+                }
+            }
+        }
+        return playPressed
+    }
+
+    private fun drawRecording(canvas: Canvas, recording: GlassVoiceComposerState.Recording) {
+        val centerY = height / 2f
+        val contentLeft = 14f.dpToPx(density)
+        val contentRight = width - 14f.dpToPx(density)
+        val durationText = recording.durationMillis.formatVoiceDuration()
+        if (locked) {
+            val nextX = drawDotAndTimer(canvas, contentLeft, centerY, durationText)
+            drawWaveform(
+                canvas = canvas,
+                waveform = recording.waveform,
+                startX = nextX + 10f.dpToPx(density),
+                centerY = centerY,
+                maxWidth = contentRight - nextX - 10f.dpToPx(density),
+                maxBars = VOICE_RECORDING_MAX_BARS,
+                tail = true
+            )
+            return
+        }
+        val timerEndX = drawDotAndTimer(canvas, contentLeft, centerY, durationText)
+        drawHoldingWaveformAndSlide(canvas, recording.waveform, timerEndX)
+    }
+
+    private fun drawDotAndTimer(
+        canvas: Canvas,
+        startX: Float,
+        centerY: Float,
+        durationText: String
+    ): Float {
+        val dotRadius = 4f.dpToPx(density)
+        val dotCenterX = startX + dotRadius
+        dotPaint.color = destructive.withAlpha(255)
+        canvas.drawCircle(dotCenterX, centerY, dotRadius, dotPaint)
+
+        timerPaint.color = primary.withAlpha(255)
+        val baseline = centerY - (timerPaint.descent() + timerPaint.ascent()) / 2f
+        val textX = dotCenterX + 13f.dpToPx(density)
+        canvas.drawText(durationText, textX, baseline, timerPaint)
+        return textX + timerPaint.measureText(durationText)
+    }
+
+    private fun drawHoldingWaveformAndSlide(
+        canvas: Canvas,
+        waveform: List<Float>,
+        timerEndX: Float
+    ) {
+        if (locked) {
+            return
+        }
+        val alpha = ((1f - cancelProgress * 1.5f).coerceIn(0f, 1f) * 255f).toInt()
+        if (alpha <= 0) {
+            return
+        }
+        val centerY = height / 2f
+        val label = SLIDE_TO_CANCEL_LABEL
+        textPaint.color = secondary.withAlpha(alpha)
+        chevronPaint.color = secondary.withAlpha(alpha)
+
+        val chevronWidth = VOICE_SLIDE_CHEVRON_WIDTH_DP.dpToPx(density)
+        val gap = VOICE_SLIDE_CHEVRON_GAP_DP.dpToPx(density)
+        val waveGap = VOICE_HOLDING_WAVEFORM_GAP_DP.dpToPx(density)
+        val labelWidth = textPaint.measureText(label)
+        val rightLimit = width - 14f.dpToPx(density)
+        val leftLimit = timerEndX + waveGap
+        val fixedWidth = waveGap + chevronWidth + gap + labelWidth
+        val waveWidth = VOICE_HOLDING_WAVEFORM_WIDTH_DP.dpToPx(density)
+            .coerceAtMost(rightLimit - leftLimit - fixedWidth)
+            .coerceAtLeast(0f)
+        val wavePartWidth = if (waveWidth > 0f) waveWidth + waveGap else 0f
+        val totalWidth = wavePartWidth + chevronWidth + gap + labelWidth
+        val centeredX = (width - totalWidth) / 2f - cancelProgress * 20f.dpToPx(density)
+        var x = centeredX
+            .coerceAtLeast(leftLimit)
+            .coerceAtMost((rightLimit - totalWidth).coerceAtLeast(leftLimit))
+
+        if (waveWidth > 0f) {
+            drawWaveform(
+                canvas = canvas,
+                waveform = waveform,
+                startX = x,
+                centerY = centerY,
+                maxWidth = waveWidth,
+                maxBars = 8,
+                tail = true
+            )
+            x += waveWidth + waveGap
+        }
+
+        val chevronCenterX = x + chevronWidth / 2f
+        val chevronHalfH = 5f.dpToPx(density)
+        canvas.drawLine(
+            chevronCenterX + 2f.dpToPx(density),
+            centerY - chevronHalfH,
+            chevronCenterX - 2f.dpToPx(density),
+            centerY,
+            chevronPaint
+        )
+        canvas.drawLine(
+            chevronCenterX - 2f.dpToPx(density),
+            centerY,
+            chevronCenterX + 2f.dpToPx(density),
+            centerY + chevronHalfH,
+            chevronPaint
+        )
+
+        val baseline = centerY - (textPaint.descent() + textPaint.ascent()) / 2f
+        canvas.drawText(label, x + chevronWidth + gap, baseline, textPaint)
+    }
+
+    private fun drawPreview(canvas: Canvas, preview: GlassVoiceComposerState.Preview) {
+        val centerY = height / 2f
+        val buttonSize = 36f.dpToPx(density)
+        val buttonLeft = 8f.dpToPx(density)
+        playButtonRect.set(
+            buttonLeft,
+            centerY - buttonSize / 2f,
+            buttonLeft + buttonSize,
+            centerY + buttonSize / 2f
+        )
+        drawPlayPauseButton(canvas, preview.isLoading, preview.isPlaying)
+
+        durationPaint.color = secondary.withAlpha(255)
+        val durationText = preview.durationMillis.formatVoiceDuration()
+        val durationWidth = durationPaint.measureText(durationText)
+        val durationX = width - 10f.dpToPx(density) - durationWidth
+        val waveformStart = playButtonRect.right + 8f.dpToPx(density)
+        val waveformEnd = durationX - 10f.dpToPx(density)
+        drawWaveform(
+            canvas = canvas,
+            waveform = preview.waveform,
+            startX = waveformStart,
+            centerY = centerY,
+            maxWidth = waveformEnd - waveformStart,
+            maxBars = VOICE_PREVIEW_MAX_BARS,
+            tail = false
+        )
+        val baseline = centerY - (durationPaint.descent() + durationPaint.ascent()) / 2f
+        canvas.drawText(durationText, durationX, baseline, durationPaint)
+    }
+
+    private fun drawPlayPauseButton(canvas: Canvas, loading: Boolean, playing: Boolean) {
+        val centerX = playButtonRect.centerX()
+        val centerY = playButtonRect.centerY()
+        val radius = playButtonRect.width() / 2f
+        buttonFillPaint.color = secondary.withAlpha(if (playPressed) 56 else 28)
+        canvas.drawCircle(centerX, centerY, radius, buttonFillPaint)
+
+        iconPaint.color = primary.withAlpha(if (loading) 150 else 255)
+        if (loading) {
+            val dotRadius = 1.8f.dpToPx(density)
+            val spacing = 5f.dpToPx(density)
+            for (i in -1..1) {
+                canvas.drawCircle(centerX + i * spacing, centerY, dotRadius, iconPaint)
+            }
+        } else if (playing) {
+            val barWidth = 4f.dpToPx(density)
+            val barHeight = 15f.dpToPx(density)
+            val gap = 4f.dpToPx(density)
+            rect.set(
+                centerX - gap / 2f - barWidth,
+                centerY - barHeight / 2f,
+                centerX - gap / 2f,
+                centerY + barHeight / 2f
+            )
+            canvas.drawRoundRect(rect, 1.5f.dpToPx(density), 1.5f.dpToPx(density), iconPaint)
+            rect.offset(barWidth + gap, 0f)
+            canvas.drawRoundRect(rect, 1.5f.dpToPx(density), 1.5f.dpToPx(density), iconPaint)
+        } else {
+            val triangleWidth = 13f.dpToPx(density)
+            val triangleHeight = 16f.dpToPx(density)
+            iconPath.reset()
+            iconPath.moveTo(centerX - triangleWidth * 0.36f, centerY - triangleHeight / 2f)
+            iconPath.lineTo(centerX - triangleWidth * 0.36f, centerY + triangleHeight / 2f)
+            iconPath.lineTo(centerX + triangleWidth * 0.54f, centerY)
+            iconPath.close()
+            canvas.drawPath(iconPath, iconPaint)
+        }
+    }
+
+    private fun drawWaveform(
+        canvas: Canvas,
+        waveform: List<Float>,
+        startX: Float,
+        centerY: Float,
+        maxWidth: Float,
+        maxBars: Int,
+        tail: Boolean
+    ) {
+        if (waveform.isEmpty() || maxWidth <= 0f) {
+            return
+        }
+        val barWidth = 3f.dpToPx(density)
+        val gap = 2f.dpToPx(density)
+        val fitBars = ((maxWidth + gap) / (barWidth + gap)).toInt().coerceAtLeast(0)
+        val count = minOf(maxBars, waveform.size, fitBars)
+        if (count <= 0) {
+            return
+        }
+        waveformPaint.color = primary.withAlpha(210)
+        val maxHeight = 20f.dpToPx(density)
+        val minHeight = 3f.dpToPx(density)
+        val startIndex = if (tail) {
+            (waveform.size - count).coerceAtLeast(0)
+        } else {
+            0
+        }
+        var x = startX
+        repeat(count) { index ->
+            val sampleIndex = if (tail) {
+                startIndex + index
+            } else {
+                (index * waveform.size / count).coerceIn(0, waveform.lastIndex)
+            }
+            val sample = waveform[sampleIndex].coerceIn(0f, 1f)
+            val barHeight = max(minHeight, sample * maxHeight)
+            rect.set(x, centerY - barHeight / 2f, x + barWidth, centerY + barHeight / 2f)
+            canvas.drawRoundRect(rect, barWidth / 2f, barWidth / 2f, waveformPaint)
+            x += barWidth + gap
+        }
+    }
+
+    private fun drawError(canvas: Canvas, message: String) {
+        messagePaint.color = destructive.withAlpha(255)
+        val baseline = height / 2f - (messagePaint.descent() + messagePaint.ascent()) / 2f
+        canvas.drawText(message, width / 2f, baseline, messagePaint)
+    }
+}
 
 private fun GlassAdaptiveMaterial.isVisiblyCloseTo(other: GlassAdaptiveMaterial): Boolean {
     return abs(appearance - other.appearance) <= 0.012f &&
         abs(contrast - other.contrast) <= 0.03f
+}
+
+private fun Int.withAlpha(alpha: Int): Int {
+    return (this and 0x00FFFFFF) or (alpha.coerceIn(0, 255) shl 24)
+}
+
+private fun Float.spToPx(metrics: DisplayMetrics): Float {
+    return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, this, metrics)
+}
+
+private fun Long.formatVoiceDuration(): String {
+    val totalSeconds = (this / 1000L).coerceAtLeast(0L)
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "$minutes:${seconds.toString().padStart(2, '0')}"
 }

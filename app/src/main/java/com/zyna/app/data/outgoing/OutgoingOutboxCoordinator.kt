@@ -160,6 +160,10 @@ class OutgoingOutboxService(
             userId = userId,
             envelopeIds = envelopeIds
         )
+        val voiceCandidates = localCacheRepository.outgoingVoiceDispatchCandidates(
+            userId = userId,
+            envelopeIds = envelopeIds
+        )
         val redactionCandidates = localCacheRepository.outgoingRedactionDispatchCandidates(
             userId = userId,
             envelopeIds = envelopeIds
@@ -170,6 +174,7 @@ class OutgoingOutboxService(
         if (
             textCandidates.isEmpty() &&
             imageCandidates.isEmpty() &&
+            voiceCandidates.isEmpty() &&
             redactionCandidates.isEmpty() &&
             editCandidates.isEmpty()
         ) {
@@ -181,6 +186,7 @@ class OutgoingOutboxService(
             TAG,
             "outbox scan reason=$reason text=${textCandidates.size} " +
                 "images=${imageCandidates.size} " +
+                "voices=${voiceCandidates.size} " +
                 "redactions=${redactionCandidates.size} edits=${editCandidates.size}"
         )
         for (candidate in textCandidates) {
@@ -196,6 +202,13 @@ class OutgoingOutboxService(
                 return
             }
             sendImageIfEligible(candidate, reason)
+        }
+        for (candidate in voiceCandidates) {
+            currentCoroutineContext().ensureActive()
+            if (!canScan()) {
+                return
+            }
+            sendVoiceIfEligible(candidate, reason)
         }
         for (candidate in redactionCandidates) {
             currentCoroutineContext().ensureActive()
@@ -377,6 +390,85 @@ class OutgoingOutboxService(
         return uploadedImageJson
     }
 
+    private suspend fun sendVoiceIfEligible(candidate: OutgoingVoiceEnvelope, reason: String) {
+        if (!inFlight.begin(candidate.id)) {
+            return
+        }
+
+        try {
+            when (val decision = attemptDecision(candidate.transportState, candidate.id)) {
+                AttemptDecision.Send -> Unit
+                is AttemptDecision.Wait -> {
+                    Log.d(
+                        TAG,
+                        "outbox voice wait reason=$reason envelope=${candidate.id} " +
+                            "state=${candidate.transportState} delayMillis=${decision.delayMillis}"
+                    )
+                    scheduleWake(decision.delayMillis, reason = "delayed-$reason")
+                    return
+                }
+                AttemptDecision.Skip -> return
+            }
+
+            localCacheRepository.markOutgoingDispatchStarted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id
+            )
+            val uploadedVoiceJson = candidate.uploadedVoiceJson
+                ?: uploadVoiceAndCheckpoint(candidate)
+                ?: return
+            val eventId = matrixClientService.sendUploadedVoiceMessage(
+                roomId = candidate.roomId,
+                uploadedVoiceJson = uploadedVoiceJson,
+                transactionId = candidate.transactionId,
+                replyInfo = candidate.replyInfo
+            )
+            retryBackoff.clear(candidate.id)
+            localCacheRepository.markOutgoingDispatchAccepted(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id,
+                eventId = eventId
+            )
+            Log.d(TAG, "outbox voice sent envelope=${candidate.id} event=$eventId")
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            completeVoiceFailure(candidate, error)
+        } finally {
+            inFlight.end(candidate.id)
+        }
+    }
+
+    private suspend fun uploadVoiceAndCheckpoint(candidate: OutgoingVoiceEnvelope): String? {
+        val uploadedVoiceJson = matrixClientService.uploadVoiceForEvent(
+            roomId = candidate.roomId,
+            localPath = candidate.localPath,
+            mimeType = candidate.mimeType,
+            sizeBytes = candidate.sizeBytes,
+            durationMillis = candidate.durationMillis,
+            waveform = candidate.waveform
+        )
+        currentCoroutineContext().ensureActive()
+        val didCheckpoint = localCacheRepository.markOutgoingVoiceUploadAccepted(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            envelopeId = candidate.id,
+            uploadedVoiceJson = uploadedVoiceJson
+        )
+        if (!didCheckpoint) {
+            Log.d(TAG, "outbox voice upload skipped envelope=${candidate.id}")
+            return null
+        }
+        currentCoroutineContext().ensureActive()
+        Log.d(
+            TAG,
+            "outbox voice uploaded envelope=${candidate.id} bytes=${uploadedVoiceJson.length}"
+        )
+        return uploadedVoiceJson
+    }
+
     private suspend fun sendRedactionIfEligible(
         candidate: OutgoingRedactionEnvelope,
         reason: String
@@ -540,6 +632,37 @@ class OutgoingOutboxService(
             )
         )
         Log.w(TAG, "outbox image failed envelope=${candidate.id}", error)
+    }
+
+    private suspend fun completeVoiceFailure(candidate: OutgoingVoiceEnvelope, error: Throwable) {
+        val failureMessage = error.message ?: error.javaClass.simpleName
+        if (error.isRetryableTransportError()) {
+            localCacheRepository.markOutgoingDispatchRetrying(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                envelopeId = candidate.id,
+                failureMessage = failureMessage
+            )
+            val delayMillis = retryBackoff.scheduleRetry(candidate.id)
+            scheduleWake(delayMillis, reason = "retryable-voice-failure")
+            Log.d(TAG, "outbox voice retrying envelope=${candidate.id} delayMillis=$delayMillis")
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        localCacheRepository.markOutgoingDispatchFailed(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            envelopeId = candidate.id,
+            failureMessage = failureMessage
+        )
+        _sendFailures.tryEmit(
+            OutgoingOutboxFailure(
+                roomId = candidate.roomId,
+                message = failureMessage
+            )
+        )
+        Log.w(TAG, "outbox voice failed envelope=${candidate.id}", error)
     }
 
     private suspend fun completeRedactionFailure(

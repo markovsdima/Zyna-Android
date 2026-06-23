@@ -1,6 +1,8 @@
 package com.zyna.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
 import android.graphics.Rect
@@ -20,6 +22,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -29,6 +32,8 @@ import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingOutboxDebugHooks
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
+import com.zyna.app.data.media.VoiceRecorderState
+import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.app.AppViewModel
@@ -47,20 +52,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val appContainer by lazy { (application as ZynaApplication).appContainer }
     private lateinit var appViewModel: AppViewModel
     private lateinit var rootHost: ZynaRootHostView
     private lateinit var photoPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>
+    private lateinit var recordAudioPermissionLauncher: ActivityResultLauncher<String>
     private var latestState: AppUiState = AppUiState()
     private var photoEditorItems: List<OutgoingPhotoDraftItem> = emptyList()
     private var isPreparingPhotos: Boolean = false
     private var photoEditorError: String? = null
     private var photoEditorView: ComposeView? = null
+    private var hasRenderedState: Boolean = false
+    private var voiceRecorderAutoSendHandle: AutoCloseable? = null
+    private var sendVoiceAfterFinish: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         preferMaxRefreshRate()
-        val appContainer = (application as ZynaApplication).appContainer
         OutgoingOutboxDebugHooks.handleIntent(this, intent)
 
         appViewModel = ViewModelProvider(
@@ -78,13 +87,24 @@ class MainActivity : ComponentActivity() {
         ) { uris ->
             handlePickedPhotos(uris)
         }
+        recordAudioPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (!granted) {
+                appContainer.voiceRecorderController.cancelRecording()
+            }
+        }
 
         rootHost = ZynaRootHostView(this)
         setContentView(rootHost)
+        voiceRecorderAutoSendHandle = appContainer.voiceRecorderController.addListener(
+            ::handleVoiceRecorderAutoSendState
+        )
 
         val actions = ZynaAppActions(
             matrixMediaLoader = appContainer.matrixMediaLoader,
             audioPlaybackController = appContainer.audioPlaybackController,
+            voiceRecorderController = appContainer.voiceRecorderController,
             onLogin = appViewModel::login,
             onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
             onRefreshRooms = appViewModel::refreshRooms,
@@ -98,6 +118,12 @@ class MainActivity : ComponentActivity() {
             onJumpToChatLiveEdge = appViewModel::jumpToChatLiveEdge,
             onSendChatMessage = appViewModel::sendChatMessage,
             onAttachPhotos = ::launchPhotoPicker,
+            onStartVoiceRecording = ::startVoiceRecordingWithPermission,
+            onStopVoiceRecording = ::stopVoiceRecordingToPreview,
+            onCancelVoiceRecording = ::cancelVoiceRecording,
+            onFinishVoiceRecordingForSend = ::finishVoiceRecordingForSend,
+            onSendVoiceRecording = ::sendVoiceRecording,
+            onToggleVoicePreviewPlayback = ::toggleVoicePreviewPlayback,
             onReplyToMessage = appViewModel::setChatReplyTarget,
             onReplyHeaderClicked = appViewModel::jumpToChatEvent,
             onCancelReply = appViewModel::clearChatReplyTarget,
@@ -115,6 +141,8 @@ class MainActivity : ComponentActivity() {
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
             onLogout = {
                 appContainer.audioPlaybackController.stop()
+                sendVoiceAfterFinish = false
+                appContainer.voiceRecorderController.clear()
                 appContainer.matrixAudioMediaLoader.clear()
                 appViewModel.logout()
             }
@@ -142,7 +170,11 @@ class MainActivity : ComponentActivity() {
                         "activity.uiState.collect route=${state.route.perfName()} " +
                             "messages=${state.chatMessages.size} loading=${state.isLoadingChat}"
                     }
+                    if (hasRenderedState) {
+                        cancelVoiceComposerIfRouteChanged(latestState, state)
+                    }
                     latestState = state
+                    hasRenderedState = true
                     rootHost.render(state, actions)
                     renderPhotoEditor()
                     ZynaPerfLog.end(
@@ -156,9 +188,135 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun cancelVoiceComposerIfRouteChanged(previous: AppUiState, next: AppUiState) {
+        val previousChat = previous.route as? AppRoute.Chat
+        val nextChat = next.route as? AppRoute.Chat
+        if (previousChat?.roomId == nextChat?.roomId) {
+            return
+        }
+        cancelVoiceRecording()
+    }
+
     private fun launchPhotoPicker() {
         photoPickerLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    private fun startVoiceRecordingWithPermission(): Boolean {
+        if (latestState.route !is AppRoute.Chat) {
+            return false
+        }
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return startVoiceRecording()
+        } else {
+            recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return false
+        }
+    }
+
+    private fun startVoiceRecording(): Boolean {
+        if (latestState.route !is AppRoute.Chat) {
+            return false
+        }
+        sendVoiceAfterFinish = false
+        appContainer.audioPlaybackController.stop()
+        appContainer.voiceRecorderController.startRecording()
+        return true
+    }
+
+    private fun stopVoiceRecordingToPreview() {
+        sendVoiceAfterFinish = false
+        appContainer.voiceRecorderController.stopRecording()
+    }
+
+    private fun cancelVoiceRecording() {
+        sendVoiceAfterFinish = false
+        appContainer.audioPlaybackController.stop()
+        appContainer.voiceRecorderController.cancelRecording()
+    }
+
+    private fun finishVoiceRecordingForSend(): Boolean {
+        if (latestState.route !is AppRoute.Chat) {
+            return false
+        }
+        val controller = appContainer.voiceRecorderController
+        if (controller.stateSnapshot() !is VoiceRecorderState.Recording) {
+            return false
+        }
+        sendVoiceAfterFinish = true
+        controller.stopRecording()
+        return true
+    }
+
+    private fun handleVoiceRecorderAutoSendState(state: VoiceRecorderState) {
+        if (!sendVoiceAfterFinish) {
+            return
+        }
+        when (state) {
+            is VoiceRecorderState.Finished -> {
+                sendVoiceAfterFinish = false
+                rootHost.post {
+                    sendVoiceRecording()
+                }
+            }
+            VoiceRecorderState.Idle,
+            is VoiceRecorderState.Error -> {
+                sendVoiceAfterFinish = false
+            }
+            is VoiceRecorderState.Recording -> Unit
+        }
+    }
+
+    private fun sendVoiceRecording(): Boolean {
+        val controller = appContainer.voiceRecorderController
+        val finished = controller.stateSnapshot()
+            as? VoiceRecorderState.Finished
+            ?: return false
+        val localPath = finished.localPath
+        val didSend = appViewModel.sendVoiceMessage(finished.toDraft()) {
+            val currentFinished = controller.stateSnapshot() as? VoiceRecorderState.Finished
+            if (currentFinished?.localPath == localPath) {
+                appContainer.audioPlaybackController.stop()
+                controller.consumeFinished()
+            }
+        }
+        if (didSend) {
+            appContainer.audioPlaybackController.stop()
+        }
+        return didSend
+    }
+
+    private fun stopActiveVoiceRecordingToPreviewForBackground() {
+        val controller = appContainer.voiceRecorderController
+        if (controller.stateSnapshot() !is VoiceRecorderState.Recording) {
+            return
+        }
+        sendVoiceAfterFinish = false
+        controller.stopRecording()
+    }
+
+    private fun toggleVoicePreviewPlayback() {
+        val finished = appContainer.voiceRecorderController.stateSnapshot()
+            as? VoiceRecorderState.Finished
+            ?: return
+        val sourceJson = "local:${finished.localPath}"
+        appContainer.audioPlaybackController.toggle(
+            messageId = "voice-preview:${finished.localPath}",
+            audioInfo = MatrixAudioInfo(
+                sourceJson = sourceJson,
+                filename = File(finished.localPath).name,
+                caption = null,
+                mimeType = finished.mimeType,
+                sizeBytes = finished.sizeBytes,
+                durationMillis = finished.durationMillis,
+                waveform = finished.waveform,
+                isVoice = true,
+                localPath = finished.localPath
+            )
         )
     }
 
@@ -268,6 +426,21 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         preferMaxRefreshRate()
+    }
+
+    override fun onStop() {
+        stopActiveVoiceRecordingToPreviewForBackground()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        voiceRecorderAutoSendHandle?.close()
+        voiceRecorderAutoSendHandle = null
+        sendVoiceAfterFinish = false
+        if (isFinishing) {
+            appContainer.voiceRecorderController.clear()
+        }
+        super.onDestroy()
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {

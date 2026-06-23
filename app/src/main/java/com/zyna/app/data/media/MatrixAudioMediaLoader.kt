@@ -28,6 +28,7 @@ class MatrixAudioMediaLoader(
     private val inFlight = mutableMapOf<String, Deferred<File?>>()
 
     fun cachedAudioFile(audioInfo: MatrixAudioInfo): File? = synchronized(lock) {
+        audioInfo.localAudioFileOrNull()?.let { return@synchronized it }
         val file = cacheFileFor(audioInfo)
         if (!file.isFile || file.length() <= 0L) {
             return@synchronized null
@@ -201,6 +202,11 @@ class MatrixAudioMediaLoader(
 
     private fun cacheKey(audioInfo: MatrixAudioInfo): String {
         return audioInfo.sourceJson
+    }
+
+    private fun MatrixAudioInfo.localAudioFileOrNull(): File? {
+        val path = localPath?.takeIf { it.isNotBlank() } ?: return null
+        return File(path).takeIf { file -> file.isFile && file.length() > 0L }
     }
 
     private fun sha256(value: String): String {

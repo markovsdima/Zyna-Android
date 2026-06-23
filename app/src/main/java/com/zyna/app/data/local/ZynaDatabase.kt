@@ -16,7 +16,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class
     ],
-    version = 17,
+    version = 18,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -62,7 +62,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_13_14,
                     MIGRATION_14_15,
                     MIGRATION_15_16,
-                    MIGRATION_16_17
+                    MIGRATION_16_17,
+                    MIGRATION_17_18
                 )
                 .build()
         }
@@ -309,6 +310,18 @@ abstract class ZynaDatabase : RoomDatabase() {
                     ADD COLUMN audioIsVoice INTEGER NOT NULL DEFAULT 0
                     """.trimIndent()
                 )
+            }
+        }
+
+        private val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceLocalPath TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceMimeType TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceSizeBytes INTEGER")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceDurationMillis INTEGER")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceWaveform TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceUploadedJson TEXT")
+                db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceUploadedAtMillis INTEGER")
             }
         }
     }

@@ -8,6 +8,7 @@ import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.MatrixAudioMediaLoader
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.media.VoiceRecorderController
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
@@ -42,6 +43,7 @@ class AppContainer(context: Context) {
     val audioPlaybackController = AudioPlaybackController(
         audioMediaLoader = matrixAudioMediaLoader
     )
+    val voiceRecorderController = VoiceRecorderController(appContext)
     val outgoingOutboxService = OutgoingOutboxService(
         matrixClientService = matrixClientService,
         localCacheRepository = localCacheRepository,

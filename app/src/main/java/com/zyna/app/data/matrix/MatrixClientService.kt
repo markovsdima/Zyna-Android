@@ -12,6 +12,7 @@ import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
+import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -181,7 +182,8 @@ data class MatrixAudioInfo(
     val sizeBytes: Long?,
     val durationMillis: Long?,
     val waveform: List<Float> = emptyList(),
-    val isVoice: Boolean = false
+    val isVoice: Boolean = false,
+    val localPath: String? = null
 )
 
 data class MatrixMediaGroupItem(
@@ -699,6 +701,44 @@ class MatrixClientService(
             caption = plainCaption,
             formattedCaption = formattedCaption,
             replyEventId = null
+        )
+    }
+
+    suspend fun uploadVoiceForEvent(
+        roomId: String,
+        localPath: String,
+        mimeType: String,
+        sizeBytes: Long,
+        durationMillis: Long,
+        waveform: List<Float>
+    ): String = withContext(Dispatchers.IO) {
+        val voiceFile = File(localPath)
+        require(voiceFile.isFile) { "Voice file is not available" }
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        room.uploadVoiceForEvent(
+            filePath = voiceFile.absolutePath,
+            mimetype = mimeType.ifBlank { "audio/mp4" },
+            size = sizeBytes.takeIf { it > 0L }
+                ?.toULong()
+                ?: voiceFile.length().coerceAtLeast(1L).toULong(),
+            duration = Duration.ofMillis(durationMillis.coerceAtLeast(1L)),
+            waveform = waveform.map { it.coerceIn(0f, 1f) }
+        )
+    }
+
+    suspend fun sendUploadedVoiceMessage(
+        roomId: String,
+        uploadedVoiceJson: String,
+        transactionId: String,
+        replyInfo: MatrixReplyInfo? = null
+    ): String = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        room.sendUploadedVoiceWithTransactionIdReturningEventId(
+            uploadedVoiceJson = uploadedVoiceJson,
+            transactionId = transactionId,
+            replyEventId = replyInfo?.eventId?.takeIf { it.isNotBlank() }
         )
     }
 

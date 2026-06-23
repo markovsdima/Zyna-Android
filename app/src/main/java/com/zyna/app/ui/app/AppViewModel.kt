@@ -25,6 +25,7 @@ import com.zyna.app.data.messaging.MediaGroupInfo
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
+import com.zyna.app.data.outgoing.OutgoingVoiceDraft
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.util.ZynaPerfLog
 import java.util.UUID
@@ -656,6 +657,76 @@ class AppViewModel(
                     } else it.copy(
                         isSendingChatMessage = false,
                         chatSendErrorMessage = null
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isSendingChatMessage = false,
+                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
+                    )
+                }
+            }
+        }
+
+        return true
+    }
+
+    fun sendVoiceMessage(
+        draft: OutgoingVoiceDraft,
+        onEnqueued: () -> Unit = {}
+    ): Boolean {
+        val state = _uiState.value
+        val route = state.route as? AppRoute.Chat ?: return false
+        val userId = state.matrixState.userIdOrNull() ?: return false
+        if (draft.localPath.isBlank() || state.isSendingChatMessage) {
+            return false
+        }
+        val replyInfo = state.chatReplyTarget
+
+        _uiState.update {
+            if (!it.isRouteForRoom(route.roomId)) {
+                it
+            } else it.copy(
+                isSendingChatMessage = true,
+                chatSendErrorMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                val envelopeId = "voice:${UUID.randomUUID()}"
+                val transactionId = matrixClientService.prepareTransactionId()
+                localCacheRepository.createOutgoingVoiceEnvelope(
+                    userId = userId,
+                    roomId = route.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    localPath = draft.localPath,
+                    mimeType = draft.mimeType,
+                    sizeBytes = draft.sizeBytes,
+                    durationMillis = draft.durationMillis,
+                    waveform = draft.waveform,
+                    replyInfo = replyInfo
+                )
+                outgoingOutboxService.kick(
+                    reason = "new-voice",
+                    envelopeId = envelopeId
+                )
+                onEnqueued()
+                _uiState.update {
+                    if (!it.isRouteForRoom(route.roomId)) {
+                        it
+                    } else it.copy(
+                        isSendingChatMessage = false,
+                        chatSendErrorMessage = null,
+                        chatReplyTarget = null,
+                        chatEditTarget = null,
+                        chatForwardTarget = null
                     )
                 }
             } catch (error: CancellationException) {

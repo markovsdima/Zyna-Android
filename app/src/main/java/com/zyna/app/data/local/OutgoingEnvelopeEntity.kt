@@ -49,5 +49,12 @@ data class OutgoingEnvelopeEntity(
     val body: String,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
-    val failureMessage: String?
+    val failureMessage: String?,
+    val voiceLocalPath: String? = null,
+    val voiceMimeType: String? = null,
+    val voiceSizeBytes: Long? = null,
+    val voiceDurationMillis: Long? = null,
+    val voiceWaveform: String? = null,
+    val voiceUploadedJson: String? = null,
+    val voiceUploadedAtMillis: Long? = null
 )

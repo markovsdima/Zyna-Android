@@ -26,6 +26,8 @@ import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.AudioPlaybackSnapshot
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.media.VoiceRecorderController
+import com.zyna.app.data.media.VoiceRecorderState
 import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixEditTarget
@@ -49,6 +51,7 @@ import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
+import com.zyna.app.ui.glass.GlassVoiceComposerState
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
@@ -80,6 +83,7 @@ data class ChatScreenViewState(
     val forwardTarget: MatrixForwardTarget?,
     val matrixMediaLoader: MatrixMediaLoader?,
     val audioPlaybackController: AudioPlaybackController?,
+    val voiceRecorderController: VoiceRecorderController?,
     val jumpTargetEventId: String?
 )
 
@@ -91,6 +95,12 @@ data class ChatScreenViewActions(
     val onJumpToLiveEdge: () -> Unit,
     val onSendMessage: (String) -> Boolean,
     val onAttachPhotos: () -> Unit,
+    val onStartVoiceRecording: () -> Boolean,
+    val onStopVoiceRecording: () -> Unit,
+    val onCancelVoiceRecording: () -> Unit,
+    val onFinishVoiceRecordingForSend: () -> Boolean,
+    val onSendVoiceRecording: () -> Boolean,
+    val onToggleVoicePreviewPlayback: () -> Unit,
     val onReplyToMessage: (MatrixReplyInfo) -> Unit,
     val onReplyHeaderClicked: (String) -> Unit,
     val onCancelReply: () -> Unit,
@@ -130,6 +140,10 @@ internal class ChatScreenView(
     private var currentRoomId: String? = null
     private var currentAudioPlaybackController: AudioPlaybackController? = null
     private var audioPlaybackListenerHandle: AutoCloseable? = null
+    private var currentVoiceRecorderController: VoiceRecorderController? = null
+    private var voiceRecorderListenerHandle: AutoCloseable? = null
+    private var latestAudioPlaybackSnapshot = AudioPlaybackSnapshot()
+    private var latestVoiceRecorderState: VoiceRecorderState = VoiceRecorderState.Idle
 
     fun canReuseForRoom(roomId: String): Boolean {
         return currentRoomId == null || currentRoomId == roomId
@@ -311,6 +325,9 @@ internal class ChatScreenView(
         audioPlaybackListenerHandle?.close()
         audioPlaybackListenerHandle = null
         currentAudioPlaybackController = null
+        voiceRecorderListenerHandle?.close()
+        voiceRecorderListenerHandle = null
+        currentVoiceRecorderController = null
         super.onDetachedFromWindow()
     }
 
@@ -391,6 +408,12 @@ internal class ChatScreenView(
         }
         chatLayout.inputBar.onSendMessage = actions.onSendMessage
         chatLayout.inputBar.onAttachClicked = actions.onAttachPhotos
+        chatLayout.inputBar.onVoiceRecordClicked = actions.onStartVoiceRecording
+        chatLayout.inputBar.onVoiceStopClicked = actions.onStopVoiceRecording
+        chatLayout.inputBar.onVoiceCancelClicked = actions.onCancelVoiceRecording
+        chatLayout.inputBar.onVoiceFinishForSendClicked = actions.onFinishVoiceRecordingForSend
+        chatLayout.inputBar.onVoiceSendClicked = actions.onSendVoiceRecording
+        chatLayout.inputBar.onVoicePreviewPlaybackClicked = actions.onToggleVoicePreviewPlayback
         chatLayout.inputBar.onPreviewCancelled = {
             if (state.forwardTarget != null) actions.onCancelForward() else actions.onCancelReply()
         }
@@ -441,6 +464,7 @@ internal class ChatScreenView(
         }
         adapter.matrixMediaLoader = state.matrixMediaLoader
         bindAudioPlaybackController(state.audioPlaybackController)
+        bindVoiceRecorderController(state.voiceRecorderController)
         val presentationStart = ZynaPerfLog.start()
         val displayedMessages = state.messages
             .asReversed()
@@ -711,13 +735,41 @@ internal class ChatScreenView(
         currentAudioPlaybackController = controller
         val adapter = chatLayout.recyclerView.adapter as? ChatMessageAdapter
         if (controller == null) {
+            latestAudioPlaybackSnapshot = AudioPlaybackSnapshot()
             adapter?.setAudioPlaybackSnapshot(AudioPlaybackSnapshot())
+            updateInputBarVoiceState()
             return
         }
         audioPlaybackListenerHandle = controller.addListener { snapshot ->
+            latestAudioPlaybackSnapshot = snapshot
             (chatLayout.recyclerView.adapter as? ChatMessageAdapter)
                 ?.setAudioPlaybackSnapshot(snapshot)
+            updateInputBarVoiceState()
         }
+    }
+
+    private fun bindVoiceRecorderController(controller: VoiceRecorderController?) {
+        if (currentVoiceRecorderController === controller) {
+            return
+        }
+        voiceRecorderListenerHandle?.close()
+        voiceRecorderListenerHandle = null
+        currentVoiceRecorderController = controller
+        if (controller == null) {
+            latestVoiceRecorderState = VoiceRecorderState.Idle
+            updateInputBarVoiceState()
+            return
+        }
+        voiceRecorderListenerHandle = controller.addListener { state ->
+            latestVoiceRecorderState = state
+            updateInputBarVoiceState()
+        }
+    }
+
+    private fun updateInputBarVoiceState() {
+        chatLayout.inputBar.setVoiceComposerState(
+            latestVoiceRecorderState.toGlassVoiceState(latestAudioPlaybackSnapshot)
+        )
     }
 
     private fun updateNativeThemeIfNeeded() {
@@ -1226,6 +1278,33 @@ private class ChatMessageViewHolder(
 }
 
 private object AudioPlaybackPayload
+
+private fun VoiceRecorderState.toGlassVoiceState(
+    playbackSnapshot: AudioPlaybackSnapshot
+): GlassVoiceComposerState {
+    return when (this) {
+        VoiceRecorderState.Idle -> GlassVoiceComposerState.Idle
+        is VoiceRecorderState.Recording -> GlassVoiceComposerState.Recording(
+            durationMillis = durationMillis.toComposerDisplayDurationMillis(),
+            waveform = waveform
+        )
+        is VoiceRecorderState.Finished -> {
+            val sourceJson = "local:$localPath"
+            val isActive = playbackSnapshot.sourceJson == sourceJson
+            GlassVoiceComposerState.Preview(
+                durationMillis = durationMillis.toComposerDisplayDurationMillis(),
+                waveform = waveform,
+                isLoading = isActive && playbackSnapshot.isLoading,
+                isPlaying = isActive && playbackSnapshot.isPlaying
+            )
+        }
+        is VoiceRecorderState.Error -> GlassVoiceComposerState.Error(message)
+    }
+}
+
+private fun Long.toComposerDisplayDurationMillis(): Long {
+    return (this / 1000L).coerceAtLeast(0L) * 1000L
+}
 
 private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
     return MessageRenderModel(

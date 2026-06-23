@@ -413,6 +413,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         forwardTarget = state.chatForwardTarget,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         audioPlaybackController = actions.audioPlaybackController,
+                        voiceRecorderController = actions.voiceRecorderController,
                         jumpTargetEventId = state.chatJumpTargetEventId
                     ),
                     actions = ChatScreenViewActions(
@@ -423,6 +424,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onJumpToLiveEdge = actions.onJumpToChatLiveEdge,
                         onSendMessage = actions.onSendChatMessage,
                         onAttachPhotos = actions.onAttachPhotos,
+                        onStartVoiceRecording = actions.onStartVoiceRecording,
+                        onStopVoiceRecording = actions.onStopVoiceRecording,
+                        onCancelVoiceRecording = actions.onCancelVoiceRecording,
+                        onFinishVoiceRecordingForSend = actions.onFinishVoiceRecordingForSend,
+                        onSendVoiceRecording = actions.onSendVoiceRecording,
+                        onToggleVoicePreviewPlayback = actions.onToggleVoicePreviewPlayback,
                         onReplyToMessage = actions.onReplyToMessage,
                         onReplyHeaderClicked = actions.onReplyHeaderClicked,
                         onCancelReply = actions.onCancelReply,

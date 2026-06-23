@@ -5,6 +5,7 @@ import com.zyna.app.data.matrix.MatrixReplyInfo
 enum class OutgoingEnvelopeKind {
     TEXT,
     IMAGE,
+    VOICE,
     REDACTION,
     EDIT
 }
@@ -55,6 +56,24 @@ data class OutgoingImageEnvelope(
     val thumbnailSourceJson: String?,
     val blurhash: String?,
     val uploadedImageJson: String?,
+    val createdAtMillis: Long,
+    val failureMessage: String?
+)
+
+data class OutgoingVoiceEnvelope(
+    val userId: String,
+    val roomId: String,
+    val id: String,
+    val transportState: OutgoingTransportState,
+    val transactionId: String,
+    val eventId: String?,
+    val localPath: String,
+    val mimeType: String,
+    val sizeBytes: Long,
+    val durationMillis: Long,
+    val waveform: List<Float>,
+    val replyInfo: MatrixReplyInfo?,
+    val uploadedVoiceJson: String?,
     val createdAtMillis: Long,
     val failureMessage: String?
 )

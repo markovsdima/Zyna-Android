@@ -2,6 +2,9 @@ package com.zyna.app.data.matrix
 
 import android.content.Context
 import android.util.Log
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCustomToDeviceEncrypting
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcOwnDevice
+import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
 import com.zyna.app.data.media.BlurHashCodec
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
@@ -356,6 +359,20 @@ class MatrixClientService(
 
     fun isRecoveryComplete(userId: String): Boolean {
         return sessionStore.isRecoveryComplete(userId)
+    }
+
+    fun matrixRtcOwnDevice(): MatrixRtcOwnDevice {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val session = activeClient.session()
+        return MatrixRtcOwnDevice(
+            userId = session.userId,
+            deviceId = session.deviceId
+        )
+    }
+
+    fun matrixRtcToDeviceClient(): MatrixRtcCustomToDeviceEncrypting {
+        val activeClient = client ?: error("Matrix client is not ready")
+        return MatrixRustSdkRtcToDeviceClient(activeClient)
     }
 
     suspend fun roomsSnapshot(): List<MatrixRoomSummary> = withContext(Dispatchers.IO) {

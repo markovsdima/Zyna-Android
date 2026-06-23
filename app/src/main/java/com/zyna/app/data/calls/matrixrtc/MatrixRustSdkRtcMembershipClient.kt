@@ -178,15 +178,24 @@ data class MatrixRtcCallNotificationSendResult(
     val lifetimeMillis: Long
 )
 
-class MatrixRustSdkRtcCallNotificationClient(
-    private val room: Room,
-    private val timestampProvider: () -> Long = { System.currentTimeMillis() }
-) {
+interface MatrixRtcCallNotificationClient {
     suspend fun sendCallNotification(
         parentEventId: String,
         slot: MatrixRtcSlotDescription = MatrixRtcSlotDescription.MATRIX_CALL_ROOM,
         notificationType: MatrixRtcCallNotificationType = MatrixRtcCallNotificationType.RING,
         callIntent: String? = null
+    ): MatrixRtcCallNotificationSendResult
+}
+
+class MatrixRustSdkRtcCallNotificationClient(
+    private val room: Room,
+    private val timestampProvider: () -> Long = { System.currentTimeMillis() }
+) : MatrixRtcCallNotificationClient {
+    override suspend fun sendCallNotification(
+        parentEventId: String,
+        slot: MatrixRtcSlotDescription,
+        notificationType: MatrixRtcCallNotificationType,
+        callIntent: String?
     ): MatrixRtcCallNotificationSendResult {
         val content = MatrixRtcCallNotificationContent.create(
             parentEventId = parentEventId,

@@ -2,14 +2,40 @@ package com.zyna.app.data.calls.matrixrtc
 
 import org.matrix.rustcomponents.sdk.Client
 
+interface MatrixRtcLiveKitFocusClient {
+    suspend fun discoverPreferredTransport(
+        fallbackServiceUrl: String? = null
+    ): MatrixRtcLiveKitDiscoveredTransport?
+
+    suspend fun requestOpenIdToken(): MatrixRtcLiveKitOpenIdToken
+
+    suspend fun sfuConfig(
+        membership: MatrixRtcMembershipIdentity,
+        transport: MatrixRtcTransport,
+        roomId: String,
+        endpointVersion: MatrixRtcLiveKitJwtEndpointVersion =
+            MatrixRtcLiveKitJwtEndpointVersion.LEGACY,
+        delayDelegation: MatrixRtcLiveKitDelayDelegation? = null
+    ): MatrixRtcLiveKitSfuConfig
+
+    suspend fun discoverAndAuthenticate(
+        membership: MatrixRtcMembershipIdentity,
+        roomId: String,
+        fallbackServiceUrl: String? = null,
+        endpointVersion: MatrixRtcLiveKitJwtEndpointVersion =
+            MatrixRtcLiveKitJwtEndpointVersion.LEGACY,
+        delayDelegation: MatrixRtcLiveKitDelayDelegation? = null
+    ): MatrixRustSdkRtcLiveKitFocus?
+}
+
 class MatrixRustSdkRtcLiveKitFocusClient(
     private val client: Client,
     private val transportDiscoveryClient: MatrixRtcLiveKitTransportDiscoveryClient =
         MatrixRtcLiveKitTransportDiscoveryClient(),
     private val sfuClient: MatrixRtcLiveKitSfuClient = MatrixRtcLiveKitSfuClient()
-) {
-    suspend fun discoverPreferredTransport(
-        fallbackServiceUrl: String? = null
+) : MatrixRtcLiveKitFocusClient {
+    override suspend fun discoverPreferredTransport(
+        fallbackServiceUrl: String?
     ): MatrixRtcLiveKitDiscoveredTransport? {
         val session = client.session()
         return transportDiscoveryClient.discoverPreferredTransport(
@@ -20,7 +46,7 @@ class MatrixRustSdkRtcLiveKitFocusClient(
         )
     }
 
-    suspend fun requestOpenIdToken(): MatrixRtcLiveKitOpenIdToken {
+    override suspend fun requestOpenIdToken(): MatrixRtcLiveKitOpenIdToken {
         val token = client.requestOpenidToken()
         return MatrixRtcLiveKitOpenIdToken(
             accessToken = token.accessToken,
@@ -30,13 +56,12 @@ class MatrixRustSdkRtcLiveKitFocusClient(
         )
     }
 
-    suspend fun sfuConfig(
+    override suspend fun sfuConfig(
         membership: MatrixRtcMembershipIdentity,
         transport: MatrixRtcTransport,
         roomId: String,
-        endpointVersion: MatrixRtcLiveKitJwtEndpointVersion =
-            MatrixRtcLiveKitJwtEndpointVersion.LEGACY,
-        delayDelegation: MatrixRtcLiveKitDelayDelegation? = null
+        endpointVersion: MatrixRtcLiveKitJwtEndpointVersion,
+        delayDelegation: MatrixRtcLiveKitDelayDelegation?
     ): MatrixRtcLiveKitSfuConfig {
         val serviceUrl = transport.liveKitServiceUrl
             ?: error("MatrixRTC LiveKit transport is missing livekit_service_url")
@@ -50,13 +75,12 @@ class MatrixRustSdkRtcLiveKitFocusClient(
         )
     }
 
-    suspend fun discoverAndAuthenticate(
+    override suspend fun discoverAndAuthenticate(
         membership: MatrixRtcMembershipIdentity,
         roomId: String,
-        fallbackServiceUrl: String? = null,
-        endpointVersion: MatrixRtcLiveKitJwtEndpointVersion =
-            MatrixRtcLiveKitJwtEndpointVersion.LEGACY,
-        delayDelegation: MatrixRtcLiveKitDelayDelegation? = null
+        fallbackServiceUrl: String?,
+        endpointVersion: MatrixRtcLiveKitJwtEndpointVersion,
+        delayDelegation: MatrixRtcLiveKitDelayDelegation?
     ): MatrixRustSdkRtcLiveKitFocus? {
         val discoveredTransport = discoverPreferredTransport(fallbackServiceUrl) ?: return null
         val sfuConfig = sfuConfig(
@@ -72,4 +96,3 @@ class MatrixRustSdkRtcLiveKitFocusClient(
         )
     }
 }
-

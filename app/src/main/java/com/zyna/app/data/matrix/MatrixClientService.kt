@@ -83,6 +83,7 @@ import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
 import org.json.JSONObject
+import uniffi.matrix_sdk_base.EncryptionState
 import uniffi.matrix_sdk.BackupDownloadStrategy
 import uniffi.matrix_sdk_ui.LatestEventValueLocalState
 import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
@@ -402,6 +403,18 @@ class MatrixClientService(
             membershipClient = MatrixRustSdkRtcMembershipClient(activeClient),
             room = room
         )
+    }
+
+    suspend fun matrixRtcMediaEncryptionEnabled(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        try {
+            room.latestEncryptionState() == EncryptionState.ENCRYPTED
+        } catch (_: Throwable) {
+            room.encryptionState() == EncryptionState.ENCRYPTED
+        } finally {
+            room.destroy()
+        }
     }
 
     suspend fun roomsSnapshot(): List<MatrixRoomSummary> = withContext(Dispatchers.IO) {

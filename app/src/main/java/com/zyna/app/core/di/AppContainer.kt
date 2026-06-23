@@ -1,6 +1,8 @@
 package com.zyna.app.core.di
 
 import android.content.Context
+import com.zyna.app.data.calls.matrixrtc.MatrixClientNativeMatrixRtcCallEnvironment
+import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.LocalDatabasePassphraseStore
 import com.zyna.app.data.local.ZynaDatabase
@@ -31,6 +33,12 @@ class AppContainer(context: Context) {
         context = appContext,
         sessionStore = sessionStore,
         storePassphraseStore = matrixStorePassphraseStore
+    )
+    val nativeMatrixRtcCallService = NativeMatrixRtcCallService(
+        environment = MatrixClientNativeMatrixRtcCallEnvironment(
+            matrixClientService = matrixClientService,
+            context = appContext
+        )
     )
     val matrixMediaLoader = MatrixMediaLoader(
         matrixClientService = matrixClientService,

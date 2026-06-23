@@ -50,6 +50,11 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(listOf(MatrixRtcTransport.liveKit("https://livekit.example.org")), membershipClient.publishedFociPreferred)
         assertEquals("audio", membershipClient.publishedCallIntent)
         assertEquals(MatrixRtcCallEncryptionKeysContent.EVENT_TYPE, environment.toDeviceClient.listenerEventType)
+        assertEquals(MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS, environment.liveKitSessions.single().mediaEncryptionMode)
+        assertEquals(listOf("wss://livekit.example.org"), environment.liveKitSessions.single().controller.connectedUrls)
+        assertEquals(listOf("jwt"), environment.liveKitSessions.single().controller.connectedTokens)
+        assertEquals(listOf(true), environment.liveKitSessions.single().controller.microphoneHistory)
+        assertEquals(listOf("own-key"), environment.liveKitSessions.single().keyApplier.appliedKeys.map { it.keyBase64Encoded })
 
         val notificationClient = environment.notificationClientFor(ROOM_ID)
         assertEquals(1, notificationClient.requests.size)
@@ -59,6 +64,7 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(notificationClient.result, result.callNotification)
 
         assertEquals(true, service.leaveActiveCall())
+        assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
     }
 
     @Test
@@ -91,6 +97,7 @@ class NativeMatrixRtcCallServiceTest {
         )
         assertEquals(listOf(MatrixRtcToDeviceTarget("@bob:example.org", "BOBDEVICE")), result.keyShareResult.sharedWith)
         assertEquals(listOf(MatrixRtcToDeviceTarget("@bob:example.org", "BOBDEVICE")), environment.toDeviceClient.sentTargets)
+        assertEquals(listOf("own-key"), environment.liveKitSessions.single().keyApplier.appliedKeys.map { it.keyBase64Encoded })
 
         assertEquals(true, service.leaveActiveCall())
     }
@@ -122,6 +129,8 @@ class NativeMatrixRtcCallServiceTest {
         assertTrue(result.keyShareResult.sharedWith.isEmpty())
         assertNull(environment.toDeviceClient.listenerEventType)
         assertEquals(0, environment.toDeviceClient.sendCount)
+        assertEquals(MatrixRtcLiveKitMediaEncryptionMode.UNENCRYPTED, environment.liveKitSessions.single().mediaEncryptionMode)
+        assertTrue(environment.liveKitSessions.single().keyApplier.appliedKeys.isEmpty())
 
         assertEquals(true, service.leaveActiveCall())
     }
@@ -157,10 +166,13 @@ class NativeMatrixRtcCallServiceTest {
         val service = nativeService(environment)
 
         service.startAudioCall(roomId = ROOM_ID)
+        service.setMicrophoneEnabled(false)
         val left = service.leaveActiveCall()
 
         assertEquals(true, left)
         assertEquals(1, membershipClient.leaveCount)
+        assertEquals(listOf(true, false), environment.liveKitSessions.single().controller.microphoneHistory)
+        assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
         assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
         assertNull(service.currentRoomId())
         assertEquals(false, service.leaveActiveCall())
@@ -242,6 +254,7 @@ private class FakeNativeMatrixRtcCallEnvironment : NativeMatrixRtcCallEnvironmen
     var encrypted = true
     val focusClient = FakeMatrixRtcLiveKitFocusClient()
     val toDeviceClient = FakeNativeToDeviceClient()
+    val liveKitSessions = mutableListOf<FakeNativeLiveKitSessionRecord>()
 
     private val membershipClients = mutableMapOf<String, FakeNativeSessionMembershipClient>()
     private val notificationClients = mutableMapOf<String, FakeNativeCallNotificationClient>()
@@ -251,6 +264,27 @@ private class FakeNativeMatrixRtcCallEnvironment : NativeMatrixRtcCallEnvironmen
     override suspend fun isRoomEncrypted(roomId: String): Boolean = encrypted
 
     override fun liveKitFocusClient(): MatrixRtcLiveKitFocusClient = focusClient
+
+    override fun liveKitRoomSession(
+        mediaEncryptionMode: MatrixRtcLiveKitMediaEncryptionMode,
+        onEvent: (MatrixRtcLiveKitRoomSessionEvent) -> Unit
+    ): MatrixRtcLiveKitRoomSession {
+        val controller = FakeNativeLiveKitRoomController()
+        val keyApplier = FakeNativeLiveKitKeyApplier()
+        liveKitSessions += FakeNativeLiveKitSessionRecord(
+            mediaEncryptionMode = mediaEncryptionMode,
+            controller = controller,
+            keyApplier = keyApplier
+        )
+        return MatrixRtcLiveKitRoomSession(
+            controller = controller,
+            keyApplier = when (mediaEncryptionMode) {
+                MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS -> keyApplier
+                MatrixRtcLiveKitMediaEncryptionMode.UNENCRYPTED -> null
+            },
+            onEvent = onEvent
+        )
+    }
 
     override fun sessionMembershipClient(roomId: String): MatrixRtcSessionMembershipClient {
         return membershipClientFor(roomId)
@@ -417,6 +451,67 @@ private class FakeNativeToDeviceClient : MatrixRtcCustomToDeviceEncrypting {
         listenerEventType = eventType
         listenerEncryptedOnly = encryptedOnly
         return MatrixRtcNoopCancellable
+    }
+}
+
+private data class FakeNativeLiveKitSessionRecord(
+    val mediaEncryptionMode: MatrixRtcLiveKitMediaEncryptionMode,
+    val controller: FakeNativeLiveKitRoomController,
+    val keyApplier: FakeNativeLiveKitKeyApplier
+)
+
+private class FakeNativeLiveKitRoomController : MatrixRtcLiveKitRoomController {
+    var connectedUrls: List<String> = emptyList()
+    var connectedTokens: List<String> = emptyList()
+    var microphoneHistory: List<Boolean> = emptyList()
+    var cameraHistory: List<Boolean> = emptyList()
+    var disconnectCount = 0
+    var closeCount = 0
+    private var eventHandler: ((MatrixRtcLiveKitRoomSessionEvent) -> Unit)? = null
+
+    override fun startEventCollection(
+        scope: kotlinx.coroutines.CoroutineScope,
+        onEvent: (MatrixRtcLiveKitRoomSessionEvent) -> Unit
+    ): MatrixRtcCancellable {
+        eventHandler = onEvent
+        return object : MatrixRtcCancellable {
+            override fun cancel() {
+                eventHandler = null
+            }
+        }
+    }
+
+    override suspend fun connect(url: String, token: String) {
+        connectedUrls = connectedUrls + url
+        connectedTokens = connectedTokens + token
+    }
+
+    override fun disconnect() {
+        disconnectCount += 1
+    }
+
+    override suspend fun setMicrophoneEnabled(enabled: Boolean) {
+        microphoneHistory = microphoneHistory + enabled
+    }
+
+    override suspend fun setCameraEnabled(enabled: Boolean) {
+        cameraHistory = cameraHistory + enabled
+    }
+
+    override fun close() {
+        closeCount += 1
+    }
+
+    fun emit(event: MatrixRtcLiveKitRoomSessionEvent) {
+        eventHandler?.invoke(event)
+    }
+}
+
+private class FakeNativeLiveKitKeyApplier : MatrixRtcMediaKeyApplier {
+    var appliedKeys: List<MatrixRtcMediaKey> = emptyList()
+
+    override fun applyMediaKey(key: MatrixRtcMediaKey) {
+        appliedKeys = appliedKeys + key
     }
 }
 

@@ -1,10 +1,14 @@
 package com.zyna.app.data.calls.matrixrtc
 
+import android.content.Context
 import com.zyna.app.data.matrix.MatrixClientService
 
 class MatrixClientNativeMatrixRtcCallEnvironment(
-    private val matrixClientService: MatrixClientService
+    private val matrixClientService: MatrixClientService,
+    context: Context
 ) : NativeMatrixRtcCallEnvironment {
+    private val liveKitRoomSessionFactory = AndroidMatrixRtcLiveKitRoomSessionFactory(context)
+
     override fun ownDevice(): MatrixRtcOwnDevice {
         return matrixClientService.matrixRtcOwnDevice()
     }
@@ -15,6 +19,16 @@ class MatrixClientNativeMatrixRtcCallEnvironment(
 
     override fun liveKitFocusClient(): MatrixRtcLiveKitFocusClient {
         return matrixClientService.matrixRtcLiveKitFocusClient()
+    }
+
+    override fun liveKitRoomSession(
+        mediaEncryptionMode: MatrixRtcLiveKitMediaEncryptionMode,
+        onEvent: (MatrixRtcLiveKitRoomSessionEvent) -> Unit
+    ): MatrixRtcLiveKitRoomSession {
+        return liveKitRoomSessionFactory.create(
+            mediaEncryptionMode = mediaEncryptionMode,
+            onEvent = onEvent
+        )
     }
 
     override fun sessionMembershipClient(roomId: String): MatrixRtcSessionMembershipClient {
@@ -29,4 +43,3 @@ class MatrixClientNativeMatrixRtcCallEnvironment(
         return matrixClientService.matrixRtcCallNotificationClient(roomId)
     }
 }
-

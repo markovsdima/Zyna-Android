@@ -65,6 +65,8 @@ dependencies {
     implementation(libs.androidx.recyclerview)
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.room.runtime)
+    implementation(libs.livekit.android)
+    implementation(libs.livekit.android.camerax)
     implementation(libs.matrix.sdk)
     implementation(libs.sqlcipher.android)
     ksp(libs.androidx.room.compiler)

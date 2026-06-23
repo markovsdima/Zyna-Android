@@ -18,6 +18,13 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         maven {
+            url = uri("https://maven.pkg.github.com/markovsdima/client-sdk-android")
+            credentials {
+                username = providers.gradleProperty("gpr.user").get()
+                password = providers.gradleProperty("gpr.key").get()
+            }
+        }
+        maven {
             url = uri("https://maven.pkg.github.com/markovsdima/matrix-rust-components-kotlin")
             credentials {
                 username = providers.gradleProperty("gpr.user").get()
@@ -26,6 +33,12 @@ dependencyResolutionManagement {
         }
         google()
         mavenCentral()
+        maven {
+            url = uri("https://jitpack.io")
+            content {
+                includeGroup("com.github.davidliu")
+            }
+        }
     }
 }
 

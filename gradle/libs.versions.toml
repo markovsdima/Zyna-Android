@@ -10,6 +10,7 @@ activityCompose = "1.8.0"
 kotlin = "2.2.10"
 ksp = "2.2.10-2.0.2"
 composeBom = "2026.02.01"
+livekit = "2.26.1-zyna.2"
 matrixSdk = "26.05.13-latest-own-read-receipts-beta.1"
 recyclerview = "1.4.0"
 room = "2.8.4"
@@ -37,6 +38,9 @@ androidx-recyclerview = { group = "androidx.recyclerview", name = "recyclerview"
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+livekit-android = { group = "io.livekit", name = "livekit-android", version.ref = "livekit" }
+livekit-android-camerax = { group = "io.livekit", name = "livekit-android-camerax", version.ref = "livekit" }
+livekit-android-track-processors = { group = "io.livekit", name = "livekit-android-track-processors", version.ref = "livekit" }
 matrix-sdk = { group = "org.matrix.rustcomponents", name = "sdk-android", version.ref = "matrixSdk" }
 sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
 

@@ -44,6 +44,13 @@ data class NativeMatrixRtcCallStartResult(
     val callNotification: MatrixRtcCallNotificationSendResult?
 )
 
+data class NativeMatrixRtcRoomCallStatus(
+    val roomId: String,
+    val hasJoinableCall: Boolean,
+    val remoteMembershipCount: Int,
+    val checkedAtMillis: Long
+)
+
 interface NativeMatrixRtcCallEnvironment {
     fun ownDevice(): MatrixRtcOwnDevice
     suspend fun isRoomEncrypted(roomId: String): Boolean
@@ -185,7 +192,7 @@ class NativeMatrixRtcCallService(
             )
             matrixRtcSession = session
             if (!attachJoiningMatrixRtcSession(attemptId, session)) {
-                session.runCatchingLeave()
+                session.runCatchingLeaveAndClose()
                 matrixRtcSession = null
                 throw CancellationException("Stale MatrixRTC join attempt")
             }
@@ -227,7 +234,7 @@ class NativeMatrixRtcCallService(
             if (!finishJoined(call)) {
                 runCatching { liveKit.close() }
                 liveKitSession = null
-                session.runCatchingLeave()
+                session.runCatchingLeaveAndClose()
                 matrixRtcSession = null
                 throw CancellationException("Stale MatrixRTC join attempt")
             }
@@ -252,7 +259,7 @@ class NativeMatrixRtcCallService(
             if (shouldCleanupFailedJoin(attemptId)) {
                 _lastFailure.value = error
                 runCatching { liveKitSession?.close() }
-                matrixRtcSession?.runCatchingLeave()
+                matrixRtcSession?.runCatchingLeaveAndClose()
                 finishFailed(attemptId)
             }
             throw error
@@ -318,11 +325,11 @@ class NativeMatrixRtcCallService(
             when (call) {
                 is LeavingCall.Active -> {
                     call.activeCall.liveKitSession.close()
-                    call.activeCall.matrixRtcSession.leave()
+                    call.activeCall.matrixRtcSession.leaveAndClose()
                 }
                 is LeavingCall.Joining -> {
                     call.joiningCall.liveKitSession?.close()
-                    call.joiningCall.matrixRtcSession?.runCatchingLeave()
+                    call.joiningCall.matrixRtcSession?.runCatchingLeaveAndClose()
                 }
             }
             return true
@@ -335,6 +342,30 @@ class NativeMatrixRtcCallService(
     fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
     fun currentFailure(): Throwable? = _lastFailure.value
 
+    suspend fun loadRoomCallStatus(roomId: String): NativeMatrixRtcRoomCallStatus {
+        val ownDevice = environment.ownDevice()
+        val now = timestampProvider()
+        val membershipClient = environment.sessionMembershipClient(roomId)
+        val memberships = try {
+            membershipClient.loadActiveMemberships(
+                slot = MatrixRtcSlotDescription.MATRIX_CALL_ROOM,
+                joinedUserIds = null,
+                now = now
+            )
+        } finally {
+            membershipClient.close()
+        }
+        val joinableMemberships = memberships.filter { membership ->
+            !membership.isOwnDevice(ownDevice) && membership.isNativeAudioCallIntent()
+        }
+        return NativeMatrixRtcRoomCallStatus(
+            roomId = roomId,
+            hasJoinableCall = joinableMemberships.isNotEmpty(),
+            remoteMembershipCount = joinableMemberships.size,
+            checkedAtMillis = now
+        )
+    }
+
     private suspend fun sendCallNotificationIfNeeded(
         roomId: String,
         joinResult: MatrixRtcSessionJoinResult,
@@ -344,17 +375,22 @@ class NativeMatrixRtcCallService(
             return null
         }
 
+        val notificationClient = environment.callNotificationClient(roomId)
         return runCatching {
-            environment.callNotificationClient(roomId).sendCallNotification(
-                parentEventId = joinResult.ownMembership.eventId,
-                slot = joinResult.ownMembership.slot,
-                notificationType = if (waitForPickup) {
-                    MatrixRtcCallNotificationType.RING
-                } else {
-                    MatrixRtcCallNotificationType.NOTIFICATION
-                },
-                callIntent = AUDIO_CALL_INTENT
-            )
+            try {
+                notificationClient.sendCallNotification(
+                    parentEventId = joinResult.ownMembership.eventId,
+                    slot = joinResult.ownMembership.slot,
+                    notificationType = if (waitForPickup) {
+                        MatrixRtcCallNotificationType.RING
+                    } else {
+                        MatrixRtcCallNotificationType.NOTIFICATION
+                    },
+                    callIntent = AUDIO_CALL_INTENT
+                )
+            } finally {
+                notificationClient.close()
+            }
         }.onFailure(onError).getOrNull()
     }
 
@@ -399,11 +435,11 @@ class NativeMatrixRtcCallService(
             when (call) {
                 is LeavingCall.Active -> {
                     call.activeCall.liveKitSession.close()
-                    call.activeCall.matrixRtcSession.leave()
+                    call.activeCall.matrixRtcSession.leaveAndClose()
                 }
                 is LeavingCall.Joining -> {
                     call.joiningCall.liveKitSession?.close()
-                    call.joiningCall.matrixRtcSession?.runCatchingLeave()
+                    call.joiningCall.matrixRtcSession?.runCatchingLeaveAndClose()
                 }
             }
             return true
@@ -607,8 +643,16 @@ class NativeMatrixRtcCallService(
         }
     }
 
-    private suspend fun MatrixRtcSession.runCatchingLeave() {
-        runCatching { leave() }
+    private suspend fun MatrixRtcSession.leaveAndClose() {
+        try {
+            leave()
+        } finally {
+            close()
+        }
+    }
+
+    private suspend fun MatrixRtcSession.runCatchingLeaveAndClose() {
+        runCatching { leaveAndClose() }
     }
 
     private data class ActiveCall(
@@ -685,6 +729,19 @@ class NativeMatrixRtcCallService(
             }
         }
     }
+}
+
+private fun MatrixRtcCallMembership.isNativeAudioCallIntent(): Boolean {
+    return when (callIntent) {
+        null,
+        NativeMatrixRtcCallService.AUDIO_CALL_INTENT,
+        "m.audio" -> true
+        else -> false
+    }
+}
+
+private fun MatrixRtcCallMembership.isOwnDevice(ownDevice: MatrixRtcOwnDevice): Boolean {
+    return userId == ownDevice.userId && deviceId == ownDevice.deviceId
 }
 
 private fun MatrixRtcCallMembership.debugSummary(): String {

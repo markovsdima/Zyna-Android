@@ -414,7 +414,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         matrixMediaLoader = actions.matrixMediaLoader,
                         audioPlaybackController = actions.audioPlaybackController,
                         voiceRecorderController = actions.voiceRecorderController,
-                        jumpTargetEventId = state.chatJumpTargetEventId
+                        jumpTargetEventId = state.chatJumpTargetEventId,
+                        callBanner = state.chatCallBanner
                     ),
                     actions = ChatScreenViewActions(
                         onRefresh = actions.onRefreshChat,

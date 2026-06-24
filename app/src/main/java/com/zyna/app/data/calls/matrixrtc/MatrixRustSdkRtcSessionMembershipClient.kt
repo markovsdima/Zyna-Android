@@ -8,6 +8,8 @@ class MatrixRustSdkRtcSessionMembershipClient(
     private val roomVersion: String? = null,
     private val timestampProvider: () -> Long = { System.currentTimeMillis() }
 ) : MatrixRtcSessionMembershipClient {
+    private var closed = false
+
     override suspend fun publishOwnLegacyMembership(
         slot: MatrixRtcSlotDescription,
         roomVersion: String?,
@@ -95,5 +97,12 @@ class MatrixRustSdkRtcSessionMembershipClient(
     override suspend fun cancelDelayedEvent(delayId: String) {
         membershipClient.cancelDelayedEvent(delayId)
     }
-}
 
+    override fun close() {
+        if (closed) {
+            return
+        }
+        closed = true
+        room.destroy()
+    }
+}

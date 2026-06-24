@@ -65,9 +65,12 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(MatrixRtcCallNotificationType.NOTIFICATION, notificationClient.requests.single().notificationType)
         assertEquals("audio", notificationClient.requests.single().callIntent)
         assertEquals(notificationClient.result, result.callNotification)
+        assertEquals(1, notificationClient.closeCount)
+        assertEquals(0, membershipClient.closeCount)
 
         assertEquals(true, service.leaveActiveCall())
         assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
+        assertEquals(1, membershipClient.closeCount)
     }
 
     @Test
@@ -103,6 +106,7 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(listOf("own-key"), environment.liveKitSessions.single().keyApplier.appliedKeys.map { it.keyBase64Encoded })
 
         assertEquals(true, service.leaveActiveCall())
+        assertEquals(1, membershipClient.closeCount)
     }
 
     @Test
@@ -126,6 +130,7 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(listOf(true), environment.liveKitSessions.single().controller.microphoneHistory)
 
         assertEquals(true, service.leaveActiveCall())
+        assertEquals(1, membershipClient.closeCount)
     }
 
     @Test
@@ -144,6 +149,79 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(NativeMatrixRtcCallServiceException.MissingLiveKitTransport, service.currentFailure())
         assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
         assertNull(service.currentRoomId())
+    }
+
+    @Test
+    fun loadRoomCallStatusReportsJoinableRemoteAudioMemberships() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        val ownMembership = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000,
+            callIntent = "audio"
+        )
+        val bobMembership = nativeMembership(
+            eventId = "\$bob",
+            sender = "@bob:example.org",
+            deviceId = "BOBDEVICE",
+            createdTimestamp = 20_000,
+            callIntent = "m.audio"
+        )
+        val carolVideoMembership = nativeMembership(
+            eventId = "\$carol",
+            sender = "@carol:example.org",
+            deviceId = "CAROLDEVICE",
+            createdTimestamp = 30_000,
+            callIntent = "m.video"
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(
+            listOf(ownMembership, bobMembership, carolVideoMembership)
+        )
+        val service = nativeService(
+            environment = environment,
+            timestampProvider = { 40_000 }
+        )
+
+        val status = service.loadRoomCallStatus(ROOM_ID)
+
+        assertEquals(ROOM_ID, status.roomId)
+        assertEquals(true, status.hasJoinableCall)
+        assertEquals(1, status.remoteMembershipCount)
+        assertEquals(40_000, status.checkedAtMillis)
+        assertEquals(1, membershipClient.loadCount)
+        assertEquals(1, membershipClient.closeCount)
+    }
+
+    @Test
+    fun loadRoomCallStatusIgnoresOwnAndNonAudioMemberships() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        val ownMembership = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000,
+            memberId = "rtc-own-member-id"
+        )
+        val bobVideoMembership = nativeMembership(
+            eventId = "\$bob",
+            sender = "@bob:example.org",
+            deviceId = "BOBDEVICE",
+            createdTimestamp = 20_000,
+            callIntent = "m.video"
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(
+            listOf(ownMembership, bobVideoMembership)
+        )
+        val service = nativeService(environment)
+
+        val status = service.loadRoomCallStatus(ROOM_ID)
+
+        assertEquals(false, status.hasJoinableCall)
+        assertEquals(0, status.remoteMembershipCount)
+        assertEquals(1, membershipClient.closeCount)
     }
 
     @Test
@@ -360,12 +438,14 @@ class NativeMatrixRtcCallServiceTest {
         sender: String,
         deviceId: String,
         createdTimestamp: Long,
-        expires: Long = MatrixRtcCallMembership.DEFAULT_EXPIRE_DURATION_MILLIS
+        expires: Long = MatrixRtcCallMembership.DEFAULT_EXPIRE_DURATION_MILLIS,
+        memberId: String = "$sender:$deviceId",
+        callIntent: String? = null
     ): MatrixRtcCallMembership {
         val identity = MatrixRtcMembershipIdentity(
             userId = sender,
             deviceId = deviceId,
-            memberId = "$sender:$deviceId"
+            memberId = memberId
         )
         return MatrixRtcCallMembership(
             kind = MatrixRtcCallMembership.Kind.LEGACY_STATE,
@@ -380,7 +460,7 @@ class NativeMatrixRtcCallServiceTest {
             rtcBackendIdentity = identity.legacyRtcBackendIdentity,
             transports = emptyList(),
             focusSelection = MatrixRtcLegacyCallMembershipFocusSelection.OLDEST_MEMBERSHIP.wireValue,
-            callIntent = null
+            callIntent = callIntent
         )
     }
 
@@ -532,6 +612,7 @@ private class FakeNativeSessionMembershipClient : MatrixRtcSessionMembershipClie
     var publishCount = 0
     var loadCount = 0
     var leaveCount = 0
+    var closeCount = 0
     var publishedFociPreferred: List<MatrixRtcTransport>? = null
     var publishedCallIntent: String? = null
 
@@ -571,6 +652,10 @@ private class FakeNativeSessionMembershipClient : MatrixRtcSessionMembershipClie
     ): String {
         leaveCount += 1
         return "\$leave"
+    }
+
+    override fun close() {
+        closeCount += 1
     }
 }
 
@@ -675,6 +760,7 @@ private class FakeNativeCallNotificationClient : MatrixRtcCallNotificationClient
         lifetimeMillis = 60_000
     )
     var requests: List<FakeCallNotificationRequest> = emptyList()
+    var closeCount = 0
 
     override suspend fun sendCallNotification(
         parentEventId: String,
@@ -689,6 +775,10 @@ private class FakeNativeCallNotificationClient : MatrixRtcCallNotificationClient
             callIntent = callIntent
         )
         return result.copy(notificationType = notificationType)
+    }
+
+    override fun close() {
+        closeCount += 1
     }
 }
 

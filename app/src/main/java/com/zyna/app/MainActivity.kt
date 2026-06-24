@@ -98,7 +98,8 @@ class MainActivity : ComponentActivity() {
                 matrixClientService = appContainer.matrixClientService,
                 localCacheRepository = appContainer.localCacheRepository,
                 outgoingOutboxService = appContainer.outgoingOutboxService,
-                matrixMediaLoader = appContainer.matrixMediaLoader
+                matrixMediaLoader = appContainer.matrixMediaLoader,
+                nativeMatrixRtcCallService = appContainer.nativeMatrixRtcCallService
             )
         )[AppViewModel::class.java]
 
@@ -603,7 +604,13 @@ class MainActivity : ComponentActivity() {
         preferMaxRefreshRate()
     }
 
+    override fun onStart() {
+        super.onStart()
+        appViewModel.setChatCallStatusPollingEnabled(true)
+    }
+
     override fun onStop() {
+        appViewModel.setChatCallStatusPollingEnabled(false)
         stopActiveVoiceRecordingToPreviewForBackground()
         super.onStop()
     }

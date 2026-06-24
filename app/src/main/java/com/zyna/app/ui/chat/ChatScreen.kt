@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
@@ -37,6 +38,7 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.ui.app.ChatCallBannerState
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -84,7 +86,8 @@ data class ChatScreenViewState(
     val matrixMediaLoader: MatrixMediaLoader?,
     val audioPlaybackController: AudioPlaybackController?,
     val voiceRecorderController: VoiceRecorderController?,
-    val jumpTargetEventId: String?
+    val jumpTargetEventId: String?,
+    val callBanner: ChatCallBannerState?
 )
 
 data class ChatScreenViewActions(
@@ -202,6 +205,28 @@ internal class ChatScreenView(
         isClickable = true
         isFocusable = true
     }
+    private val activeCallBanner = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        isClickable = true
+        isFocusable = true
+    }
+    private val activeCallAccent = View(context)
+    private val activeCallTitle = TextView(context).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val activeCallAction = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+        isClickable = true
+        isFocusable = true
+    }
     private val contentFrame = FrameLayout(context)
     private val chatLayoutStart = ZynaPerfLog.start()
     private val chatLayout = GlassChatLayout(
@@ -281,6 +306,39 @@ internal class ChatScreenView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        activeCallBanner.setPadding(dp(16), 0, dp(16), 0)
+        activeCallBanner.addView(
+            activeCallAccent,
+            LinearLayout.LayoutParams(
+                dp(10),
+                dp(10)
+            )
+        )
+        activeCallBanner.addView(
+            activeCallTitle,
+            LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                1f
+            ).apply {
+                leftMargin = dp(12)
+                rightMargin = dp(12)
+            }
+        )
+        activeCallBanner.addView(
+            activeCallAction,
+            LinearLayout.LayoutParams(
+                dp(80),
+                dp(34)
+            )
+        )
+        root.addView(
+            activeCallBanner,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(ACTIVE_CALL_BANNER_HEIGHT_DP)
+            )
+        )
         root.addView(
             contentFrame,
             LinearLayout.LayoutParams(
@@ -329,6 +387,7 @@ internal class ChatScreenView(
             }
             insets
         }
+        applyNativeColors()
         ZynaPerfLog.end(initStart, "chatView.init.done")
     }
 
@@ -366,6 +425,7 @@ internal class ChatScreenView(
         subtitleText.text = state.roomId
         backButton.setOnClickListener { actions.onBack() }
         callButton.setOnClickListener { actions.onStartCall() }
+        renderActiveCallBanner(state.callBanner, actions)
         refreshButton.text = if (state.isLoading) "Loading" else "Refresh"
         refreshButton.isEnabled = !state.isLoading
         refreshButton.alpha = if (state.isLoading) 0.54f else 1f
@@ -394,6 +454,25 @@ internal class ChatScreenView(
         ) {
             "roomId=${state.roomId} messages=${state.messages.size}"
         }
+    }
+
+    private fun renderActiveCallBanner(
+        banner: ChatCallBannerState?,
+        actions: ChatScreenViewActions
+    ) {
+        if (banner == null) {
+            activeCallBanner.visibility = View.GONE
+            activeCallBanner.setOnClickListener(null)
+            activeCallAction.setOnClickListener(null)
+            return
+        }
+
+        activeCallTitle.text = banner.title
+        activeCallAction.text = banner.actionLabel
+        activeCallBanner.visibility = View.VISIBLE
+        activeCallBanner.contentDescription = "${banner.title}. ${banner.actionLabel}"
+        activeCallBanner.setOnClickListener { actions.onStartCall() }
+        activeCallAction.setOnClickListener { actions.onStartCall() }
     }
 
     private fun renderChatLayout(
@@ -812,8 +891,26 @@ internal class ChatScreenView(
         titleText.setTextColor(nativeColors.titleText)
         subtitleText.setTextColor(nativeColors.subtitleText)
         refreshButton.setTextColor(nativeColors.actionText)
+        activeCallBanner.setBackgroundColor(nativeColors.callBannerBackground)
+        activeCallAccent.background = roundedDrawable(
+            color = nativeColors.callBannerAccent,
+            radiusPx = dp(5)
+        )
+        activeCallTitle.setTextColor(nativeColors.callBannerText)
+        activeCallAction.setTextColor(nativeColors.callBannerActionText)
+        activeCallAction.background = roundedDrawable(
+            color = nativeColors.callBannerActionBackground,
+            radiusPx = dp(17)
+        )
         errorView.setTextColor(sendErrorColor)
         chatLayout.setPalette(palette)
+    }
+
+    private fun roundedDrawable(color: Int, radiusPx: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusPx.toFloat()
+        }
     }
 
     private fun dp(value: Int): Int {
@@ -1047,7 +1144,12 @@ private data class NativeChatColors(
     val actionText: Int,
     val titleText: Int,
     val subtitleText: Int,
-    val sendError: Int
+    val sendError: Int,
+    val callBannerBackground: Int,
+    val callBannerAccent: Int,
+    val callBannerText: Int,
+    val callBannerActionBackground: Int,
+    val callBannerActionText: Int
 )
 
 private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
@@ -1072,7 +1174,12 @@ private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
             actionText = Color.rgb(208, 188, 255),
             titleText = Color.rgb(232, 225, 229),
             subtitleText = Color.rgb(202, 196, 208),
-            sendError = Color.rgb(255, 180, 171)
+            sendError = Color.rgb(255, 180, 171),
+            callBannerBackground = Color.rgb(29, 34, 30),
+            callBannerAccent = Color.rgb(88, 191, 107),
+            callBannerText = Color.rgb(232, 245, 234),
+            callBannerActionBackground = Color.rgb(52, 168, 83),
+            callBannerActionText = Color.WHITE
         )
     } else {
         NativeChatColors(
@@ -1095,7 +1202,12 @@ private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
             actionText = Color.rgb(33, 0, 93),
             titleText = Color.rgb(29, 27, 32),
             subtitleText = Color.rgb(73, 69, 79),
-            sendError = Color.rgb(186, 26, 26)
+            sendError = Color.rgb(186, 26, 26),
+            callBannerBackground = Color.rgb(240, 248, 241),
+            callBannerAccent = Color.rgb(42, 145, 64),
+            callBannerText = Color.rgb(21, 45, 27),
+            callBannerActionBackground = Color.rgb(42, 145, 64),
+            callBannerActionText = Color.WHITE
         )
     }
 }
@@ -1648,6 +1760,7 @@ private const val MEDIA_PREFETCH_MIN_HEIGHT_DP = 128
 private const val MEDIA_PREFETCH_MAX_HEIGHT_DP = 390
 private const val MEDIA_PREFETCH_TILE_SPACING_DP = 2
 private const val NATIVE_TOP_BAR_HEIGHT_DP = 64
+private const val ACTIVE_CALL_BANNER_HEIGHT_DP = 48
 private const val FNV_64_OFFSET_BASIS = -3750763034362895579L
 private const val FNV_64_PRIME = 1099511628211L
 

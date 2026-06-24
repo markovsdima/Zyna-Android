@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-interface MatrixRtcSessionMembershipClient {
+interface MatrixRtcSessionMembershipClient : AutoCloseable {
     suspend fun publishOwnLegacyMembership(
         slot: MatrixRtcSlotDescription,
         roomVersion: String?,
@@ -52,6 +52,8 @@ interface MatrixRtcSessionMembershipClient {
     suspend fun cancelDelayedEvent(delayId: String) {
         throw MatrixRtcSessionDelayedEventException.Unsupported
     }
+
+    override fun close() = Unit
 }
 
 enum class MatrixRtcSessionState {
@@ -441,7 +443,11 @@ class MatrixRtcSession(
         stopMembershipExpiryRefresh()
         stopDelayedLeaveRefresh()
         withStateLock { mediaKeyManager }?.stop()
-        coroutineScope.cancel()
+        try {
+            membershipClient.close()
+        } finally {
+            coroutineScope.cancel()
+        }
     }
 
     private fun startMembershipExpiryRefresh() {

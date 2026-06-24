@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
@@ -76,7 +77,8 @@ data class AppUiState(
     val pendingForwardTarget: MatrixForwardTarget? = null,
     val forwardReturnRoute: AppRoute? = null,
     val chatJumpTargetEventId: String? = null,
-    val chatScrollToLiveEdgeRequested: Boolean = false
+    val chatScrollToLiveEdgeRequested: Boolean = false,
+    val chatCallBanner: ChatCallBannerState? = null
 ) {
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -85,6 +87,13 @@ data class AppUiState(
     val errorMessage: String?
         get() = (matrixState as? MatrixClientState.Error)?.message
 }
+
+data class ChatCallBannerState(
+    val title: String,
+    val actionLabel: String,
+    val isLocalCall: Boolean,
+    val remoteMembershipCount: Int = 0
+)
 
 private data class VisibleReadReceiptTarget(
     val roomId: String,
@@ -107,7 +116,8 @@ class AppViewModel(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
     private val outgoingOutboxService: OutgoingOutboxService,
-    private val matrixMediaLoader: MatrixMediaLoader
+    private val matrixMediaLoader: MatrixMediaLoader,
+    private val nativeMatrixRtcCallService: NativeMatrixRtcCallService
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -123,6 +133,10 @@ class AppViewModel(
     private var readReceiptJob: Job? = null
     private var readReceiptBaselineTarget: VisibleReadReceiptTarget? = null
     private var pendingReadReceiptSend: PendingReadReceiptSend? = null
+    private var chatCallStatusJob: Job? = null
+    private var chatCallStatusUserId: String? = null
+    private var chatCallStatusRoomId: String? = null
+    private var chatCallStatusPollingEnabled: Boolean = false
 
     init {
         outgoingOutboxService.start(viewModelScope)
@@ -219,7 +233,8 @@ class AppViewModel(
                             false
                         } else {
                             current.chatScrollToLiveEdgeRequested
-                        }
+                        },
+                        chatCallBanner = if (shouldClearChat) null else current.chatCallBanner
                     )
                 }
 
@@ -356,6 +371,7 @@ class AppViewModel(
                 forwardTarget = forwardTarget
             )
         }
+        startChatCallStatusPolling(userId, room.id)
         ZynaPerfLog.end(routeUpdateStart, "openRoom.routeUpdate") {
             "roomId=${room.id}"
         }
@@ -450,8 +466,21 @@ class AppViewModel(
                 pendingForwardTarget = null,
                 forwardReturnRoute = null,
                 chatJumpTargetEventId = null,
-                chatScrollToLiveEdgeRequested = false
+                chatScrollToLiveEdgeRequested = false,
+                chatCallBanner = null
             )
+        }
+    }
+
+    fun setChatCallStatusPollingEnabled(enabled: Boolean) {
+        if (chatCallStatusPollingEnabled == enabled) {
+            return
+        }
+        chatCallStatusPollingEnabled = enabled
+        if (enabled) {
+            startChatCallStatusPollingJobForTarget()
+        } else {
+            pauseChatCallStatusPolling()
         }
     }
 
@@ -1602,7 +1631,83 @@ class AppViewModel(
         chatTimelineWindowStore = null
         chatPaginationJob?.cancel()
         chatPaginationJob = null
+        clearChatCallStatusPolling()
         resetReadReceiptTracking()
+    }
+
+    private fun startChatCallStatusPolling(userId: String, roomId: String) {
+        if (
+            chatCallStatusUserId == userId &&
+            chatCallStatusRoomId == roomId &&
+            chatCallStatusJob?.isActive == true
+        ) {
+            return
+        }
+
+        pauseChatCallStatusPolling()
+        chatCallStatusUserId = userId
+        chatCallStatusRoomId = roomId
+        startChatCallStatusPollingJobForTarget()
+    }
+
+    private fun startChatCallStatusPollingJobForTarget() {
+        if (!chatCallStatusPollingEnabled || chatCallStatusJob?.isActive == true) {
+            return
+        }
+        val userId = chatCallStatusUserId ?: return
+        val roomId = chatCallStatusRoomId ?: return
+        chatCallStatusJob = viewModelScope.launch {
+            while (true) {
+                refreshChatCallBanner(userId, roomId)
+                delay(CHAT_CALL_STATUS_POLL_MS)
+            }
+        }
+    }
+
+    private fun pauseChatCallStatusPolling() {
+        chatCallStatusJob?.cancel()
+        chatCallStatusJob = null
+    }
+
+    private fun clearChatCallStatusPolling() {
+        pauseChatCallStatusPolling()
+        chatCallStatusUserId = null
+        chatCallStatusRoomId = null
+        _uiState.update { it.copy(chatCallBanner = null) }
+    }
+
+    private suspend fun refreshChatCallBanner(userId: String, roomId: String) {
+        val localCallRoomId = nativeMatrixRtcCallService.currentRoomId()
+        val status = try {
+            nativeMatrixRtcCallService.loadRoomCallStatus(roomId)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to refresh MatrixRTC room call status", error)
+            null
+        }
+        val banner = when {
+            localCallRoomId == roomId -> ChatCallBannerState(
+                title = "Call in progress",
+                actionLabel = "Return",
+                isLocalCall = true,
+                remoteMembershipCount = status?.remoteMembershipCount ?: 0
+            )
+            status?.hasJoinableCall == true -> ChatCallBannerState(
+                title = "Call in progress",
+                actionLabel = "Join",
+                isLocalCall = false,
+                remoteMembershipCount = status.remoteMembershipCount
+            )
+            else -> null
+        }
+        _uiState.update {
+            if (!it.isRouteForRoom(userId, roomId)) {
+                it
+            } else {
+                it.copy(chatCallBanner = banner)
+            }
+        }
     }
 
     private fun scheduleReadReceiptSend(
@@ -1804,7 +1909,8 @@ class AppViewModel(
             pendingForwardTarget = null,
             forwardReturnRoute = null,
             chatJumpTargetEventId = null,
-            chatScrollToLiveEdgeRequested = false
+            chatScrollToLiveEdgeRequested = false,
+            chatCallBanner = null
         )
     }
 
@@ -1860,6 +1966,7 @@ class AppViewModel(
         const val TAG = "AppViewModel"
         const val TELEPORT_LOG_TAG = "ZynaChatTeleport"
         const val READ_RECEIPT_SEND_DELAY_MS = 250L
+        const val CHAT_CALL_STATUS_POLL_MS = 3_000L
         const val JUMP_PAGINATION_ATTEMPTS = 8
     }
 }
@@ -1872,7 +1979,8 @@ class AppViewModelFactory(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
     private val outgoingOutboxService: OutgoingOutboxService,
-    private val matrixMediaLoader: MatrixMediaLoader
+    private val matrixMediaLoader: MatrixMediaLoader,
+    private val nativeMatrixRtcCallService: NativeMatrixRtcCallService
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
@@ -1881,7 +1989,8 @@ class AppViewModelFactory(
                 matrixClientService = matrixClientService,
                 localCacheRepository = localCacheRepository,
                 outgoingOutboxService = outgoingOutboxService,
-                matrixMediaLoader = matrixMediaLoader
+                matrixMediaLoader = matrixMediaLoader,
+                nativeMatrixRtcCallService = nativeMatrixRtcCallService
             ) as T
         }
         error("Unknown ViewModel class: ${modelClass.name}")

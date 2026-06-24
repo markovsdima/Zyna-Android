@@ -178,19 +178,23 @@ data class MatrixRtcCallNotificationSendResult(
     val lifetimeMillis: Long
 )
 
-interface MatrixRtcCallNotificationClient {
+interface MatrixRtcCallNotificationClient : AutoCloseable {
     suspend fun sendCallNotification(
         parentEventId: String,
         slot: MatrixRtcSlotDescription = MatrixRtcSlotDescription.MATRIX_CALL_ROOM,
         notificationType: MatrixRtcCallNotificationType = MatrixRtcCallNotificationType.RING,
         callIntent: String? = null
     ): MatrixRtcCallNotificationSendResult
+
+    override fun close() = Unit
 }
 
 class MatrixRustSdkRtcCallNotificationClient(
     private val room: Room,
     private val timestampProvider: () -> Long = { System.currentTimeMillis() }
 ) : MatrixRtcCallNotificationClient {
+    private var closed = false
+
     override suspend fun sendCallNotification(
         parentEventId: String,
         slot: MatrixRtcSlotDescription,
@@ -247,6 +251,14 @@ class MatrixRustSdkRtcCallNotificationClient(
             senderTimestamp = content.senderTimestamp,
             lifetimeMillis = content.lifetime
         )
+    }
+
+    override fun close() {
+        if (closed) {
+            return
+        }
+        closed = true
+        room.destroy()
     }
 }
 

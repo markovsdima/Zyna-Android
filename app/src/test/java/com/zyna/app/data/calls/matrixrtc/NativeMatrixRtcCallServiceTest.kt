@@ -2,8 +2,10 @@ package com.zyna.app.data.calls.matrixrtc
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -204,6 +206,133 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun autoLeavesCallWhenRemoteParticipantLeavesAndMembershipIsGone() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        val ownMembership = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        val bobMembership = nativeMembership(
+            eventId = "\$bob",
+            sender = "@bob:example.org",
+            deviceId = "BOBDEVICE",
+            createdTimestamp = 20_000
+        )
+        membershipClient.publishResult = ownMembership
+        membershipClient.activeMembershipResponses = mutableListOf(listOf(bobMembership), emptyList())
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this,
+            autoLeaveWhenOthersLeftDelaysMillis = listOf(0)
+        )
+
+        service.startAudioCall(roomId = ROOM_ID)
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE")
+            )
+        )
+        yield()
+        yield()
+
+        assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
+        assertNull(service.currentRoomId())
+        assertEquals(2, membershipClient.loadCount)
+        assertEquals(1, membershipClient.leaveCount)
+        assertEquals(1, membershipClient.closeCount)
+        assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
+        assertEquals(false, service.leaveActiveCall())
+    }
+
+    @Test
+    fun keepsCallWhenRemoteParticipantLeavesButMembershipStillExists() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        val ownMembership = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        val bobMembership = nativeMembership(
+            eventId = "\$bob",
+            sender = "@bob:example.org",
+            deviceId = "BOBDEVICE",
+            createdTimestamp = 20_000
+        )
+        membershipClient.publishResult = ownMembership
+        membershipClient.activeMembershipResponses = mutableListOf(listOf(bobMembership))
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this,
+            autoLeaveWhenOthersLeftDelaysMillis = listOf(0)
+        )
+
+        service.startAudioCall(roomId = ROOM_ID)
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE")
+            )
+        )
+        yield()
+        yield()
+
+        assertEquals(NativeMatrixRtcCallServiceState.CONNECTED, service.state.value)
+        assertEquals(2, membershipClient.loadCount)
+        assertEquals(0, membershipClient.leaveCount)
+        assertEquals(0, environment.liveKitSessions.single().controller.closeCount)
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
+    fun canDisableAutoLeaveWhenRemoteParticipantLeaves() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        val ownMembership = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        val bobMembership = nativeMembership(
+            eventId = "\$bob",
+            sender = "@bob:example.org",
+            deviceId = "BOBDEVICE",
+            createdTimestamp = 20_000
+        )
+        membershipClient.publishResult = ownMembership
+        membershipClient.activeMembershipResponses = mutableListOf(listOf(bobMembership), emptyList())
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this,
+            autoLeaveWhenOthersLeftDelaysMillis = listOf(0)
+        )
+
+        service.startAudioCall(
+            roomId = ROOM_ID,
+            autoLeaveWhenOthersLeft = false
+        )
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE")
+            )
+        )
+        yield()
+        yield()
+
+        assertEquals(NativeMatrixRtcCallServiceState.CONNECTED, service.state.value)
+        assertEquals(1, membershipClient.loadCount)
+        assertEquals(0, membershipClient.leaveCount)
+        assertEquals(0, environment.liveKitSessions.single().controller.closeCount)
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
     fun startAudioCallUsesUnencryptedSessionWhenRoomIsNotEncrypted() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         environment.encrypted = false
@@ -351,12 +480,23 @@ class NativeMatrixRtcCallServiceTest {
     private fun nativeService(
         environment: FakeNativeMatrixRtcCallEnvironment,
         keyGenerator: MatrixRtcMediaKeyGenerating = StaticNativeMediaKeyGenerator("own-key"),
-        timestampProvider: () -> Long = { 10_000 }
+        timestampProvider: () -> Long = { 10_000 },
+        coroutineScope: CoroutineScope? = null,
+        autoLeaveWhenOthersLeftDelaysMillis: List<Long> = listOf(800, 1_200, 2_000, 4_000, 8_000, 8_000)
     ): NativeMatrixRtcCallService {
         return NativeMatrixRtcCallService(
             environment = environment,
             keyGenerator = keyGenerator,
-            timestampProvider = timestampProvider
+            timestampProvider = timestampProvider,
+            coroutineScope = coroutineScope ?: CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default),
+            autoLeaveWhenOthersLeftDelaysMillis = autoLeaveWhenOthersLeftDelaysMillis
+        )
+    }
+
+    private fun remoteParticipant(identity: String): MatrixRtcLiveKitParticipantInfo {
+        return MatrixRtcLiveKitParticipantInfo(
+            identity = identity,
+            sid = "sid-$identity"
         )
     }
 

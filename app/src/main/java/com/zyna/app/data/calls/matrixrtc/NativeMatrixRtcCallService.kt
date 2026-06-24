@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,7 +64,8 @@ class NativeMatrixRtcCallService(
     private val timestampProvider: () -> Long = { System.currentTimeMillis() },
     private val onMediaKeyChanged: (MatrixRtcMediaKeyChangedEvent) -> Unit = {},
     private val onError: (Throwable) -> Unit = {},
-    private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val coroutineScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    private val autoLeaveWhenOthersLeftDelaysMillis: List<Long> = listOf(800, 1_200, 2_000, 4_000, 8_000, 8_000)
 ) {
     private val lock = Mutex()
     private val _state = MutableStateFlow(NativeMatrixRtcCallServiceState.IDLE)
@@ -76,11 +78,13 @@ class NativeMatrixRtcCallService(
     private var joiningCall: JoiningCall? = null
     private var activeAttemptId: String? = null
     private var activeRoomId: String? = null
+    private var autoLeaveWhenOthersLeftJob: Job? = null
 
     fun startAudioCallAsync(
         roomId: String,
         fallbackLiveKitServiceUrl: String? = null,
         waitForPickup: Boolean = false,
+        autoLeaveWhenOthersLeft: Boolean = true,
         onFailure: (Throwable) -> Unit = {}
     ): Job {
         return coroutineScope.launch {
@@ -88,7 +92,8 @@ class NativeMatrixRtcCallService(
                 startAudioCall(
                     roomId = roomId,
                     fallbackLiveKitServiceUrl = fallbackLiveKitServiceUrl,
-                    waitForPickup = waitForPickup
+                    waitForPickup = waitForPickup,
+                    autoLeaveWhenOthersLeft = autoLeaveWhenOthersLeft
                 )
             } catch (_: CancellationException) {
                 // A newer call or explicit leave took ownership of cleanup.
@@ -102,7 +107,8 @@ class NativeMatrixRtcCallService(
     suspend fun startAudioCall(
         roomId: String,
         fallbackLiveKitServiceUrl: String? = null,
-        waitForPickup: Boolean = false
+        waitForPickup: Boolean = false,
+        autoLeaveWhenOthersLeft: Boolean = true
     ): NativeMatrixRtcCallStartResult {
         val attemptId = beginJoining(roomId)
         var matrixRtcSession: MatrixRtcSession? = null
@@ -222,7 +228,8 @@ class NativeMatrixRtcCallService(
                 liveKitSession = liveKit,
                 discoveredTransport = discoveredTransport,
                 sfuConfig = sfuConfig,
-                mediaEncryptionEnabled = mediaEncryptionEnabled
+                mediaEncryptionEnabled = mediaEncryptionEnabled,
+                autoLeaveWhenOthersLeft = autoLeaveWhenOthersLeft
             )
             if (!finishJoined(call)) {
                 runCatching { liveKit.close() }
@@ -373,6 +380,10 @@ class NativeMatrixRtcCallService(
                 scheduleEndActiveCall(attemptId)
             is MatrixRtcLiveKitRoomSessionEvent.FailedToConnect ->
                 scheduleEndActiveCall(attemptId)
+            is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft ->
+                scheduleAutoLeaveWhenOthersLeftCheck(attemptId)
+            is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined ->
+                cancelAutoLeaveWhenOthersLeftCheck(attemptId)
             else -> Unit
         }
 
@@ -434,6 +445,103 @@ class NativeMatrixRtcCallService(
                         )
                     }
             }.onFailure(onError)
+        }
+    }
+
+    private fun scheduleAutoLeaveWhenOthersLeftCheck(attemptId: String) {
+        coroutineScope.launch {
+            val currentJob = coroutineContext[Job]
+            var shouldCheck = false
+            val previousJob = lock.withLock {
+                val call = activeCall
+                if (
+                    call?.attemptId != attemptId ||
+                    !call.autoLeaveWhenOthersLeft ||
+                    _state.value != NativeMatrixRtcCallServiceState.CONNECTED
+                ) {
+                    null
+                } else {
+                    shouldCheck = true
+                    val previousJob = autoLeaveWhenOthersLeftJob
+                    autoLeaveWhenOthersLeftJob = currentJob
+                    previousJob
+                }
+            }
+            if (!shouldCheck) {
+                return@launch
+            }
+            previousJob?.cancel()
+            autoLeaveWhenOthersLeftIfConfirmed(attemptId)
+        }
+    }
+
+    private fun cancelAutoLeaveWhenOthersLeftCheck(attemptId: String) {
+        coroutineScope.launch {
+            val job = lock.withLock {
+                if (activeCall?.attemptId != attemptId) {
+                    null
+                } else {
+                    val job = autoLeaveWhenOthersLeftJob
+                    autoLeaveWhenOthersLeftJob = null
+                    job
+                }
+            }
+            job?.cancel()
+        }
+    }
+
+    private suspend fun autoLeaveWhenOthersLeftIfConfirmed(attemptId: String) {
+        for ((attemptIndex, delayMillis) in autoLeaveWhenOthersLeftDelaysMillis.withIndex()) {
+            if (!isAutoLeaveWhenOthersLeftCheckNeeded(attemptId)) {
+                return
+            }
+            delay(delayMillis)
+            if (!isAutoLeaveWhenOthersLeftCheckNeeded(attemptId)) {
+                return
+            }
+
+            val call = currentActiveCallByAttempt(attemptId) ?: return
+            if (!call.autoLeaveWhenOthersLeft) {
+                return
+            }
+
+            try {
+                val result = call.matrixRtcSession.refreshMemberships(distributeKeys = false)
+                if (!isAutoLeaveWhenOthersLeftCheckNeeded(attemptId)) {
+                    return
+                }
+                if (!containsRemoteMembership(result.memberships, call.ownUserId)) {
+                    MatrixRtcCallDebugLog.d(
+                        "nativeCallAutoLeaveConfirmed attemptId=$attemptId " +
+                            "memberships=${result.memberships.joinToString { it.debugSummary() }}"
+                    )
+                    endActiveCall(attemptId)
+                    return
+                }
+
+                MatrixRtcCallDebugLog.d(
+                    "nativeCallAutoLeaveRemoteMembershipStillActive attemptId=$attemptId " +
+                        "attempt=${attemptIndex + 1} memberships=${result.memberships.size}"
+                )
+            } catch (_: CancellationException) {
+                return
+            } catch (error: Throwable) {
+                MatrixRtcCallDebugLog.d(
+                    "nativeCallAutoLeaveCheckFailed attemptId=$attemptId attempt=${attemptIndex + 1}",
+                    error
+                )
+                onError(error)
+            }
+        }
+
+        MatrixRtcCallDebugLog.d("nativeCallAutoLeaveSkipped attemptId=$attemptId")
+    }
+
+    private suspend fun isAutoLeaveWhenOthersLeftCheckNeeded(attemptId: String): Boolean {
+        return lock.withLock {
+            activeCall?.attemptId == attemptId &&
+                activeCall?.autoLeaveWhenOthersLeft == true &&
+                _state.value == NativeMatrixRtcCallServiceState.CONNECTED
         }
     }
 
@@ -557,6 +665,7 @@ class NativeMatrixRtcCallService(
             activeRoomId = null
             activeCall = null
             joiningCall = null
+            autoLeaveWhenOthersLeftJob = null
             _microphoneEnabled.value = true
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
@@ -597,6 +706,7 @@ class NativeMatrixRtcCallService(
             activeRoomId = null
             activeCall = null
             joiningCall = null
+            autoLeaveWhenOthersLeftJob = null
             _microphoneEnabled.value = true
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
@@ -632,7 +742,8 @@ class NativeMatrixRtcCallService(
         val liveKitSession: MatrixRtcLiveKitRoomSession,
         val discoveredTransport: MatrixRtcLiveKitDiscoveredTransport,
         val sfuConfig: MatrixRtcLiveKitSfuConfig,
-        val mediaEncryptionEnabled: Boolean
+        val mediaEncryptionEnabled: Boolean,
+        val autoLeaveWhenOthersLeft: Boolean
     )
 
     private data class JoiningCall(
@@ -676,6 +787,13 @@ class NativeMatrixRtcCallService(
                     membership.deviceId != ownMembership.deviceId ||
                     membership.memberId != ownMembership.memberId
             }
+        }
+
+        fun containsRemoteMembership(
+            memberships: List<MatrixRtcCallMembership>,
+            ownUserId: String
+        ): Boolean {
+            return memberships.any { membership -> membership.userId != ownUserId }
         }
 
         fun membershipRefreshReason(event: MatrixRtcLiveKitRoomSessionEvent): String? {

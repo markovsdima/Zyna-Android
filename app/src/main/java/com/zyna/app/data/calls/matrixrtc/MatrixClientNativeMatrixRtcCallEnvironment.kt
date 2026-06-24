@@ -42,4 +42,16 @@ class MatrixClientNativeMatrixRtcCallEnvironment(
     override fun callNotificationClient(roomId: String): MatrixRtcCallNotificationClient {
         return matrixClientService.matrixRtcCallNotificationClient(roomId)
     }
+
+    override fun subscribeToCallDeclineEvents(
+        roomId: String,
+        notificationEventId: String,
+        onDecline: (declinerUserId: String) -> Unit
+    ): MatrixRtcCancellable {
+        return matrixClientService.subscribeToMatrixRtcCallDeclineEvents(
+            roomId = roomId,
+            notificationEventId = notificationEventId,
+            onDecline = onDecline
+        )
+    }
 }

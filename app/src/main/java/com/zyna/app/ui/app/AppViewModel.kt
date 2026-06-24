@@ -112,6 +112,7 @@ private data class ChatMatrixRtcRingOverride(
 )
 
 private data class ChatCallInfoSnapshot(
+    val roomInfo: MatrixRoomCallInfo,
     val observed: MatrixRoomCallInfo,
     val ringOverride: ChatMatrixRtcRingOverride?
 )
@@ -1680,6 +1681,7 @@ class AppViewModel(
             val membershipFallback = MutableStateFlow<MatrixRoomCallInfo?>(null)
             var lastObservedCallInfo: MatrixRoomCallInfo? = null
             var lastRoomInfoHasCall = false
+            var hasObservedRoomInfoActiveCall = false
             var membershipFallbackRefreshJob: Job? = null
             var membershipFallbackValidationJob: Job? = null
             var ringExpiryJob: Job? = null
@@ -1702,7 +1704,7 @@ class AppViewModel(
                 fallback: MatrixRoomCallInfo?,
                 reason: String
             ) {
-                if (lastRoomInfoHasCall) {
+                if (lastRoomInfoHasCall || hasObservedRoomInfoActiveCall) {
                     membershipFallback.value = null
                     return
                 }
@@ -1743,7 +1745,19 @@ class AppViewModel(
             fun handleRoomInfoForMembershipFallback(callInfo: MatrixRoomCallInfo) {
                 lastRoomInfoHasCall = callInfo.hasRoomCall
                 if (callInfo.hasRoomCall) {
+                    hasObservedRoomInfoActiveCall = true
                     membershipFallback.value = null
+                    membershipFallbackRefreshJob?.cancel()
+                    membershipFallbackRefreshJob = null
+                    membershipFallbackValidationJob?.cancel()
+                    membershipFallbackValidationJob = null
+                    return
+                }
+
+                if (hasObservedRoomInfoActiveCall) {
+                    membershipFallback.value = null
+                    membershipFallbackRefreshJob?.cancel()
+                    membershipFallbackRefreshJob = null
                     membershipFallbackValidationJob?.cancel()
                     membershipFallbackValidationJob = null
                     return
@@ -1860,12 +1874,7 @@ class AppViewModel(
                 }
 
                 if (currentOverride.hasObservedActiveCall) {
-                    scheduleRingOverrideValidation(
-                        eventId = currentOverride.eventId,
-                        senderId = currentOverride.senderId,
-                        reason = "roomCallEnded",
-                        delayMillis = RING_OVERRIDE_ENDED_VALIDATION_DELAY_MS
-                    )
+                    clearRingOverride(reason = "roomCallEnded", eventId = currentOverride.eventId)
                 }
             }
 
@@ -1929,13 +1938,14 @@ class AppViewModel(
                     membershipFallback
                 ) { callInfo, _, override, fallback ->
                     ChatCallInfoSnapshot(
+                        roomInfo = callInfo,
                         observed = mergeMembershipFallback(callInfo, fallback),
                         ringOverride = override
                     )
                 }
                     .collect { snapshot ->
                         handleRingOverrideSideEffects(
-                            observed = snapshot.observed,
+                            observed = snapshot.roomInfo,
                             override = snapshot.ringOverride
                         )
                         val callInfo = effectiveCallInfo(
@@ -2319,7 +2329,6 @@ class AppViewModel(
         const val READ_RECEIPT_SEND_DELAY_MS = 250L
         const val MEMBERSHIP_FALLBACK_VALIDATION_DELAY_MS = 10_000L
         const val RING_OVERRIDE_MEMBERSHIP_CONFIRMATION_DELAY_MS = 2_500L
-        const val RING_OVERRIDE_ENDED_VALIDATION_DELAY_MS = 800L
         const val JUMP_PAGINATION_ATTEMPTS = 8
     }
 }

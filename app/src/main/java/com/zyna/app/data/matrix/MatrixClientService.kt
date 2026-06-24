@@ -3,6 +3,7 @@ package com.zyna.app.data.matrix
 import android.content.Context
 import android.util.Log
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCancellable
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCustomToDeviceEncrypting
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcOwnDevice
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
@@ -43,6 +44,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.matrix.rustcomponents.sdk.CallDeclineListener
 import org.matrix.rustcomponents.sdk.DateDividerMode
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
@@ -441,6 +443,46 @@ class MatrixClientService(
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         return MatrixRustSdkRtcCallNotificationClient(room)
+    }
+
+    fun subscribeToMatrixRtcCallDeclineEvents(
+        roomId: String,
+        notificationEventId: String,
+        onDecline: (declinerUserId: String) -> Unit
+    ): MatrixRtcCancellable {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        var handle: TaskHandle? = null
+        try {
+            handle = room.subscribeToCallDeclineEvents(
+                rtcNotificationEventId = notificationEventId,
+                listener = object : CallDeclineListener {
+                    override fun call(declinerUserId: String) {
+                        onDecline(declinerUserId)
+                    }
+                }
+            )
+            return object : MatrixRtcCancellable {
+                private val didCancel = AtomicBoolean(false)
+
+                override fun cancel() {
+                    if (didCancel.compareAndSet(false, true)) {
+                        try {
+                            handle?.cancelAndDestroy()
+                        } finally {
+                            room.destroy()
+                        }
+                    }
+                }
+            }
+        } catch (error: Throwable) {
+            try {
+                handle?.cancelAndDestroy()
+            } finally {
+                room.destroy()
+            }
+            throw error
+        }
     }
 
     fun matrixRtcSessionMembershipClient(roomId: String): MatrixRustSdkRtcSessionMembershipClient {

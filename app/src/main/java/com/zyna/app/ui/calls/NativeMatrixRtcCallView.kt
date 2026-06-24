@@ -361,6 +361,11 @@ internal class NativeMatrixRtcCallController(
                     renderConnected()
                 }
             }
+            is NativeMatrixRtcCallPickupState.Declined -> {
+                if (isPickupStateRelevant(pickupState.roomId)) {
+                    showTerminalStatus("Declined", delayMillis = 1_200)
+                }
+            }
             is NativeMatrixRtcCallPickupState.TimedOut -> {
                 if (isPickupStateRelevant(pickupState.roomId)) {
                     showTerminalStatus("No Answer", delayMillis = 1_200)

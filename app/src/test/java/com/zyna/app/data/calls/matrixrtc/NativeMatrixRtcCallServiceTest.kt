@@ -182,6 +182,7 @@ class NativeMatrixRtcCallServiceTest {
         val ringing = service.currentPickupState()
         assertTrue(ringing is NativeMatrixRtcCallPickupState.Ringing)
         assertEquals(MatrixRtcCallNotificationType.RING, environment.notificationClientFor(ROOM_ID).requests.single().notificationType)
+        assertEquals(1, environment.declineSubscriptionsFor(ROOM_ID).size)
 
         environment.liveKitSessions.single().controller.emit(
             MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined(
@@ -190,6 +191,7 @@ class NativeMatrixRtcCallServiceTest {
         )
 
         waitForPickupState<NativeMatrixRtcCallPickupState.Answered>(service)
+        assertEquals(1, environment.declineSubscriptionsFor(ROOM_ID).single().cancelCount)
 
         assertEquals(true, service.leaveActiveCall())
         assertEquals(NativeMatrixRtcCallPickupState.Inactive, service.currentPickupState())
@@ -226,9 +228,80 @@ class NativeMatrixRtcCallServiceTest {
 
         assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
         assertNull(service.currentRoomId())
+        assertEquals(1, environment.declineSubscriptionsFor(ROOM_ID).single().cancelCount)
         assertEquals(1, membershipClient.leaveCount)
         assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
         assertEquals(false, service.leaveActiveCall())
+    }
+
+    @Test
+    fun waitForPickupDeclinesAndLeavesCallWhenRemoteDeclines() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this
+        )
+
+        service.startAudioCall(
+            roomId = ROOM_ID,
+            waitForPickup = true
+        )
+
+        val subscription = environment.declineSubscriptionsFor(ROOM_ID).single()
+        assertEquals("\$notification", subscription.notificationEventId)
+
+        subscription.emit("@bob:example.org")
+
+        waitForPickupState<NativeMatrixRtcCallPickupState.Declined>(service)
+        waitForServiceState(service, NativeMatrixRtcCallServiceState.IDLE)
+
+        assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
+        assertNull(service.currentRoomId())
+        assertEquals(1, subscription.cancelCount)
+        assertEquals(1, membershipClient.leaveCount)
+        assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
+        assertEquals(false, service.leaveActiveCall())
+    }
+
+    @Test
+    fun waitForPickupIgnoresOwnDecline() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this
+        )
+
+        service.startAudioCall(
+            roomId = ROOM_ID,
+            waitForPickup = true
+        )
+
+        val subscription = environment.declineSubscriptionsFor(ROOM_ID).single()
+        subscription.emit("@alice:example.org")
+        yield()
+
+        assertTrue(service.currentPickupState() is NativeMatrixRtcCallPickupState.Ringing)
+        assertEquals(NativeMatrixRtcCallServiceState.CONNECTED, service.state.value)
+        assertEquals(0, membershipClient.leaveCount)
+
+        assertEquals(true, service.leaveActiveCall())
+        assertEquals(1, subscription.cancelCount)
     }
 
     @Test
@@ -792,6 +865,7 @@ private class FakeNativeMatrixRtcCallEnvironment : NativeMatrixRtcCallEnvironmen
 
     private val membershipClients = mutableMapOf<String, FakeNativeSessionMembershipClient>()
     private val notificationClients = mutableMapOf<String, FakeNativeCallNotificationClient>()
+    private val declineSubscriptions = mutableMapOf<String, MutableList<FakeCallDeclineSubscription>>()
 
     override fun ownDevice(): MatrixRtcOwnDevice = device
 
@@ -830,12 +904,47 @@ private class FakeNativeMatrixRtcCallEnvironment : NativeMatrixRtcCallEnvironmen
         return notificationClientFor(roomId)
     }
 
+    override fun subscribeToCallDeclineEvents(
+        roomId: String,
+        notificationEventId: String,
+        onDecline: (declinerUserId: String) -> Unit
+    ): MatrixRtcCancellable {
+        val subscription = FakeCallDeclineSubscription(
+            notificationEventId = notificationEventId,
+            onDecline = onDecline
+        )
+        declineSubscriptions.getOrPut(roomId) { mutableListOf() } += subscription
+        return subscription
+    }
+
     fun membershipClientFor(roomId: String): FakeNativeSessionMembershipClient {
         return membershipClients.getOrPut(roomId) { FakeNativeSessionMembershipClient() }
     }
 
     fun notificationClientFor(roomId: String): FakeNativeCallNotificationClient {
         return notificationClients.getOrPut(roomId) { FakeNativeCallNotificationClient() }
+    }
+
+    fun declineSubscriptionsFor(roomId: String): List<FakeCallDeclineSubscription> {
+        return declineSubscriptions[roomId].orEmpty()
+    }
+}
+
+private class FakeCallDeclineSubscription(
+    val notificationEventId: String,
+    private val onDecline: (declinerUserId: String) -> Unit
+) : MatrixRtcCancellable {
+    var cancelCount = 0
+        private set
+
+    override fun cancel() {
+        cancelCount += 1
+    }
+
+    fun emit(declinerUserId: String) {
+        if (cancelCount == 0) {
+            onDecline(declinerUserId)
+        }
     }
 }
 

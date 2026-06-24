@@ -102,7 +102,7 @@ Release signing keys and generated AAB artifacts are intentionally kept outside 
 
 ## Collaboration
 
-Open to commercial collaboration around white-label Matrix clients, private deployments, and custom Android communication products.
+Open to commercial collaboration around white-label Matrix clients, private deployments, and custom iOS and Android communication products.
 
 Contact: [@markovsdima](https://t.me/markovsdima)
 

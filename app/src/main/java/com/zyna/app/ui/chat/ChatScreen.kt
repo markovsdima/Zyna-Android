@@ -89,6 +89,7 @@ data class ChatScreenViewState(
 
 data class ChatScreenViewActions(
     val onRefresh: () -> Unit,
+    val onStartCall: () -> Unit,
     val onBack: () -> Unit,
     val onLoadOlder: () -> Unit,
     val onLoadNewer: () -> Unit,
@@ -192,6 +193,15 @@ internal class ChatScreenView(
         isClickable = true
         isFocusable = true
     }
+    private val callButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = "Call"
+        textSize = 15f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(nativeColors.actionText)
+        isClickable = true
+        isFocusable = true
+    }
     private val contentFrame = FrameLayout(context)
     private val chatLayoutStart = ZynaPerfLog.start()
     private val chatLayout = GlassChatLayout(
@@ -255,6 +265,13 @@ internal class ChatScreenView(
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        topBar.addView(
+            callButton,
+            LinearLayout.LayoutParams(
+                dp(72),
+                ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
         topBar.addView(
@@ -348,6 +365,7 @@ internal class ChatScreenView(
         titleText.text = state.roomName
         subtitleText.text = state.roomId
         backButton.setOnClickListener { actions.onBack() }
+        callButton.setOnClickListener { actions.onStartCall() }
         refreshButton.text = if (state.isLoading) "Loading" else "Refresh"
         refreshButton.isEnabled = !state.isLoading
         refreshButton.alpha = if (state.isLoading) 0.54f else 1f
@@ -790,6 +808,7 @@ internal class ChatScreenView(
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(nativeColors.actionText)
+        callButton.setTextColor(nativeColors.actionText)
         titleText.setTextColor(nativeColors.titleText)
         subtitleText.setTextColor(nativeColors.subtitleText)
         refreshButton.setTextColor(nativeColors.actionText)

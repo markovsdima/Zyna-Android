@@ -80,6 +80,10 @@ class MatrixRtcToDeviceKeyTransport(
     }
 
     fun start() {
+        MatrixRtcCallDebugLog.d(
+            "mediaKeyTransportStart roomId=$roomId ownUserId=${ownIdentity.userId} " +
+                "ownDeviceId=${ownIdentity.deviceId} ownMemberId=${ownIdentity.memberId}"
+        )
         replaceListenerToken(null)?.cancel()
         val token = client.addCustomToDeviceEventListener(
             eventType = MatrixRtcCallEncryptionKeysContent.EVENT_TYPE,
@@ -91,6 +95,7 @@ class MatrixRtcToDeviceKeyTransport(
     }
 
     fun stop() {
+        MatrixRtcCallDebugLog.d("mediaKeyTransportStop roomId=$roomId")
         replaceListenerToken(null)?.cancel()
     }
 
@@ -99,6 +104,9 @@ class MatrixRtcToDeviceKeyTransport(
         index: Int,
         targets: List<MatrixRtcToDeviceTarget>
     ): List<MatrixRtcCustomToDeviceSendFailure> {
+        MatrixRtcCallDebugLog.d(
+            "mediaKeySend start keyIndex=$index targets=${targets.joinToString { it.debugSummary() }}"
+        )
         val content = MatrixRtcCallEncryptionKeysContent(
             keys = MatrixRtcCallEncryptionKeysContent.Keys(index = index, key = keyBase64Encoded),
             member = MatrixRtcCallEncryptionKeysContent.Member(
@@ -112,7 +120,12 @@ class MatrixRtcToDeviceKeyTransport(
             eventType = MatrixRtcCallEncryptionKeysContent.EVENT_TYPE,
             targets = targets,
             contentJson = content.jsonString()
-        )
+        ).also { failures ->
+            MatrixRtcCallDebugLog.d(
+                "mediaKeySend done keyIndex=$index targetCount=${targets.size} " +
+                    "failureCount=${failures.size} failures=${failures.joinToString { it.debugSummary() }}"
+            )
+        }
     }
 
     private fun handle(event: MatrixRtcCustomToDeviceEvent) {
@@ -173,9 +186,23 @@ private class MatrixRtcToDeviceKeyEventHandler(
                 encryptionInfo = encryptionInfo
             )
         }.onSuccess { received ->
+            MatrixRtcCallDebugLog.d(
+                "mediaKeyReceive sender=${received.sender} userId=${received.membership.userId} " +
+                    "deviceId=${received.membership.deviceId} memberId=${received.membership.memberId} " +
+                    "keyIndex=${received.keyIndex} encrypted=${received.encryptionInfo != null}"
+            )
             onReceivedKey.onReceivedKey(Result.success(received))
         }.onFailure { error ->
+            MatrixRtcCallDebugLog.d("mediaKeyReceive failed", error)
             onReceivedKey.onReceivedKey(Result.failure(error))
         }
     }
+}
+
+private fun MatrixRtcToDeviceTarget.debugSummary(): String {
+    return "${userId}:${deviceId}"
+}
+
+private fun MatrixRtcCustomToDeviceSendFailure.debugSummary(): String {
+    return "${userId}:${deviceId}:$reason"
 }

@@ -11,6 +11,7 @@ import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.participant.Participant
 import io.livekit.android.room.participant.RemoteParticipant
 import io.livekit.android.room.track.TrackPublication
+import livekit.org.webrtc.FrameCryptorKeyDerivationAlgorithm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -286,18 +287,36 @@ class AndroidMatrixRtcLiveKitRoomSessionFactory(
         mediaEncryptionMode: MatrixRtcLiveKitMediaEncryptionMode,
         onEvent: (MatrixRtcLiveKitRoomSessionEvent) -> Unit
     ): MatrixRtcLiveKitRoomSession {
-        val keyProvider = BaseKeyProvider()
+        MatrixRtcCallDebugLog.d("createLiveKitRoomSession mediaEncryptionMode=$mediaEncryptionMode")
+        LiveKit.init(appContext)
+        val keyProvider = when (mediaEncryptionMode) {
+            MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS ->
+                BaseKeyProvider(
+                    enableSharedKey = false,
+                    ratchetWindowSize = 10,
+                    keyRingSize = 256,
+                    keyDerivationAlgorithm = FrameCryptorKeyDerivationAlgorithm.HKDF
+                )
+            MatrixRtcLiveKitMediaEncryptionMode.UNENCRYPTED -> null
+        }
         val keyApplier = when (mediaEncryptionMode) {
             MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS ->
-                MatrixLiveKitMediaKeyApplier(keyProvider)
+                MatrixLiveKitMediaKeyApplier(requireNotNull(keyProvider))
             MatrixRtcLiveKitMediaEncryptionMode.UNENCRYPTED -> null
         }
         val controller = AndroidMatrixRtcLiveKitRoomController(
             context = appContext,
             roomOptions = RoomOptions(
                 e2eeOptions = when (mediaEncryptionMode) {
-                    MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS ->
-                        E2EEOptions(keyProvider)
+                    MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS -> {
+                        val provider = requireNotNull(keyProvider)
+                        E2EEOptions(provider).also {
+                            MatrixRtcCallDebugLog.d(
+                                "createLiveKitE2EEOptions enableSharedKey=${provider.enableSharedKey} " +
+                                    "ratchetWindowSize=10 keyRingSize=256 keyDerivationAlgorithm=HKDF"
+                            )
+                        }
+                    }
                     MatrixRtcLiveKitMediaEncryptionMode.UNENCRYPTED -> null
                 }
             )
@@ -327,7 +346,10 @@ class AndroidMatrixRtcLiveKitRoomController(
     ): MatrixRtcCancellable {
         val job = scope.launch {
             room.events.events.collect { event ->
-                event.toMatrixRtcLiveKitEvent()?.let(onEvent)
+                event.toMatrixRtcLiveKitEvent()?.let { mapped ->
+                    MatrixRtcCallDebugLog.d("liveKitEvent ${mapped.debugSummary()}")
+                    onEvent(mapped)
+                }
             }
         }
         return object : MatrixRtcCancellable {
@@ -338,24 +360,88 @@ class AndroidMatrixRtcLiveKitRoomController(
     }
 
     override suspend fun connect(url: String, token: String) {
+        MatrixRtcCallDebugLog.d("liveKitConnect url=$url")
         room.connect(url, token, connectOptions)
+        MatrixRtcCallDebugLog.d("liveKitConnect completed")
     }
 
     override fun disconnect() {
+        MatrixRtcCallDebugLog.d("liveKitDisconnect")
         room.disconnect()
     }
 
     override suspend fun setMicrophoneEnabled(enabled: Boolean) {
+        MatrixRtcCallDebugLog.d("setMicrophoneEnabled enabled=$enabled")
         room.localParticipant.setMicrophoneEnabled(enabled)
     }
 
     override suspend fun setCameraEnabled(enabled: Boolean) {
+        MatrixRtcCallDebugLog.d("setCameraEnabled enabled=$enabled")
         room.localParticipant.setCameraEnabled(enabled)
     }
 
     override fun close() {
         room.release()
     }
+}
+
+internal fun MatrixRtcLiveKitRoomSessionEvent.debugSummary(): String {
+    return when (this) {
+        MatrixRtcLiveKitRoomSessionEvent.Connected -> "Connected"
+        is MatrixRtcLiveKitRoomSessionEvent.Disconnected ->
+            "Disconnected error=$error reason=$reason"
+        is MatrixRtcLiveKitRoomSessionEvent.FailedToConnect ->
+            "FailedToConnect error=$error"
+        MatrixRtcLiveKitRoomSessionEvent.Reconnecting -> "Reconnecting"
+        MatrixRtcLiveKitRoomSessionEvent.Reconnected -> "Reconnected"
+        is MatrixRtcLiveKitRoomSessionEvent.LocalTrackSubscribedByRemote ->
+            "LocalTrackSubscribedByRemote publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined ->
+            "RemoteParticipantJoined participant=${participant.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft ->
+            "RemoteParticipantLeft participant=${participant.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackPublished ->
+            "RemoteTrackPublished participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackUnpublished ->
+            "RemoteTrackUnpublished participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed ->
+            "RemoteTrackSubscribed participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackUnsubscribed ->
+            "RemoteTrackUnsubscribed participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscriptionFailed ->
+            "RemoteTrackSubscriptionFailed participant=${participant.debugSummary()} " +
+                "trackSid=$trackSid error=$error"
+        is MatrixRtcLiveKitRoomSessionEvent.TrackMutedChanged ->
+            "TrackMutedChanged participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()} isMuted=$isMuted"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackStreamStateChanged ->
+            "RemoteTrackStreamStateChanged publication=${publication.debugSummary()} state=$state"
+        is MatrixRtcLiveKitRoomSessionEvent.SpeakingParticipantsChanged ->
+            "SpeakingParticipantsChanged participants=${participants.joinToString { it.debugSummary() }}"
+        is MatrixRtcLiveKitRoomSessionEvent.TrackE2EEStateChanged ->
+            "TrackE2EEStateChanged participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()} state=$state"
+        is MatrixRtcLiveKitRoomSessionEvent.MediaKeyApplied ->
+            "MediaKeyApplied participantId=$participantId keyIndex=$keyIndex"
+    }
+}
+
+private fun MatrixRtcLiveKitParticipantInfo.debugSummary(): String {
+    return "identity=$identity sid=$sid"
+}
+
+private fun MatrixRtcLiveKitTrackPublicationInfo.debugSummary(): String {
+    return "sid=$sid name=$name kind=$kind source=$source " +
+        "muted=$isMuted subscribed=$isSubscribed"
+}
+
+private fun MatrixRtcLiveKitSpeakingParticipantInfo.debugSummary(): String {
+    return "identity=$identity sid=$sid speaking=$isSpeaking " +
+        "level=$audioLevel lastSpokeAt=$lastSpokeAtMillis"
 }
 
 private fun RoomEvent.toMatrixRtcLiveKitEvent(): MatrixRtcLiveKitRoomSessionEvent? {

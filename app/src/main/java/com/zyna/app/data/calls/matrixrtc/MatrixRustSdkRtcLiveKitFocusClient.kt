@@ -41,7 +41,8 @@ class MatrixRustSdkRtcLiveKitFocusClient(
         return transportDiscoveryClient.discoverPreferredTransport(
             homeserverUrl = session.homeserverUrl,
             accessToken = session.accessToken,
-            serverName = runCatching { client.userIdServerName() }.getOrNull(),
+            serverName = matrixServerNameFromUserId(session.userId)
+                ?: runCatching { client.userIdServerName() }.getOrNull(),
             fallbackServiceUrl = fallbackServiceUrl
         )
     }
@@ -95,4 +96,12 @@ class MatrixRustSdkRtcLiveKitFocusClient(
             sfuConfig = sfuConfig
         )
     }
+}
+
+internal fun matrixServerNameFromUserId(userId: String): String? {
+    val separator = userId.indexOf(':')
+    if (separator == -1 || separator == userId.lastIndex) {
+        return null
+    }
+    return userId.substring(separator + 1).takeIf { it.isNotBlank() }
 }

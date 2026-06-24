@@ -4,6 +4,8 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 data class MatrixRtcHttpRequest(
     val url: String,
@@ -22,7 +24,7 @@ interface MatrixRtcHttpClient {
 }
 
 class MatrixRtcUrlConnectionHttpClient : MatrixRtcHttpClient {
-    override suspend fun execute(request: MatrixRtcHttpRequest): MatrixRtcHttpResponse {
+    override suspend fun execute(request: MatrixRtcHttpRequest): MatrixRtcHttpResponse = withContext(Dispatchers.IO) {
         val connection = URI(request.url).toURL().openConnection() as HttpURLConnection
         try {
             connection.requestMethod = request.method
@@ -36,14 +38,14 @@ class MatrixRtcUrlConnectionHttpClient : MatrixRtcHttpClient {
             val stream = if (status in 200..299) {
                 connection.inputStream
             } else {
-                connection.errorStream ?: connection.inputStream
+                connection.errorStream
             }
-            val bytes = stream.use { input ->
+            val bytes = stream?.use { input ->
                 val output = ByteArrayOutputStream()
                 input.copyTo(output)
                 output.toByteArray()
-            }
-            return MatrixRtcHttpResponse(statusCode = status, body = bytes)
+            } ?: ByteArray(0)
+            MatrixRtcHttpResponse(statusCode = status, body = bytes)
         } finally {
             connection.disconnect()
         }

@@ -19,6 +19,7 @@ data class ZynaAppActions(
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
     val onCancelForwardPicker: () -> Unit,
     val onRefreshChat: () -> Unit,
+    val onStartNativeMatrixRtcCall: (roomId: String, roomName: String) -> Unit,
     val onCloseChat: () -> Unit,
     val onLoadOlderChatMessages: () -> Unit,
     val onLoadNewerChatMessages: () -> Unit,

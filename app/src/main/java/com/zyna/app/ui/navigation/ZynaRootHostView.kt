@@ -418,6 +418,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     ),
                     actions = ChatScreenViewActions(
                         onRefresh = actions.onRefreshChat,
+                        onStartCall = {
+                            actions.onStartNativeMatrixRtcCall(route.roomId, route.displayName)
+                        },
                         onBack = actions.onCloseChat,
                         onLoadOlder = actions.onLoadOlderChatMessages,
                         onLoadNewer = actions.onLoadNewerChatMessages,

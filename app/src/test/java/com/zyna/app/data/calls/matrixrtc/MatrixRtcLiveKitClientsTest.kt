@@ -97,6 +97,16 @@ class MatrixRtcLiveKitTransportDiscoveryClientTest {
         assertEquals(MatrixRtcLiveKitTransportDiscoverySource.FALLBACK, discovered.source)
         assertEquals("https://fallback-livekit.example.org", discovered.transport.liveKitServiceUrl)
     }
+
+    @Test
+    fun extractsMatrixServerNameFromUserId() {
+        assertEquals("zyna-app.ru", matrixServerNameFromUserId("@alice:zyna-app.ru"))
+        assertEquals("matrix.example.org", matrixServerNameFromUserId("@alice:matrix.example.org"))
+        assertEquals("matrix.example.org:8448", matrixServerNameFromUserId("@alice:matrix.example.org:8448"))
+        assertEquals("[::1]:8448", matrixServerNameFromUserId("@alice:[::1]:8448"))
+        assertEquals(null, matrixServerNameFromUserId("@alice"))
+        assertEquals(null, matrixServerNameFromUserId("@alice:"))
+    }
 }
 
 class MatrixRtcLiveKitSfuClientTest {

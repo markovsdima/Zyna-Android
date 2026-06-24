@@ -1,5 +1,8 @@
 package com.zyna.app.data.calls.matrixrtc
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -103,6 +106,58 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun refreshActiveMembershipsSharesCurrentKeyWithLateJoiner() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        val ownMembership = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        val bobMembership = nativeMembership(
+            eventId = "\$bob",
+            sender = "@bob:example.org",
+            deviceId = "BOBDEVICE",
+            createdTimestamp = 40_000
+        )
+        var now = 10_000L
+        membershipClient.publishResult = ownMembership
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(
+            environment = environment,
+            keyGenerator = SequenceNativeMediaKeyGenerator(listOf("own-key-0", "own-key-1")),
+            timestampProvider = { now }
+        )
+
+        service.startAudioCall(roomId = ROOM_ID)
+
+        now = 40_000L
+        membershipClient.activeMembershipResponses = mutableListOf(listOf(bobMembership))
+        val refreshResult = service.refreshActiveMemberships()
+
+        assertEquals(
+            listOf(MatrixRtcToDeviceTarget("@bob:example.org", "BOBDEVICE")),
+            refreshResult.keyShareResult.sharedWith
+        )
+        val sentContent = MatrixRtcCallEncryptionKeysContent.fromJson(
+            environment.toDeviceClient.sentContents.single()
+        )
+        assertEquals(0, sentContent.keys.index)
+        assertEquals("own-key-0", sentContent.keys.key)
+        assertEquals(
+            listOf(0),
+            environment.liveKitSessions.single().keyApplier.appliedKeys.map { it.keyIndex }
+        )
+        assertEquals(
+            listOf("own-key-0"),
+            environment.liveKitSessions.single().keyApplier.appliedKeys.map { it.keyBase64Encoded }
+        )
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
     fun startAudioCallUsesUnencryptedSessionWhenRoomIsNotEncrypted() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         environment.encrypted = false
@@ -179,6 +234,49 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun leaveActiveCallCancelsJoiningAttemptAndReturnsIdle() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val sfuConfigStarted = CompletableDeferred<Unit>()
+        val continueSfuConfig = CompletableDeferred<Unit>()
+        environment.focusClient.sfuConfigStarted = sfuConfigStarted
+        environment.focusClient.continueSfuConfig = continueSfuConfig
+        val service = nativeService(environment)
+
+        var startFailure: Throwable? = null
+        val startJob = launch {
+            startFailure = runCatching {
+                service.startAudioCall(roomId = ROOM_ID)
+            }.exceptionOrNull()
+        }
+        sfuConfigStarted.await()
+
+        assertEquals(NativeMatrixRtcCallServiceState.JOINING, service.state.value)
+        assertEquals(ROOM_ID, service.currentRoomId())
+        assertEquals(true, service.leaveActiveCall())
+        assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
+        assertNull(service.currentRoomId())
+        assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
+
+        continueSfuConfig.complete(Unit)
+        startJob.join()
+
+        assertTrue(startFailure is CancellationException)
+        assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
+        assertNull(service.currentRoomId())
+        assertEquals(0, membershipClient.publishCount)
+        assertEquals(emptyList<FakeCallNotificationRequest>(), environment.notificationClientFor(ROOM_ID).requests)
+        assertEquals(false, service.leaveActiveCall())
+    }
+
+    @Test
     fun startAudioCallRejectsSecondActiveCall() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         val membershipClient = environment.membershipClientFor(ROOM_ID)
@@ -203,12 +301,14 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     private fun nativeService(
-        environment: FakeNativeMatrixRtcCallEnvironment
+        environment: FakeNativeMatrixRtcCallEnvironment,
+        keyGenerator: MatrixRtcMediaKeyGenerating = StaticNativeMediaKeyGenerator("own-key"),
+        timestampProvider: () -> Long = { 10_000 }
     ): NativeMatrixRtcCallService {
         return NativeMatrixRtcCallService(
             environment = environment,
-            keyGenerator = StaticNativeMediaKeyGenerator("own-key"),
-            timestampProvider = { 10_000 }
+            keyGenerator = keyGenerator,
+            timestampProvider = timestampProvider
         )
     }
 
@@ -316,6 +416,8 @@ private class FakeMatrixRtcLiveKitFocusClient : MatrixRtcLiveKitFocusClient {
         liveKitAlias = "lk-room",
         liveKitIdentity = "lk-identity"
     )
+    var sfuConfigStarted: CompletableDeferred<Unit>? = null
+    var continueSfuConfig: CompletableDeferred<Unit>? = null
     var discoverFallbacks: List<String?> = emptyList()
     var sfuRequests: List<FakeSfuRequest> = emptyList()
 
@@ -342,6 +444,8 @@ private class FakeMatrixRtcLiveKitFocusClient : MatrixRtcLiveKitFocusClient {
         endpointVersion: MatrixRtcLiveKitJwtEndpointVersion,
         delayDelegation: MatrixRtcLiveKitDelayDelegation?
     ): MatrixRtcLiveKitSfuConfig {
+        sfuConfigStarted?.complete(Unit)
+        continueSfuConfig?.await()
         sfuRequests = sfuRequests + FakeSfuRequest(
             membership = membership,
             transport = transport,
@@ -429,6 +533,7 @@ private class FakeNativeSessionMembershipClient : MatrixRtcSessionMembershipClie
 
 private class FakeNativeToDeviceClient : MatrixRtcCustomToDeviceEncrypting {
     var sentTargets: List<MatrixRtcToDeviceTarget>? = null
+    var sentContents: List<String> = emptyList()
     var sendCount = 0
     var listenerEventType: String? = null
     var listenerEncryptedOnly: Boolean? = null
@@ -440,6 +545,7 @@ private class FakeNativeToDeviceClient : MatrixRtcCustomToDeviceEncrypting {
     ): List<MatrixRtcCustomToDeviceSendFailure> {
         sendCount += 1
         sentTargets = targets
+        sentContents = sentContents + contentJson
         return emptyList()
     }
 
@@ -554,4 +660,16 @@ private data class StaticNativeMediaKeyGenerator(
     val key: String
 ) : MatrixRtcMediaKeyGenerating {
     override fun generateMediaKeyBase64Encoded(): String = key
+}
+
+private class SequenceNativeMediaKeyGenerator(
+    private val keys: List<String>
+) : MatrixRtcMediaKeyGenerating {
+    private var index = 0
+
+    override fun generateMediaKeyBase64Encoded(): String {
+        return keys[index].also {
+            index += 1
+        }
+    }
 }

@@ -24,7 +24,8 @@ data class MatrixRtcMediaKeyShareResult(
 
 data class MatrixRtcMediaKeyRotationConfiguration(
     val useKeyDelayMillis: Long = 1_000,
-    val keyRotationGracePeriodMillis: Long = 10_000
+    val keyRotationGracePeriodMillis: Long = 10_000,
+    val rotateKeyOnLateJoin: Boolean = true
 )
 
 data class MatrixRtcMediaKeyMapKey(
@@ -93,6 +94,10 @@ class MatrixRtcMediaKeyManager(
 
     fun updateMemberships(memberships: List<MatrixRtcCallMembership>) {
         val changedKeys = synchronized(lock) {
+            MatrixRtcCallDebugLog.d(
+                "mediaKeyUpdateMemberships count=${memberships.size} " +
+                    "memberships=${memberships.joinToString { it.debugSummary() }}"
+            )
             this.memberships = memberships
             flushPendingInboundKeysLocked()
         }
@@ -134,6 +139,10 @@ class MatrixRtcMediaKeyManager(
             )
             outboundSession = session
             addKeyLocked(session.mediaKey)
+            MatrixRtcCallDebugLog.d(
+                "mediaKeyOutboundCreated participantId=${session.mediaKey.rtcBackendIdentity} " +
+                    "keyIndex=${session.mediaKey.keyIndex}"
+            )
             OutboundEnsureResult(mediaKey = session.mediaKey, isNew = true)
         }
 
@@ -219,9 +228,14 @@ class MatrixRtcMediaKeyManager(
         shareTargets: List<MediaKeyShareTarget>
     ): MatrixRtcMediaKeyShareResult {
         if (shareTargets.isEmpty()) {
+            MatrixRtcCallDebugLog.d("mediaKeyShare skipped keyIndex=${mediaKey.keyIndex} targets=0")
             return MatrixRtcMediaKeyShareResult(failures = emptyList(), sharedWith = emptyList())
         }
 
+        MatrixRtcCallDebugLog.d(
+            "mediaKeyShare keyIndex=${mediaKey.keyIndex} " +
+                "targets=${shareTargets.joinToString { it.target.debugSummary() }}"
+        )
         val failures = transport.sendKey(
             keyBase64Encoded = mediaKey.keyBase64Encoded,
             index = mediaKey.keyIndex,
@@ -239,7 +253,13 @@ class MatrixRtcMediaKeyManager(
         return MatrixRtcMediaKeyShareResult(
             failures = failures,
             sharedWith = successfulShareTargets.map { it.target }
-        )
+        ).also { result ->
+            MatrixRtcCallDebugLog.d(
+                "mediaKeyShare result keyIndex=${mediaKey.keyIndex} " +
+                    "sharedWith=${result.sharedWith.joinToString { it.debugSummary() }} " +
+                    "failures=${result.failures.joinToString { it.debugSummary() }}"
+            )
+        }
     }
 
     private fun successfulShareTargets(
@@ -283,7 +303,10 @@ class MatrixRtcMediaKeyManager(
         }
 
         val keyAge = now - session.createdTimestamp
-        if (keyAge < rotationConfiguration.keyRotationGracePeriodMillis) {
+        if (
+            keyAge < rotationConfiguration.keyRotationGracePeriodMillis ||
+            !rotationConfiguration.rotateKeyOnLateJoin
+        ) {
             return OutboundMediaKeyRollout(
                 mediaKey = session.mediaKey,
                 shareTargets = joinedShareTargets,
@@ -433,6 +456,11 @@ class MatrixRtcMediaKeyManager(
             .plus(mediaKey)
             .sortedBy { it.keyIndex }
         inboundKeys[mapKey] = keys
+        MatrixRtcCallDebugLog.d(
+            "mediaKeyStore participantId=${mediaKey.rtcBackendIdentity} " +
+                "keyIndex=${mediaKey.keyIndex} userId=${mediaKey.membership.userId} " +
+                "deviceId=${mediaKey.membership.deviceId} memberId=${mediaKey.membership.memberId}"
+        )
     }
 
     private data class OutboundEnsureResult(
@@ -473,3 +501,15 @@ class MatrixRtcMediaKeyManager(
     }
 }
 
+private fun MatrixRtcCallMembership.debugSummary(): String {
+    return "userId=$userId deviceId=$deviceId memberId=$memberId " +
+        "rtcBackendIdentity=$rtcBackendIdentity kind=$kind"
+}
+
+private fun MatrixRtcToDeviceTarget.debugSummary(): String {
+    return "${userId}:${deviceId}"
+}
+
+private fun MatrixRtcCustomToDeviceSendFailure.debugSummary(): String {
+    return "${userId}:${deviceId}:$reason"
+}

@@ -4,6 +4,7 @@ import io.livekit.android.e2ee.KeyProvider
 import livekit.org.webrtc.FrameCryptorKeyProvider
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class MatrixLiveKitMediaKeyApplierTest {
@@ -32,14 +33,28 @@ class MatrixLiveKitMediaKeyApplierTest {
         assertEquals("@alice:example.org:ALICEDEVICE", keyProvider.participantId)
         assertEquals(7, keyProvider.keyIndex)
     }
+
+    @Test
+    fun rejectsSharedKeyModeProvider() {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            MatrixLiveKitMediaKeyApplier(
+                FakeLiveKitKeyProvider(enableSharedKey = true)
+            )
+        }
+
+        assertEquals(
+            "MatrixRTC LiveKit media keys require per-participant key mode",
+            error.message
+        )
+    }
 }
 
-private class FakeLiveKitKeyProvider : KeyProvider {
+private class FakeLiveKitKeyProvider(
+    override var enableSharedKey: Boolean = false
+) : KeyProvider {
     var byteKey: ByteArray? = null
     var participantId: String? = null
     var keyIndex: Int? = null
-
-    override var enableSharedKey: Boolean = false
 
     override val rtcKeyProvider: FrameCryptorKeyProvider
         get() = error("Not used")

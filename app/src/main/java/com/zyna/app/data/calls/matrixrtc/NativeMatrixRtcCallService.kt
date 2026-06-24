@@ -69,6 +69,7 @@ class NativeMatrixRtcCallService(
     val state: StateFlow<NativeMatrixRtcCallServiceState> = _state.asStateFlow()
 
     private var activeCall: ActiveCall? = null
+    private var joiningCall: JoiningCall? = null
     private var activeAttemptId: String? = null
     private var activeRoomId: String? = null
 
@@ -87,7 +88,15 @@ class NativeMatrixRtcCallService(
             val discoveredTransport = focusClient.discoverPreferredTransport(
                 fallbackServiceUrl = fallbackLiveKitServiceUrl
             ) ?: throw NativeMatrixRtcCallServiceException.MissingLiveKitTransport
+            ensureJoiningAttemptCurrent(attemptId)
             val mediaEncryptionEnabled = environment.isRoomEncrypted(roomId)
+            MatrixRtcCallDebugLog.d(
+                "nativeCallStart roomId=$roomId attemptId=$attemptId " +
+                    "transportSource=${discoveredTransport.source} " +
+                    "mediaEncryptionEnabled=$mediaEncryptionEnabled ownUserId=${ownIdentity.userId} " +
+                    "ownDeviceId=${ownIdentity.deviceId} ownMemberId=${ownIdentity.memberId}"
+            )
+            ensureJoiningAttemptCurrent(attemptId)
             val liveKitMediaEncryptionMode = if (mediaEncryptionEnabled) {
                 MatrixRtcLiveKitMediaEncryptionMode.PER_PARTICIPANT_KEYS
             } else {
@@ -98,12 +107,23 @@ class NativeMatrixRtcCallService(
                 onEvent = { event -> handleLiveKitEvent(event, attemptId) }
             )
             liveKitSession = liveKit
+            if (!attachJoiningLiveKitSession(attemptId, liveKit)) {
+                runCatching { liveKit.close() }
+                liveKitSession = null
+                throw CancellationException("Stale MatrixRTC join attempt")
+            }
             val sfuConfig = focusClient.sfuConfig(
                 membership = ownIdentity,
                 transport = discoveredTransport.transport,
                 roomId = roomId,
                 endpointVersion = MatrixRtcLiveKitJwtEndpointVersion.LEGACY
             )
+            MatrixRtcCallDebugLog.d(
+                "nativeCallSfuConfig roomId=$roomId attemptId=$attemptId " +
+                    "liveKitIdentity=${sfuConfig.liveKitIdentity} liveKitAlias=${sfuConfig.liveKitAlias} " +
+                    "ownRtcBackendIdentity=${ownIdentity.legacyRtcBackendIdentity}"
+            )
+            ensureJoiningAttemptCurrent(attemptId)
 
             val toDeviceClient = environment.toDeviceClient()
             val session = MatrixRtcSession(
@@ -116,7 +136,8 @@ class NativeMatrixRtcCallService(
                         MatrixRtcSessionMediaEncryptionMode.PER_PARTICIPANT_KEYS
                     } else {
                         MatrixRtcSessionMediaEncryptionMode.UNENCRYPTED
-                    }
+                    },
+                    mediaKeyRotationConfiguration = audioCallMediaKeyRotationConfiguration
                 ),
                 membershipClient = environment.sessionMembershipClient(roomId),
                 keyTransportFactory = { identity ->
@@ -137,17 +158,34 @@ class NativeMatrixRtcCallService(
                 onError = onError
             )
             matrixRtcSession = session
+            if (!attachJoiningMatrixRtcSession(attemptId, session)) {
+                session.runCatchingLeave()
+                matrixRtcSession = null
+                throw CancellationException("Stale MatrixRTC join attempt")
+            }
 
             val joinResult = session.join()
+            MatrixRtcCallDebugLog.d(
+                "nativeCallMatrixJoined roomId=$roomId attemptId=$attemptId " +
+                    "ownMembership=${joinResult.ownMembership.debugSummary()} " +
+                    "memberships=${joinResult.memberships.joinToString { it.debugSummary() }} " +
+                    "keyShareSharedWith=${joinResult.keyShareResult.sharedWith.joinToString { it.debugSummary() }} " +
+                    "keyShareFailures=${joinResult.keyShareResult.failures.joinToString { it.debugSummary() }}"
+            )
+            ensureJoiningAttemptCurrent(attemptId)
             val callNotification = sendCallNotificationIfNeeded(
                 roomId = roomId,
                 joinResult = joinResult,
                 waitForPickup = waitForPickup
             )
+            ensureJoiningAttemptCurrent(attemptId)
+            MatrixRtcCallDebugLog.d("nativeCallLiveKitConnect roomId=$roomId attemptId=$attemptId")
             liveKit.connect(
                 sfuConfig = sfuConfig,
                 publishAudio = true
             )
+            MatrixRtcCallDebugLog.d("nativeCallLiveKitConnected roomId=$roomId attemptId=$attemptId")
+            ensureJoiningAttemptCurrent(attemptId)
 
             val call = ActiveCall(
                 attemptId = attemptId,
@@ -160,8 +198,10 @@ class NativeMatrixRtcCallService(
                 mediaEncryptionEnabled = mediaEncryptionEnabled
             )
             if (!finishJoined(call)) {
-                liveKit.close()
-                session.leave()
+                runCatching { liveKit.close() }
+                liveKitSession = null
+                session.runCatchingLeave()
+                matrixRtcSession = null
                 throw CancellationException("Stale MatrixRTC join attempt")
             }
 
@@ -178,9 +218,15 @@ class NativeMatrixRtcCallService(
                 callNotification = callNotification
             )
         } catch (error: Throwable) {
-            liveKitSession?.close()
-            matrixRtcSession?.runCatchingLeave()
-            finishFailed(attemptId)
+            MatrixRtcCallDebugLog.d(
+                "nativeCallStartFailed roomId=$roomId attemptId=$attemptId",
+                error
+            )
+            if (shouldCleanupFailedJoin(attemptId)) {
+                runCatching { liveKitSession?.close() }
+                matrixRtcSession?.runCatchingLeave()
+                finishFailed(attemptId)
+            }
             throw error
         }
     }
@@ -209,8 +255,16 @@ class NativeMatrixRtcCallService(
     suspend fun leaveActiveCall(): Boolean {
         val call = beginLeaving() ?: return false
         try {
-            call.liveKitSession.close()
-            call.matrixRtcSession.leave()
+            when (call) {
+                is LeavingCall.Active -> {
+                    call.activeCall.liveKitSession.close()
+                    call.activeCall.matrixRtcSession.leave()
+                }
+                is LeavingCall.Joining -> {
+                    call.joiningCall.liveKitSession?.close()
+                    call.joiningCall.matrixRtcSession?.runCatchingLeave()
+                }
+            }
             return true
         } finally {
             finishLeft(call.attemptId)
@@ -246,6 +300,7 @@ class NativeMatrixRtcCallService(
         event: MatrixRtcLiveKitRoomSessionEvent,
         attemptId: String
     ) {
+        MatrixRtcCallDebugLog.d("nativeCallLiveKitEvent attemptId=$attemptId ${event.debugSummary()}")
         when (event) {
             is MatrixRtcLiveKitRoomSessionEvent.Disconnected ->
                 scheduleEndActiveCall(attemptId)
@@ -254,10 +309,18 @@ class NativeMatrixRtcCallService(
             else -> Unit
         }
 
-        if (mediaKeyReshareReason(event) != null) {
+        val mediaKeyReshareReason = mediaKeyReshareReason(event)
+        if (mediaKeyReshareReason != null) {
+            MatrixRtcCallDebugLog.d(
+                "nativeCallScheduleMediaKeyReshare attemptId=$attemptId reason=$mediaKeyReshareReason"
+            )
             scheduleActiveMediaKeyReshare(attemptId)
         }
-        if (membershipRefreshReason(event) != null) {
+        val membershipRefreshReason = membershipRefreshReason(event)
+        if (membershipRefreshReason != null) {
+            MatrixRtcCallDebugLog.d(
+                "nativeCallScheduleMembershipRefresh attemptId=$attemptId reason=$membershipRefreshReason"
+            )
             scheduleActiveMembershipRefresh(attemptId)
         }
     }
@@ -271,8 +334,16 @@ class NativeMatrixRtcCallService(
     private suspend fun endActiveCall(attemptId: String): Boolean {
         val call = beginLeaving(attemptId = attemptId) ?: return false
         try {
-            call.liveKitSession.close()
-            call.matrixRtcSession.leave()
+            when (call) {
+                is LeavingCall.Active -> {
+                    call.activeCall.liveKitSession.close()
+                    call.activeCall.matrixRtcSession.leave()
+                }
+                is LeavingCall.Joining -> {
+                    call.joiningCall.liveKitSession?.close()
+                    call.joiningCall.matrixRtcSession?.runCatchingLeave()
+                }
+            }
             return true
         } catch (error: Throwable) {
             onError(error)
@@ -287,6 +358,14 @@ class NativeMatrixRtcCallService(
             val call = currentActiveCallByAttempt(attemptId) ?: return@launch
             runCatching {
                 call.matrixRtcSession.refreshMemberships()
+                    .also { result ->
+                        MatrixRtcCallDebugLog.d(
+                            "nativeCallMembershipRefreshed attemptId=$attemptId " +
+                                "memberships=${result.memberships.joinToString { it.debugSummary() }} " +
+                                "keyShareSharedWith=${result.keyShareResult.sharedWith.joinToString { it.debugSummary() }} " +
+                                "keyShareFailures=${result.keyShareResult.failures.joinToString { it.debugSummary() }}"
+                        )
+                    }
             }.onFailure(onError)
         }
     }
@@ -299,6 +378,14 @@ class NativeMatrixRtcCallService(
             }
             runCatching {
                 call.matrixRtcSession.reshareCurrentMediaKey()
+                    .also { result ->
+                        MatrixRtcCallDebugLog.d(
+                            "nativeCallMediaKeyReshared attemptId=$attemptId " +
+                                "memberships=${result.memberships.joinToString { it.debugSummary() }} " +
+                                "keyShareSharedWith=${result.keyShareResult.sharedWith.joinToString { it.debugSummary() }} " +
+                                "keyShareFailures=${result.keyShareResult.failures.joinToString { it.debugSummary() }}"
+                        )
+                    }
             }.onFailure(onError)
         }
     }
@@ -315,8 +402,64 @@ class NativeMatrixRtcCallService(
             val attemptId = UUID.randomUUID().toString()
             activeAttemptId = attemptId
             activeRoomId = roomId
+            joiningCall = JoiningCall(
+                attemptId = attemptId
+            )
             _state.value = NativeMatrixRtcCallServiceState.JOINING
             attemptId
+        }
+    }
+
+    private suspend fun ensureJoiningAttemptCurrent(attemptId: String) {
+        val isCurrent = lock.withLock {
+            activeAttemptId == attemptId &&
+                _state.value == NativeMatrixRtcCallServiceState.JOINING
+        }
+        if (!isCurrent) {
+            throw CancellationException("Stale MatrixRTC join attempt")
+        }
+    }
+
+    private suspend fun attachJoiningLiveKitSession(
+        attemptId: String,
+        liveKitSession: MatrixRtcLiveKitRoomSession
+    ): Boolean {
+        return lock.withLock {
+            val joining = joiningCall
+            if (
+                activeAttemptId != attemptId ||
+                joining?.attemptId != attemptId ||
+                _state.value != NativeMatrixRtcCallServiceState.JOINING
+            ) {
+                return@withLock false
+            }
+            joiningCall = joining.copy(liveKitSession = liveKitSession)
+            true
+        }
+    }
+
+    private suspend fun attachJoiningMatrixRtcSession(
+        attemptId: String,
+        matrixRtcSession: MatrixRtcSession
+    ): Boolean {
+        return lock.withLock {
+            val joining = joiningCall
+            if (
+                activeAttemptId != attemptId ||
+                joining?.attemptId != attemptId ||
+                _state.value != NativeMatrixRtcCallServiceState.JOINING
+            ) {
+                return@withLock false
+            }
+            joiningCall = joining.copy(matrixRtcSession = matrixRtcSession)
+            true
+        }
+    }
+
+    private suspend fun shouldCleanupFailedJoin(attemptId: String): Boolean {
+        return lock.withLock {
+            activeAttemptId == attemptId &&
+                _state.value == NativeMatrixRtcCallServiceState.JOINING
         }
     }
 
@@ -328,6 +471,7 @@ class NativeMatrixRtcCallService(
             ) {
                 return@withLock false
             }
+            joiningCall = null
             activeCall = call
             activeRoomId = call.roomId
             _state.value = NativeMatrixRtcCallServiceState.CONNECTED
@@ -343,27 +487,33 @@ class NativeMatrixRtcCallService(
             activeAttemptId = null
             activeRoomId = null
             activeCall = null
+            joiningCall = null
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
 
-    private suspend fun beginLeaving(): ActiveCall? {
+    private suspend fun beginLeaving(): LeavingCall? {
         return beginLeaving(attemptId = null)
     }
 
-    private suspend fun beginLeaving(attemptId: String?): ActiveCall? {
+    private suspend fun beginLeaving(attemptId: String?): LeavingCall? {
         return lock.withLock {
             if (attemptId != null && activeAttemptId != attemptId) {
                 return@withLock null
             }
-            val call = activeCall ?: run {
-                if (activeAttemptId == null) {
-                    _state.value = NativeMatrixRtcCallServiceState.IDLE
-                }
-                return@withLock null
+            activeCall?.let { call ->
+                _state.value = NativeMatrixRtcCallServiceState.LEAVING
+                return@withLock LeavingCall.Active(call)
             }
-            _state.value = NativeMatrixRtcCallServiceState.LEAVING
-            call
+            joiningCall?.let { call ->
+                joiningCall = null
+                _state.value = NativeMatrixRtcCallServiceState.LEAVING
+                return@withLock LeavingCall.Joining(call)
+            }
+            if (activeAttemptId == null) {
+                _state.value = NativeMatrixRtcCallServiceState.IDLE
+            }
+            null
         }
     }
 
@@ -375,6 +525,7 @@ class NativeMatrixRtcCallService(
             activeAttemptId = null
             activeRoomId = null
             activeCall = null
+            joiningCall = null
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
@@ -404,8 +555,37 @@ class NativeMatrixRtcCallService(
         val mediaEncryptionEnabled: Boolean
     )
 
+    private data class JoiningCall(
+        val attemptId: String,
+        val matrixRtcSession: MatrixRtcSession? = null,
+        val liveKitSession: MatrixRtcLiveKitRoomSession? = null
+    )
+
+    private sealed interface LeavingCall {
+        val attemptId: String
+
+        data class Active(
+            val activeCall: ActiveCall
+        ) : LeavingCall {
+            override val attemptId: String = activeCall.attemptId
+        }
+
+        data class Joining(
+            val joiningCall: JoiningCall
+        ) : LeavingCall {
+            override val attemptId: String = joiningCall.attemptId
+        }
+    }
+
     companion object {
         const val AUDIO_CALL_INTENT = "audio"
+
+        // LiveKit Android applies a sender frame cryptor key index when the local track is
+        // published. Until the SDK exposes switching that index for existing senders, late
+        // joiners must receive the current key rather than a rotated key.
+        private val audioCallMediaKeyRotationConfiguration = MatrixRtcMediaKeyRotationConfiguration(
+            rotateKeyOnLateJoin = false
+        )
 
         fun shouldSendCallNotification(
             ownMembership: MatrixRtcCallMembership,
@@ -438,4 +618,17 @@ class NativeMatrixRtcCallService(
             }
         }
     }
+}
+
+private fun MatrixRtcCallMembership.debugSummary(): String {
+    return "userId=$userId deviceId=$deviceId memberId=$memberId " +
+        "rtcBackendIdentity=$rtcBackendIdentity kind=$kind"
+}
+
+private fun MatrixRtcToDeviceTarget.debugSummary(): String {
+    return "${userId}:${deviceId}"
+}
+
+private fun MatrixRtcCustomToDeviceSendFailure.debugSummary(): String {
+    return "${userId}:${deviceId}:$reason"
 }

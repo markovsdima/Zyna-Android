@@ -38,6 +38,10 @@ import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.app.AppViewModel
 import com.zyna.app.ui.app.AppViewModelFactory
+import com.zyna.app.ui.calls.NativeMatrixRtcCallController
+import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
+import com.zyna.app.ui.calls.NativeMatrixRtcCallView
+import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
@@ -48,10 +52,21 @@ import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private enum class RecordAudioPermissionRequest {
+        VOICE_RECORDING,
+        NATIVE_MATRIX_RTC_CALL
+    }
+
+    private enum class RootOverlayOwner {
+        PHOTO_EDITOR,
+        NATIVE_MATRIX_RTC_CALL
+    }
+
     private val appContainer by lazy { (application as ZynaApplication).appContainer }
     private lateinit var appViewModel: AppViewModel
     private lateinit var rootHost: ZynaRootHostView
@@ -65,6 +80,11 @@ class MainActivity : ComponentActivity() {
     private var hasRenderedState: Boolean = false
     private var voiceRecorderAutoSendHandle: AutoCloseable? = null
     private var sendVoiceAfterFinish: Boolean = false
+    private var pendingRecordAudioPermissionRequest: RecordAudioPermissionRequest? = null
+    private var pendingNativeMatrixRtcCall: NativeMatrixRtcCallLaunchContext? = null
+    private var rootOverlayOwner: RootOverlayOwner? = null
+    private var nativeMatrixRtcCallController: NativeMatrixRtcCallController? = null
+    private var nativeMatrixRtcCallRenderJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -90,8 +110,29 @@ class MainActivity : ComponentActivity() {
         recordAudioPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
         ) { granted ->
-            if (!granted) {
-                appContainer.voiceRecorderController.cancelRecording()
+            val pendingRequest = pendingRecordAudioPermissionRequest
+            val pendingCall = pendingNativeMatrixRtcCall
+            pendingRecordAudioPermissionRequest = null
+            pendingNativeMatrixRtcCall = null
+
+            when (pendingRequest) {
+                RecordAudioPermissionRequest.VOICE_RECORDING -> {
+                    if (granted) {
+                        startVoiceRecording()
+                    } else {
+                        appContainer.voiceRecorderController.cancelRecording()
+                    }
+                }
+                RecordAudioPermissionRequest.NATIVE_MATRIX_RTC_CALL -> {
+                    if (granted && pendingCall != null) {
+                        presentNativeMatrixRtcCall(pendingCall)
+                    }
+                }
+                null -> {
+                    if (!granted) {
+                        appContainer.voiceRecorderController.cancelRecording()
+                    }
+                }
             }
         }
 
@@ -112,6 +153,7 @@ class MainActivity : ComponentActivity() {
             onForwardRoomSelected = appViewModel::selectForwardRoom,
             onCancelForwardPicker = appViewModel::cancelForwardPicker,
             onRefreshChat = appViewModel::refreshCurrentChat,
+            onStartNativeMatrixRtcCall = ::startNativeMatrixRtcCallWithPermission,
             onCloseChat = appViewModel::closeChat,
             onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
             onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
@@ -140,6 +182,14 @@ class MainActivity : ComponentActivity() {
             onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
             onLogout = {
+                dismissNativeMatrixRtcCall()
+                pendingNativeMatrixRtcCall = null
+                pendingRecordAudioPermissionRequest = null
+                lifecycleScope.launch {
+                    runCatching {
+                        appContainer.nativeMatrixRtcCallService.leaveActiveCall()
+                    }
+                }
                 appContainer.audioPlaybackController.stop()
                 sendVoiceAfterFinish = false
                 appContainer.voiceRecorderController.clear()
@@ -152,6 +202,10 @@ class MainActivity : ComponentActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
+                    nativeMatrixRtcCallController?.let { controller ->
+                        controller.endCall()
+                        return
+                    }
                     if (rootHost.handleBack()) {
                         return
                     }
@@ -176,6 +230,7 @@ class MainActivity : ComponentActivity() {
                     latestState = state
                     hasRenderedState = true
                     rootHost.render(state, actions)
+                    restoreNativeMatrixRtcCallOverlayIfNeeded(state)
                     renderPhotoEditor()
                     ZynaPerfLog.end(
                         collectStart,
@@ -203,8 +258,117 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun startNativeMatrixRtcCallWithPermission(roomId: String, roomName: String) {
+        val chatRoute = latestState.route as? AppRoute.Chat ?: return
+        if (chatRoute.roomId != roomId || nativeMatrixRtcCallController != null) {
+            return
+        }
+        val activeRoomId = appContainer.nativeMatrixRtcCallService.currentRoomId()
+        val launchContext = NativeMatrixRtcCallLaunchContext(
+            roomId = roomId,
+            roomName = roomName.ifBlank { chatRoute.displayName }
+        )
+        if (activeRoomId != null) {
+            if (activeRoomId == roomId) {
+                presentNativeMatrixRtcCall(
+                    launchContext = launchContext,
+                    startCall = false
+                )
+            }
+            return
+        }
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            presentNativeMatrixRtcCall(launchContext)
+        } else {
+            pendingRecordAudioPermissionRequest = RecordAudioPermissionRequest.NATIVE_MATRIX_RTC_CALL
+            pendingNativeMatrixRtcCall = launchContext
+            recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun presentNativeMatrixRtcCall(
+        launchContext: NativeMatrixRtcCallLaunchContext,
+        startCall: Boolean = true
+    ) {
+        val chatRoute = latestState.route as? AppRoute.Chat ?: return
+        if (chatRoute.roomId != launchContext.roomId || nativeMatrixRtcCallController != null) {
+            return
+        }
+        if (startCall && appContainer.nativeMatrixRtcCallService.currentRoomId() != null) {
+            return
+        }
+
+        cancelVoiceRecording()
+        val view = NativeMatrixRtcCallView(this)
+        val controller = NativeMatrixRtcCallController(
+            launchContext = launchContext,
+            callService = appContainer.nativeMatrixRtcCallService,
+            scope = lifecycleScope,
+            startCallOnStart = startCall,
+            onDismiss = ::dismissNativeMatrixRtcCall
+        )
+        val actions = NativeMatrixRtcCallViewActions(
+            onToggleMicrophone = controller::toggleMicrophone,
+            onEndCall = controller::endCall
+        )
+
+        nativeMatrixRtcCallController = controller
+        rootOverlayOwner = RootOverlayOwner.NATIVE_MATRIX_RTC_CALL
+        rootHost.showOverlay(view)
+        view.render(controller.viewState.value, actions)
+        nativeMatrixRtcCallRenderJob?.cancel()
+        nativeMatrixRtcCallRenderJob = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                controller.viewState.collect { state ->
+                    view.render(state, actions)
+                }
+            }
+        }
+        controller.start()
+    }
+
+    private fun restoreNativeMatrixRtcCallOverlayIfNeeded(state: AppUiState) {
+        if (nativeMatrixRtcCallController != null) {
+            return
+        }
+        val activeRoomId = appContainer.nativeMatrixRtcCallService.currentRoomId() ?: return
+        val chatRoute = state.route as? AppRoute.Chat ?: return
+        if (chatRoute.roomId != activeRoomId) {
+            return
+        }
+
+        presentNativeMatrixRtcCall(
+            launchContext = NativeMatrixRtcCallLaunchContext(
+                roomId = activeRoomId,
+                roomName = chatRoute.displayName
+            ),
+            startCall = false
+        )
+    }
+
+    private fun dismissNativeMatrixRtcCall() {
+        nativeMatrixRtcCallRenderJob?.cancel()
+        nativeMatrixRtcCallRenderJob = null
+        nativeMatrixRtcCallController?.close()
+        nativeMatrixRtcCallController = null
+        if (rootOverlayOwner == RootOverlayOwner.NATIVE_MATRIX_RTC_CALL) {
+            rootOverlayOwner = null
+            rootHost.showOverlay(null)
+            renderPhotoEditor()
+        }
+    }
+
     private fun startVoiceRecordingWithPermission(): Boolean {
         if (latestState.route !is AppRoute.Chat) {
+            return false
+        }
+        if (
+            nativeMatrixRtcCallController != null ||
+            appContainer.nativeMatrixRtcCallService.currentRoomId() != null
+        ) {
             return false
         }
         if (
@@ -213,6 +377,7 @@ class MainActivity : ComponentActivity() {
         ) {
             return startVoiceRecording()
         } else {
+            pendingRecordAudioPermissionRequest = RecordAudioPermissionRequest.VOICE_RECORDING
             recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return false
         }
@@ -220,6 +385,12 @@ class MainActivity : ComponentActivity() {
 
     private fun startVoiceRecording(): Boolean {
         if (latestState.route !is AppRoute.Chat) {
+            return false
+        }
+        if (
+            nativeMatrixRtcCallController != null ||
+            appContainer.nativeMatrixRtcCallService.currentRoomId() != null
+        ) {
             return false
         }
         sendVoiceAfterFinish = false
@@ -346,8 +517,14 @@ class MainActivity : ComponentActivity() {
     private fun renderPhotoEditor() {
         val shouldShowEditor = photoEditorItems.isNotEmpty() && latestState.route is AppRoute.Chat
         if (!shouldShowEditor) {
-            rootHost.showOverlay(null)
+            if (rootOverlayOwner == RootOverlayOwner.PHOTO_EDITOR) {
+                rootOverlayOwner = null
+                rootHost.showOverlay(null)
+            }
             photoEditorView = null
+            return
+        }
+        if (rootOverlayOwner != null && rootOverlayOwner != RootOverlayOwner.PHOTO_EDITOR) {
             return
         }
 
@@ -414,6 +591,7 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+        rootOverlayOwner = RootOverlayOwner.PHOTO_EDITOR
         rootHost.showOverlay(editorView)
     }
 
@@ -437,8 +615,19 @@ class MainActivity : ComponentActivity() {
         voiceRecorderAutoSendHandle?.close()
         voiceRecorderAutoSendHandle = null
         sendVoiceAfterFinish = false
+        pendingNativeMatrixRtcCall = null
+        pendingRecordAudioPermissionRequest = null
+        nativeMatrixRtcCallRenderJob?.cancel()
+        nativeMatrixRtcCallRenderJob = null
+        nativeMatrixRtcCallController?.close()
+        nativeMatrixRtcCallController = null
         if (isFinishing) {
             appContainer.voiceRecorderController.clear()
+            lifecycleScope.launch {
+                runCatching {
+                    appContainer.nativeMatrixRtcCallService.leaveActiveCall()
+                }
+            }
         }
         super.onDestroy()
     }

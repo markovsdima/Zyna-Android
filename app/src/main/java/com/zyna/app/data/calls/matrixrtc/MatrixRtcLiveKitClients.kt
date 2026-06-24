@@ -1,5 +1,6 @@
 package com.zyna.app.data.calls.matrixrtc
 
+import android.util.Log
 import java.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
@@ -214,11 +215,19 @@ class MatrixRtcLiveKitTransportDiscoveryClient(
         serverName: String?,
         fallbackServiceUrl: String? = null
     ): MatrixRtcLiveKitDiscoveredTransport? {
+        logDebug(
+            "discover MatrixRTC transport homeserver=$homeserverUrl " +
+                "serverName=$serverName hasAccessToken=${!accessToken.isNullOrBlank()} " +
+                "hasFallback=${!fallbackServiceUrl.isNullOrBlank()}"
+        )
         if (!accessToken.isNullOrBlank()) {
             val transport = runCatching {
                 backendTransport(homeserverUrl, accessToken)
+            }.onFailure { error ->
+                logDebug("backend MatrixRTC transport discovery failed", error)
             }.getOrNull()
             if (transport != null) {
+                logDebug("selected backend MatrixRTC LiveKit transport")
                 return MatrixRtcLiveKitDiscoveredTransport(
                     transport = transport,
                     source = MatrixRtcLiveKitTransportDiscoverySource.BACKEND
@@ -229,8 +238,11 @@ class MatrixRtcLiveKitTransportDiscoveryClient(
         if (!serverName.isNullOrBlank()) {
             val transport = runCatching {
                 wellKnownTransport(serverName)
+            }.onFailure { error ->
+                logDebug("well-known MatrixRTC transport discovery failed", error)
             }.getOrNull()
             if (transport != null) {
+                logDebug("selected well-known MatrixRTC LiveKit transport")
                 return MatrixRtcLiveKitDiscoveredTransport(
                     transport = transport,
                     source = MatrixRtcLiveKitTransportDiscoverySource.WELL_KNOWN
@@ -239,8 +251,10 @@ class MatrixRtcLiveKitTransportDiscoveryClient(
         }
 
         if (fallbackServiceUrl.isNullOrBlank()) {
+            logDebug("MatrixRTC LiveKit transport discovery found no usable transport")
             return null
         }
+        logDebug("selected fallback MatrixRTC LiveKit transport")
         return MatrixRtcLiveKitDiscoveredTransport(
             transport = MatrixRtcTransport.liveKit(fallbackServiceUrl),
             source = MatrixRtcLiveKitTransportDiscoverySource.FALLBACK
@@ -261,6 +275,7 @@ class MatrixRtcLiveKitTransportDiscoveryClient(
             )
         )
         if (response.statusCode !in 200..299) {
+            logDebug("backend MatrixRTC transport status=${response.statusCode}")
             return null
         }
         val transports = JSONObject(response.body.decodeToString()).optJSONArray("rtc_transports")
@@ -275,6 +290,7 @@ class MatrixRtcLiveKitTransportDiscoveryClient(
             )
         )
         if (response.statusCode !in 200..299) {
+            logDebug("well-known MatrixRTC transport status=${response.statusCode} serverName=$serverName")
             return null
         }
         val foci = JSONObject(response.body.decodeToString())
@@ -289,6 +305,22 @@ class MatrixRtcLiveKitTransportDiscoveryClient(
             .firstOrNull { transport ->
                 transport.type == "livekit" && transport.liveKitServiceUrl != null
             }
+    }
+
+    private companion object {
+        const val TAG = "MatrixRtcLiveKit"
+
+        fun logDebug(message: String, error: Throwable? = null) {
+            try {
+                if (error != null) {
+                    Log.d(TAG, message, error)
+                } else {
+                    Log.d(TAG, message)
+                }
+            } catch (_: RuntimeException) {
+                // Local JVM unit tests do not provide android.util.Log.
+            }
+        }
     }
 }
 

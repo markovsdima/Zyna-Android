@@ -1,0 +1,146 @@
+uniform shader img;
+uniform float2 resolution;
+uniform float2 center;
+uniform float2 halfSize;
+uniform float radius;
+uniform float bezelWidth;
+uniform float glassThickness;
+uniform float ior;
+uniform float squircleN;
+uniform float refractScale;
+uniform float chromaSpread;
+uniform float adaptiveAppearance;
+uniform float adaptiveContrast;
+uniform float4 tintPremul;
+
+float sat1(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+
+float2 clampCoord(float2 coord) {
+    float2 maxCoord = float2(
+        max(resolution.x - 1.0, 0.0),
+        max(resolution.y - 1.0, 0.0)
+    );
+    return clamp(coord, float2(0.0, 0.0), maxCoord);
+}
+
+float sdRoundedRect(float2 point, float2 halfExtent, float cornerRadius) {
+    float safeRadius = min(cornerRadius, min(halfExtent.x, halfExtent.y));
+    float2 q = abs(point) - halfExtent + float2(safeRadius, safeRadius);
+    return length(max(q, float2(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - safeRadius;
+}
+
+float squircleSlope(float x, float exponent) {
+    float xc = clamp(x, 0.001, 1.0);
+    float n = max(exponent, 2.0);
+    float u = 1.0 - xc;
+    float uN = pow(u, n);
+    float inner = max(1.0 - uN, 0.000001);
+    return pow(u, n - 1.0) * pow(inner, 1.0 / n - 1.0);
+}
+
+float3 sampleRgb(float2 coord) {
+    half4 texel = img.eval(clampCoord(coord));
+    return float3(texel.r, texel.g, texel.b);
+}
+
+half4 main(float2 fragCoord) {
+    float2 safeHalf = float2(max(halfSize.x, 1.0), max(halfSize.y, 1.0));
+    float safeRadius = min(radius, min(safeHalf.x, safeHalf.y));
+    float2 local = fragCoord - center;
+
+    float sdf = sdRoundedRect(local, safeHalf, safeRadius);
+    float distFromEdge = max(-sdf, 0.0);
+    float bevel = max(bezelWidth, 1.0);
+    float normDist = sat1(distFromEdge / bevel);
+
+    float eps = 1.0;
+    float sdfX = sdRoundedRect(local + float2(eps, 0.0), safeHalf, safeRadius);
+    float sdfY = sdRoundedRect(local + float2(0.0, eps), safeHalf, safeRadius);
+    float2 gradient = float2(sdfX - sdf, sdfY - sdf);
+    float gradientLength = length(gradient);
+    float2 edgeNormal = gradientLength > 0.00001 ? gradient / gradientLength : float2(0.0, 0.0);
+
+    float slope = squircleSlope(normDist, squircleN);
+    float eta = 1.0 / max(ior, 1.001);
+    float slope2 = slope * slope;
+    float invLength = inversesqrt(1.0 + slope2);
+    float cosI = invLength;
+    float sinI = slope * invLength;
+    float cosT = sqrt(max(1.0 - eta * eta * sinI * sinI, 0.0));
+    float lateral = sinI * (cosT - eta * cosI);
+    float2 offset = edgeNormal * lateral * glassThickness * refractScale;
+
+    float chromaAmount = slope * chromaSpread;
+    float2 offsetR = offset * (1.0 - chromaAmount);
+    float2 offsetG = offset;
+    float2 offsetB = offset * (1.0 + chromaAmount);
+
+    float3 color = float3(
+        sampleRgb(fragCoord - offsetR).r,
+        sampleRgb(fragCoord - offsetG).g,
+        sampleRgb(fragCoord - offsetB).b
+    );
+
+    float luma = dot(color, float3(0.299, 0.587, 0.114));
+    float targetLuma = mix(luma, 0.45, 0.04);
+    float3 chroma = (color - float3(luma, luma, luma)) * 0.92;
+    color = clamp(
+        float3(targetLuma, targetLuma, targetLuma) + chroma,
+        float3(0.0, 0.0, 0.0),
+        float3(1.0, 1.0, 1.0)
+    );
+
+    float appearance = sat1(adaptiveAppearance);
+    float contrast = sat1(adaptiveContrast);
+    float adaptiveTarget = mix(0.18, 0.82, appearance);
+    float adaptiveStrength = mix(0.16, 0.38, contrast);
+
+    luma = dot(color, float3(0.299, 0.587, 0.114));
+    chroma = color - float3(luma, luma, luma);
+    float adaptiveLuma = mix(luma, adaptiveTarget, adaptiveStrength);
+    float chromaKeep = mix(0.90, 0.68, contrast);
+    color = clamp(
+        float3(adaptiveLuma, adaptiveLuma, adaptiveLuma) + chroma * chromaKeep,
+        float3(0.0, 0.0, 0.0),
+        float3(1.0, 1.0, 1.0)
+    );
+
+    float preLuma = dot(color, float3(0.299, 0.587, 0.114));
+    float darkLift = 1.0 - smoothstep(0.0, 0.12, preLuma);
+    color += float3(0.034, 0.034, 0.034) * appearance * darkLift;
+    color *= mix(0.92, 1.10, appearance);
+    float boostedLuma = dot(color, float3(0.299, 0.587, 0.114));
+    color = mix(float3(boostedLuma, boostedLuma, boostedLuma), color, 1.08);
+
+    float fresnelZone = sat1(distFromEdge / (bevel * 0.15));
+    float fresnel = pow(1.0 - fresnelZone, 4.0);
+    float lightDir = sat1((-edgeNormal.x - edgeNormal.y) * 0.5 + 0.5);
+    color += float3(1.0, 1.0, 1.02) * fresnel * mix(0.02, 0.08, lightDir);
+
+    float shadowZone = smoothstep(0.0, bevel * 0.12, distFromEdge);
+    float shadowSide = sat1((edgeNormal.x + edgeNormal.y) * 0.5 + 0.5);
+    color *= 1.0 - (1.0 - shadowZone) * shadowSide * 0.08;
+
+    float borderInner = bevel * 0.02;
+    float borderOuter = bevel * 0.08;
+    float borderMask = smoothstep(borderInner, borderInner + borderOuter * 0.3, distFromEdge)
+        * (1.0 - smoothstep(borderInner + borderOuter * 0.3, borderInner + borderOuter, distFromEdge));
+    float borderBrightness = 0.3 * mix(0.05, 0.5, lightDir);
+    float refLuma = dot(color, float3(0.299, 0.587, 0.114));
+    float3 borderColor = mix(
+        float3(1.0, 1.0, 1.0),
+        clamp(
+            mix(float3(refLuma, refLuma, refLuma), color, 1.5),
+            float3(0.0, 0.0, 0.0),
+            float3(1.0, 1.0, 1.0)
+        ),
+        0.3
+    );
+    color += borderColor * borderMask * borderBrightness;
+
+    color = tintPremul.rgb + color * (1.0 - tintPremul.a);
+    color = clamp(color, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+    return half4(color.r, color.g, color.b, 1.0);
+}

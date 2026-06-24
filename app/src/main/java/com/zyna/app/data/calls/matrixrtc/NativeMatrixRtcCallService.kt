@@ -97,10 +97,16 @@ class NativeMatrixRtcCallService(
     val state: StateFlow<NativeMatrixRtcCallServiceState> = _state.asStateFlow()
     private val _microphoneEnabled = MutableStateFlow(true)
     val microphoneEnabled: StateFlow<Boolean> = _microphoneEnabled.asStateFlow()
+    private val _cameraEnabled = MutableStateFlow(false)
+    val cameraEnabled: StateFlow<Boolean> = _cameraEnabled.asStateFlow()
+    private val _localCameraFacingFront = MutableStateFlow(true)
+    val localCameraFacingFront: StateFlow<Boolean> = _localCameraFacingFront.asStateFlow()
     private val _audioOutputState = MutableStateFlow(MatrixRtcAudioOutputState())
     val audioOutputState: StateFlow<MatrixRtcAudioOutputState> = _audioOutputState.asStateFlow()
     private val _remoteParticipantCount = MutableStateFlow(0)
     val remoteParticipantCount: StateFlow<Int> = _remoteParticipantCount.asStateFlow()
+    private val _participants = MutableStateFlow(NativeMatrixRtcCallParticipantsSnapshot.empty())
+    val participants: StateFlow<NativeMatrixRtcCallParticipantsSnapshot> = _participants.asStateFlow()
     private val _pickupState = MutableStateFlow<NativeMatrixRtcCallPickupState>(
         NativeMatrixRtcCallPickupState.Inactive
     )
@@ -115,6 +121,10 @@ class NativeMatrixRtcCallService(
     private var pickupTimeoutJob: Job? = null
     private var pickupDeclineHandle: MatrixRtcCancellable? = null
     private var remoteParticipantIds: Set<String> = emptySet()
+    @Volatile
+    private var participantStoreAttemptId: String? = null
+    private val participantStoreLock = Any()
+    private val participantStore = NativeMatrixRtcCallParticipantStore()
     private val remoteParticipantPresenceQueueLock = Any()
     private var remoteParticipantPresenceTail: Job = Job().apply { complete() }
 
@@ -188,6 +198,7 @@ class NativeMatrixRtcCallService(
                 roomId = roomId,
                 endpointVersion = MatrixRtcLiveKitJwtEndpointVersion.LEGACY
             )
+            setLocalParticipantIdentity(attemptId, sfuConfig.liveKitIdentity)
             MatrixRtcCallDebugLog.d(
                 "nativeCallSfuConfig roomId=$roomId attemptId=$attemptId " +
                     "liveKitIdentity=${sfuConfig.liveKitIdentity} liveKitAlias=${sfuConfig.liveKitAlias} " +
@@ -348,6 +359,56 @@ class NativeMatrixRtcCallService(
         _microphoneEnabled.value = enabled
     }
 
+    fun setCameraEnabledAsync(
+        enabled: Boolean,
+        onFailure: (Throwable) -> Unit = {}
+    ): Job {
+        return coroutineScope.launch {
+            try {
+                setCameraEnabled(enabled)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onError(error)
+                onFailure(error)
+            }
+        }
+    }
+
+    suspend fun setCameraEnabled(enabled: Boolean) {
+        currentActiveCall()
+            ?.liveKitSession
+            ?.setCameraEnabled(enabled)
+            ?: throw NativeMatrixRtcCallServiceException.NoActiveCall
+        _cameraEnabled.value = enabled
+    }
+
+    fun switchCameraAsync(
+        onFailure: (Throwable) -> Unit = {}
+    ): Job {
+        return coroutineScope.launch {
+            try {
+                switchCamera()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onError(error)
+                onFailure(error)
+            }
+        }
+    }
+
+    suspend fun switchCamera(): Boolean {
+        val result = currentActiveCall()
+            ?.liveKitSession
+            ?.switchCamera()
+            ?: throw NativeMatrixRtcCallServiceException.NoActiveCall
+        if (result.switched) {
+            _localCameraFacingFront.value = result.facing == MatrixRtcLiveKitCameraFacing.FRONT
+        }
+        return result.switched
+    }
+
     fun setSpeakerphoneEnabledAsync(
         enabled: Boolean,
         onFailure: (Throwable) -> Unit = {}
@@ -420,8 +481,11 @@ class NativeMatrixRtcCallService(
 
     fun currentRoomId(): String? = activeRoomId
     fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
+    fun currentCameraEnabled(): Boolean = _cameraEnabled.value
+    fun currentLocalCameraFacingFront(): Boolean = _localCameraFacingFront.value
     fun currentAudioOutputState(): MatrixRtcAudioOutputState = _audioOutputState.value
     fun currentRemoteParticipantCount(): Int = _remoteParticipantCount.value
+    fun currentParticipantsSnapshot(): NativeMatrixRtcCallParticipantsSnapshot = _participants.value
     fun currentPickupState(): NativeMatrixRtcCallPickupState = _pickupState.value
     fun currentFailure(): Throwable? = _lastFailure.value
 
@@ -458,6 +522,10 @@ class NativeMatrixRtcCallService(
         attemptId: String
     ) {
         MatrixRtcCallDebugLog.d("nativeCallLiveKitEvent attemptId=$attemptId ${event.debugSummary()}")
+        if (event is MatrixRtcLiveKitRoomSessionEvent.LocalVideoTrackPublished) {
+            _localCameraFacingFront.value = event.videoTrack.isFrontFacing
+        }
+        applyLiveKitEventToParticipants(attemptId, event)
         when (event) {
             is MatrixRtcLiveKitRoomSessionEvent.Disconnected ->
                 scheduleEndActiveCall(attemptId)
@@ -512,6 +580,52 @@ class NativeMatrixRtcCallService(
                 _audioOutputState.value = state
             }
         }
+    }
+
+    private fun resetParticipantState(
+        attemptId: String?,
+        roomId: String?
+    ) {
+        val snapshot = synchronized(participantStoreLock) {
+            participantStoreAttemptId = attemptId
+            participantStore.reset(roomId)
+        }
+        _participants.value = snapshot
+    }
+
+    private fun setLocalParticipantIdentity(
+        attemptId: String,
+        identity: String?
+    ) {
+        if (participantStoreAttemptId != attemptId) {
+            return
+        }
+        val snapshot = synchronized(participantStoreLock) {
+            if (participantStoreAttemptId != attemptId) {
+                return
+            }
+            participantStore.setLocalIdentity(identity)
+        }
+        _participants.value = snapshot
+    }
+
+    private fun applyLiveKitEventToParticipants(
+        attemptId: String,
+        event: MatrixRtcLiveKitRoomSessionEvent
+    ) {
+        if (participantStoreAttemptId != attemptId) {
+            return
+        }
+        val snapshot = synchronized(participantStoreLock) {
+            if (participantStoreAttemptId != attemptId) {
+                return
+            }
+            if (participantStore.snapshot.roomId == null) {
+                return
+            }
+            participantStore.apply(event)
+        } ?: return
+        _participants.value = snapshot
     }
 
     private fun markRemoteParticipantLeft(
@@ -944,9 +1058,12 @@ class NativeMatrixRtcCallService(
             activeRoomId = roomId
             _lastFailure.value = null
             _microphoneEnabled.value = true
+            _cameraEnabled.value = false
+            _localCameraFacingFront.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
             remoteParticipantIds = emptySet()
             _remoteParticipantCount.value = 0
+            resetParticipantState(attemptId = attemptId, roomId = roomId)
             pickupLifecycleToCancel = currentPickupLifecycleCancellations()
             pickupTimeoutJob = null
             pickupDeclineHandle = null
@@ -1044,9 +1161,12 @@ class NativeMatrixRtcCallService(
             pickupTimeoutJob = null
             pickupDeclineHandle = null
             _microphoneEnabled.value = true
+            _cameraEnabled.value = false
+            _localCameraFacingFront.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
             remoteParticipantIds = emptySet()
             _remoteParticipantCount.value = 0
+            resetParticipantState(attemptId = null, roomId = null)
             _pickupState.value = NativeMatrixRtcCallPickupState.Inactive
             _state.value = NativeMatrixRtcCallServiceState.IDLE
             cancellations
@@ -1094,9 +1214,12 @@ class NativeMatrixRtcCallService(
             pickupTimeoutJob = null
             pickupDeclineHandle = null
             _microphoneEnabled.value = true
+            _cameraEnabled.value = false
+            _localCameraFacingFront.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
             remoteParticipantIds = emptySet()
             _remoteParticipantCount.value = 0
+            resetParticipantState(attemptId = null, roomId = null)
             if (
                 _pickupState.value !is NativeMatrixRtcCallPickupState.Declined &&
                 _pickupState.value !is NativeMatrixRtcCallPickupState.TimedOut
@@ -1217,6 +1340,8 @@ class NativeMatrixRtcCallService(
                     "remoteTrackPublished"
                 is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed ->
                     "remoteTrackSubscribed"
+                is MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackSubscribed ->
+                    "remoteVideoTrackSubscribed"
                 else -> null
             }
         }

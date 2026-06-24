@@ -72,6 +72,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var rootHost: ZynaRootHostView
     private lateinit var photoPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>
     private lateinit var recordAudioPermissionLauncher: ActivityResultLauncher<String>
+    private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
     private var latestState: AppUiState = AppUiState()
     private var photoEditorItems: List<OutgoingPhotoDraftItem> = emptyList()
     private var isPreparingPhotos: Boolean = false
@@ -134,6 +135,13 @@ class MainActivity : ComponentActivity() {
                         appContainer.voiceRecorderController.cancelRecording()
                     }
                 }
+            }
+        }
+        cameraPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                nativeMatrixRtcCallController?.toggleCamera()
             }
         }
 
@@ -310,6 +318,8 @@ class MainActivity : ComponentActivity() {
         val actions = NativeMatrixRtcCallViewActions(
             onToggleMicrophone = controller::toggleMicrophone,
             onToggleSpeakerphone = controller::toggleSpeakerphone,
+            onToggleCamera = ::toggleNativeMatrixRtcCameraWithPermission,
+            onSwitchCamera = controller::switchCamera,
             onEndCall = controller::endCall
         )
 
@@ -327,6 +337,19 @@ class MainActivity : ComponentActivity() {
         }
         controller.start()
         controller.restoreServiceState()
+    }
+
+    private fun toggleNativeMatrixRtcCameraWithPermission() {
+        val controller = nativeMatrixRtcCallController ?: return
+        if (
+            controller.viewState.value.isCameraEnabled ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            controller.toggleCamera()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     private fun restoreNativeMatrixRtcCallOverlayIfNeeded(state: AppUiState) {

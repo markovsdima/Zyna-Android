@@ -6,6 +6,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -15,8 +16,10 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcAudioOutputState
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcLiveKitVideoTrackReference
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceException
+import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallParticipantsSnapshot
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallPickupState
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceState
 import kotlin.math.roundToInt
@@ -42,14 +45,23 @@ data class NativeMatrixRtcCallViewState(
     val audioOutputLabel: String?,
     val isBusy: Boolean,
     val canToggleMicrophone: Boolean,
+    val isCameraEnabled: Boolean,
+    val canToggleCamera: Boolean,
+    val canSwitchCamera: Boolean,
     val canEnd: Boolean,
     val isEnding: Boolean,
-    val isFailed: Boolean
+    val isFailed: Boolean,
+    val primaryVideoTrack: MatrixRtcLiveKitVideoTrackReference?,
+    val shouldMirrorPrimaryVideo: Boolean,
+    val previewVideoTrack: MatrixRtcLiveKitVideoTrackReference?,
+    val shouldMirrorPreviewVideo: Boolean
 )
 
 data class NativeMatrixRtcCallViewActions(
     val onToggleMicrophone: () -> Unit,
     val onToggleSpeakerphone: () -> Unit,
+    val onToggleCamera: () -> Unit,
+    val onSwitchCamera: () -> Unit,
     val onEndCall: () -> Unit
 )
 
@@ -70,25 +82,38 @@ internal class NativeMatrixRtcCallController(
             audioOutputLabel = null,
             isBusy = true,
             canToggleMicrophone = false,
+            isCameraEnabled = false,
+            canToggleCamera = false,
+            canSwitchCamera = false,
             canEnd = true,
             isEnding = false,
-            isFailed = false
+            isFailed = false,
+            primaryVideoTrack = null,
+            shouldMirrorPrimaryVideo = false,
+            previewVideoTrack = null,
+            shouldMirrorPreviewVideo = false
         )
     )
     val viewState: StateFlow<NativeMatrixRtcCallViewState> = _viewState.asStateFlow()
 
     private var serviceStateJob: Job? = null
     private var microphoneStateJob: Job? = null
+    private var cameraStateJob: Job? = null
+    private var localCameraFacingFrontJob: Job? = null
     private var audioOutputStateJob: Job? = null
     private var remoteParticipantCountJob: Job? = null
+    private var participantsJob: Job? = null
     private var pickupStateJob: Job? = null
     private var dismissJob: Job? = null
     private var hasStarted = false
     private var hasObservedRelevantCall = !startCallOnStart
     private var wasConnected = false
     private var isMuted = false
+    private var isCameraEnabled = false
+    private var isLocalCameraFacingFront = true
     private var audioOutputState = MatrixRtcAudioOutputState()
     private var remoteParticipantCount = 0
+    private var participantsSnapshot = NativeMatrixRtcCallParticipantsSnapshot.empty()
     private var hasObservedRemoteParticipant = false
     private var pickupState: NativeMatrixRtcCallPickupState = NativeMatrixRtcCallPickupState.Inactive
     private var terminalStatus: String? = null
@@ -113,6 +138,22 @@ internal class NativeMatrixRtcCallController(
                 }
             }
         }
+        cameraStateJob = scope.launch {
+            callService.cameraEnabled.collect { enabled ->
+                isCameraEnabled = enabled
+                if (viewState.value.canToggleMicrophone && !isEnding) {
+                    renderConnected()
+                }
+            }
+        }
+        localCameraFacingFrontJob = scope.launch {
+            callService.localCameraFacingFront.collect { facingFront ->
+                isLocalCameraFacingFront = facingFront
+                if (viewState.value.canToggleMicrophone && !isEnding) {
+                    renderConnected()
+                }
+            }
+        }
         audioOutputStateJob = scope.launch {
             callService.audioOutputState.collect { state ->
                 audioOutputState = state
@@ -129,6 +170,19 @@ internal class NativeMatrixRtcCallController(
                 }
                 if (viewState.value.canToggleMicrophone && !isEnding) {
                     renderConnected()
+                }
+            }
+        }
+        participantsJob = scope.launch {
+            callService.participants.collect { snapshot ->
+                if (snapshot.roomId == null || snapshot.roomId == launchContext.roomId) {
+                    participantsSnapshot = snapshot
+                    if (snapshot.remoteParticipantCount > 0) {
+                        hasObservedRemoteParticipant = true
+                    }
+                    if (viewState.value.canToggleMicrophone && !isEnding) {
+                        renderConnected()
+                    }
                 }
             }
         }
@@ -159,8 +213,11 @@ internal class NativeMatrixRtcCallController(
             return
         }
         isMuted = !callService.currentMicrophoneEnabled()
+        isCameraEnabled = callService.currentCameraEnabled()
+        isLocalCameraFacingFront = callService.currentLocalCameraFacingFront()
         audioOutputState = callService.currentAudioOutputState()
         remoteParticipantCount = callService.currentRemoteParticipantCount()
+        participantsSnapshot = callService.currentParticipantsSnapshot()
         pickupState = callService.currentPickupState()
         if (remoteParticipantCount > 0) {
             hasObservedRemoteParticipant = true
@@ -182,6 +239,41 @@ internal class NativeMatrixRtcCallController(
                     if (!isEnding && !isClosed) {
                         isMuted = !nextMuted
                         renderConnected(statusOverride = "Could not change microphone")
+                    }
+                }
+            }
+        )
+    }
+
+    fun toggleCamera() {
+        if (isClosed || isEnding || !viewState.value.canToggleCamera) {
+            return
+        }
+        val nextCameraEnabled = !isCameraEnabled
+        isCameraEnabled = nextCameraEnabled
+        renderConnected()
+        callService.setCameraEnabledAsync(
+            enabled = nextCameraEnabled,
+            onFailure = {
+                scope.launch {
+                    if (!isEnding && !isClosed) {
+                        isCameraEnabled = !nextCameraEnabled
+                        renderConnected(statusOverride = "Could not change camera")
+                    }
+                }
+            }
+        )
+    }
+
+    fun switchCamera() {
+        if (isClosed || isEnding || !viewState.value.canSwitchCamera) {
+            return
+        }
+        callService.switchCameraAsync(
+            onFailure = {
+                scope.launch {
+                    if (!isEnding && !isClosed) {
+                        renderConnected(statusOverride = "Could not switch camera")
                     }
                 }
             }
@@ -216,6 +308,8 @@ internal class NativeMatrixRtcCallController(
             isBusy = true,
             canToggleMicrophone = false,
             canToggleSpeakerphone = false,
+            canToggleCamera = false,
+            canSwitchCamera = false,
             canEnd = false,
             isEnding = true
         )
@@ -236,10 +330,16 @@ internal class NativeMatrixRtcCallController(
         serviceStateJob = null
         microphoneStateJob?.cancel()
         microphoneStateJob = null
+        cameraStateJob?.cancel()
+        cameraStateJob = null
+        localCameraFacingFrontJob?.cancel()
+        localCameraFacingFrontJob = null
         audioOutputStateJob?.cancel()
         audioOutputStateJob = null
         remoteParticipantCountJob?.cancel()
         remoteParticipantCountJob = null
+        participantsJob?.cancel()
+        participantsJob = null
         pickupStateJob?.cancel()
         pickupStateJob = null
         dismissJob?.cancel()
@@ -273,6 +373,8 @@ internal class NativeMatrixRtcCallController(
                         isBusy = true,
                         canToggleMicrophone = false,
                         canToggleSpeakerphone = false,
+                        canToggleCamera = false,
+                        canSwitchCamera = false,
                         canEnd = true,
                         isEnding = false,
                         isFailed = false
@@ -284,8 +386,11 @@ internal class NativeMatrixRtcCallController(
                     hasObservedRelevantCall = true
                     wasConnected = true
                     isMuted = !callService.currentMicrophoneEnabled()
+                    isCameraEnabled = callService.currentCameraEnabled()
+                    isLocalCameraFacingFront = callService.currentLocalCameraFacingFront()
                     audioOutputState = callService.currentAudioOutputState()
                     remoteParticipantCount = callService.currentRemoteParticipantCount()
+                    participantsSnapshot = callService.currentParticipantsSnapshot()
                     if (remoteParticipantCount > 0) {
                         hasObservedRemoteParticipant = true
                     }
@@ -301,6 +406,8 @@ internal class NativeMatrixRtcCallController(
                         isBusy = true,
                         canToggleMicrophone = false,
                         canToggleSpeakerphone = false,
+                        canToggleCamera = false,
+                        canSwitchCamera = false,
                         canEnd = false,
                         isEnding = isLocalEnding,
                         isFailed = false
@@ -314,6 +421,11 @@ internal class NativeMatrixRtcCallController(
         val audioOutputLabel = audioOutputState.selectedDeviceLabel
         val currentPickupState = callService.currentPickupState()
         pickupState = currentPickupState
+        val localVideoTrack = participantsSnapshot.localVideoTrack
+        val remoteVideoTrack = participantsSnapshot.primaryRemoteVideoTrack
+        val primaryVideoTrack = remoteVideoTrack ?: localVideoTrack
+        val isPrimaryVideoLocal = remoteVideoTrack == null && localVideoTrack != null
+        val previewVideoTrack = if (remoteVideoTrack != null) localVideoTrack else null
         _viewState.value = viewState.value.copy(
             statusText = statusOverride ?: when {
                 terminalStatus != null -> terminalStatus.orEmpty()
@@ -331,9 +443,16 @@ internal class NativeMatrixRtcCallController(
             audioOutputLabel = audioOutputLabel,
             isBusy = false,
             canToggleMicrophone = true,
+            isCameraEnabled = isCameraEnabled,
+            canToggleCamera = true,
+            canSwitchCamera = isCameraEnabled,
             canEnd = true,
             isEnding = false,
-            isFailed = false
+            isFailed = false,
+            primaryVideoTrack = primaryVideoTrack,
+            shouldMirrorPrimaryVideo = isPrimaryVideoLocal && isLocalCameraFacingFront,
+            previewVideoTrack = previewVideoTrack,
+            shouldMirrorPreviewVideo = previewVideoTrack != null && isLocalCameraFacingFront
         )
     }
 
@@ -349,6 +468,8 @@ internal class NativeMatrixRtcCallController(
                         statusText = "Ringing",
                         isBusy = false,
                         canToggleMicrophone = true,
+                        canToggleCamera = true,
+                        canSwitchCamera = isCameraEnabled,
                         canEnd = true,
                         isEnding = false,
                         isFailed = false
@@ -389,9 +510,15 @@ internal class NativeMatrixRtcCallController(
             isBusy = false,
             canToggleMicrophone = false,
             canToggleSpeakerphone = false,
+            canToggleCamera = false,
+            canSwitchCamera = false,
             canEnd = false,
             isEnding = false,
-            isFailed = false
+            isFailed = false,
+            primaryVideoTrack = null,
+            shouldMirrorPrimaryVideo = false,
+            previewVideoTrack = null,
+            shouldMirrorPreviewVideo = false
         )
         scheduleDismiss(delayMillis = 900)
     }
@@ -405,9 +532,15 @@ internal class NativeMatrixRtcCallController(
             isBusy = false,
             canToggleMicrophone = false,
             canToggleSpeakerphone = false,
+            canToggleCamera = false,
+            canSwitchCamera = false,
             canEnd = true,
             isEnding = false,
-            isFailed = true
+            isFailed = true,
+            primaryVideoTrack = null,
+            shouldMirrorPrimaryVideo = false,
+            previewVideoTrack = null,
+            shouldMirrorPreviewVideo = false
         )
         scheduleDismiss(delayMillis = 1_800)
     }
@@ -422,9 +555,15 @@ internal class NativeMatrixRtcCallController(
             isBusy = false,
             canToggleMicrophone = false,
             canToggleSpeakerphone = false,
+            canToggleCamera = false,
+            canSwitchCamera = false,
             canEnd = false,
             isEnding = false,
-            isFailed = false
+            isFailed = false,
+            primaryVideoTrack = null,
+            shouldMirrorPrimaryVideo = false,
+            previewVideoTrack = null,
+            shouldMirrorPreviewVideo = false
         )
         scheduleDismiss(delayMillis = delayMillis)
     }
@@ -453,6 +592,39 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
     private var topInset = 0
     private var bottomInset = 0
 
+    private val primaryVideoView = NativeMatrixRtcLiveKitVideoView(context)
+    private val previewVideoView = NativeMatrixRtcLiveKitVideoView(context).apply {
+        elevation = dp(10).toFloat()
+        background = roundedRect(
+            color = Color.BLACK,
+            strokeColor = Color.argb(96, 255, 255, 255)
+        )
+    }
+    private val videoTopOverlay = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(dp(20), dp(14), dp(20), dp(14))
+        background = roundedRect(
+            color = Color.argb(112, 0, 0, 0),
+            strokeColor = Color.argb(28, 255, 255, 255)
+        )
+        visibility = View.GONE
+    }
+    private val videoRoomNameText = TextView(context).apply {
+        gravity = Gravity.CENTER
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        textSize = 18f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+    }
+    private val videoStatusText = TextView(context).apply {
+        gravity = Gravity.CENTER
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        textSize = 13f
+        setTextColor(Color.argb(210, 255, 255, 255))
+    }
     private val content = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
@@ -487,7 +659,7 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
     }
     private val microphoneButton = TextView(context).apply {
         gravity = Gravity.CENTER
-        textSize = 16f
+        textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(Color.WHITE)
         isClickable = true
@@ -495,7 +667,23 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
     }
     private val speakerButton = TextView(context).apply {
         gravity = Gravity.CENTER
-        textSize = 16f
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+        isClickable = true
+        isFocusable = true
+    }
+    private val cameraButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+        isClickable = true
+        isFocusable = true
+    }
+    private val switchCameraButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(Color.WHITE)
         isClickable = true
@@ -503,7 +691,7 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
     }
     private val endButton = TextView(context).apply {
         gravity = Gravity.CENTER
-        textSize = 16f
+        textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
         setTextColor(Color.WHITE)
         isClickable = true
@@ -516,11 +704,55 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
         setBackgroundColor(Color.rgb(13, 17, 20))
 
         addView(
+            primaryVideoView,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        addView(
             content,
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+        )
+        addView(
+            videoTopOverlay,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            ).apply {
+                leftMargin = dp(16)
+                rightMargin = dp(16)
+            }
+        )
+        videoTopOverlay.addView(
+            videoRoomNameText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        videoTopOverlay.addView(
+            videoStatusText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(3)
+            }
+        )
+        addView(
+            previewVideoView,
+            LayoutParams(
+                dp(116),
+                dp(154),
+                Gravity.TOP or Gravity.RIGHT
+            ).apply {
+                rightMargin = dp(18)
+            }
         )
         content.addView(
             Space(context),
@@ -572,13 +804,25 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
         controlsRow.addView(
             microphoneButton,
             LinearLayout.LayoutParams(0, dp(56), 1f).apply {
-                rightMargin = dp(10)
+                rightMargin = dp(6)
             }
         )
         controlsRow.addView(
             speakerButton,
             LinearLayout.LayoutParams(0, dp(56), 1f).apply {
-                rightMargin = dp(10)
+                rightMargin = dp(6)
+            }
+        )
+        controlsRow.addView(
+            cameraButton,
+            LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+                rightMargin = dp(6)
+            }
+        )
+        controlsRow.addView(
+            switchCameraButton,
+            LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+                rightMargin = dp(6)
             }
         )
         controlsRow.addView(
@@ -601,6 +845,22 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
     }
 
     fun render(state: NativeMatrixRtcCallViewState, actions: NativeMatrixRtcCallViewActions) {
+        val hasPrimaryVideo = state.primaryVideoTrack != null
+        primaryVideoView.setVideoTrack(
+            track = state.primaryVideoTrack,
+            mirror = state.shouldMirrorPrimaryVideo
+        )
+        previewVideoView.setVideoTrack(
+            track = state.previewVideoTrack,
+            mirror = state.shouldMirrorPreviewVideo
+        )
+        videoTopOverlay.visibility = if (hasPrimaryVideo) View.VISIBLE else View.GONE
+        videoRoomNameText.text = state.roomName
+        videoStatusText.text = state.statusText
+        avatarText.visibility = if (hasPrimaryVideo) View.GONE else View.VISIBLE
+        roomNameText.visibility = if (hasPrimaryVideo) View.GONE else View.VISIBLE
+        statusText.visibility = if (hasPrimaryVideo) View.GONE else View.VISIBLE
+
         roomNameText.text = state.roomName
         avatarText.text = state.roomName.avatarInitial()
         statusText.text = state.statusText
@@ -623,6 +883,24 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
         )
         speakerButton.setOnClickListener { actions.onToggleSpeakerphone() }
 
+        cameraButton.text = if (state.isCameraEnabled) "Stop" else "Video"
+        cameraButton.isEnabled = state.canToggleCamera && !state.isBusy
+        cameraButton.alpha = if (cameraButton.isEnabled) 1f else 0.42f
+        cameraButton.background = roundedRect(
+            color = if (state.isCameraEnabled) Color.rgb(45, 93, 82) else Color.rgb(58, 76, 82),
+            strokeColor = Color.argb(48, 255, 255, 255)
+        )
+        cameraButton.setOnClickListener { actions.onToggleCamera() }
+
+        switchCameraButton.text = "Flip"
+        switchCameraButton.isEnabled = state.canSwitchCamera && !state.isBusy
+        switchCameraButton.alpha = if (switchCameraButton.isEnabled) 1f else 0.42f
+        switchCameraButton.background = roundedRect(
+            color = Color.rgb(58, 76, 82),
+            strokeColor = Color.argb(48, 255, 255, 255)
+        )
+        switchCameraButton.setOnClickListener { actions.onSwitchCamera() }
+
         endButton.text = when {
             state.isFailed -> "Close"
             state.isEnding -> "Ending"
@@ -642,6 +920,14 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
             top = topInset + dp(24),
             bottom = bottomInset + dp(24)
         )
+        (videoTopOverlay.layoutParams as? LayoutParams)?.let { params ->
+            params.topMargin = topInset + dp(12)
+            videoTopOverlay.layoutParams = params
+        }
+        (previewVideoView.layoutParams as? LayoutParams)?.let { params ->
+            params.topMargin = topInset + dp(92)
+            previewVideoView.layoutParams = params
+        }
     }
 
     private fun roundedRect(color: Int, strokeColor: Int): GradientDrawable {

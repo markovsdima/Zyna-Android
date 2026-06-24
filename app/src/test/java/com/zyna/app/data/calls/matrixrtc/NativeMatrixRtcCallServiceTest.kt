@@ -654,6 +654,86 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun setCameraEnabledAndSwitchCameraUseLiveKitSession() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(environment)
+
+        service.startAudioCall(roomId = ROOM_ID)
+        service.setCameraEnabled(true)
+        assertEquals(true, service.currentCameraEnabled())
+        assertEquals(true, service.currentLocalCameraFacingFront())
+
+        assertEquals(true, service.switchCamera())
+        assertEquals(false, service.currentLocalCameraFacingFront())
+        service.setCameraEnabled(false)
+
+        assertEquals(listOf(true, false), environment.liveKitSessions.single().controller.cameraHistory)
+        assertEquals(1, environment.liveKitSessions.single().controller.switchCameraCount)
+        assertEquals(false, service.currentCameraEnabled())
+        assertEquals(false, service.currentLocalCameraFacingFront())
+
+        assertEquals(true, service.leaveActiveCall())
+        assertEquals(true, service.currentLocalCameraFacingFront())
+    }
+
+    @Test
+    fun liveKitVideoEventsUpdateParticipantsSnapshot() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(environment)
+
+        service.startAudioCall(roomId = ROOM_ID)
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.LocalVideoTrackPublished(
+                publication = videoTrackPublication("local-camera"),
+                videoTrack = MatrixRtcLiveKitLocalVideoTrack.testing(trackSid = "local-camera")
+            )
+        )
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackSubscribed(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                publication = videoTrackPublication("remote-camera"),
+                videoTrack = MatrixRtcLiveKitRemoteVideoTrack.testing(
+                    participantIdentity = "@bob:example.org:BOBDEVICE",
+                    trackSid = "remote-camera"
+                )
+            )
+        )
+
+        val snapshot = service.currentParticipantsSnapshot()
+        assertEquals("local:local-camera", snapshot.localVideoTrack?.id)
+        assertEquals("@bob:example.org:BOBDEVICE:remote-camera", snapshot.primaryRemoteVideoTrack?.id)
+        assertEquals(1, snapshot.remoteParticipantCount)
+        assertEquals(true, snapshot.remoteParticipants.single().hasSubscribedVideo)
+
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackUnsubscribed(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                publication = videoTrackPublication("remote-camera")
+            )
+        )
+
+        assertNull(service.currentParticipantsSnapshot().primaryRemoteVideoTrack)
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
     fun setSpeakerphoneEnabledFailsWhenRouteIsUnavailable() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         val membershipClient = environment.membershipClientFor(ROOM_ID)
@@ -778,6 +858,17 @@ class NativeMatrixRtcCallServiceTest {
             name = "audio",
             kind = "AUDIO",
             source = "MICROPHONE",
+            isMuted = false,
+            isSubscribed = true
+        )
+    }
+
+    private fun videoTrackPublication(sid: String): MatrixRtcLiveKitTrackPublicationInfo {
+        return MatrixRtcLiveKitTrackPublicationInfo(
+            sid = sid,
+            name = "camera",
+            kind = "VIDEO",
+            source = "CAMERA",
             isMuted = false,
             isSubscribed = true
         )
@@ -1126,6 +1217,7 @@ private class FakeNativeLiveKitRoomController : MatrixRtcLiveKitRoomController {
     var selectedAudioOutputKinds: List<MatrixRtcAudioOutputDeviceKind> = emptyList()
     var disconnectCount = 0
     var closeCount = 0
+    var switchCameraCount = 0
     private var eventHandler: ((MatrixRtcLiveKitRoomSessionEvent) -> Unit)? = null
 
     override fun startEventCollection(
@@ -1155,6 +1247,14 @@ private class FakeNativeLiveKitRoomController : MatrixRtcLiveKitRoomController {
 
     override suspend fun setCameraEnabled(enabled: Boolean) {
         cameraHistory = cameraHistory + enabled
+    }
+
+    override suspend fun switchCamera(): MatrixRtcLiveKitCameraSwitchResult {
+        switchCameraCount += 1
+        return MatrixRtcLiveKitCameraSwitchResult(
+            switched = true,
+            facing = MatrixRtcLiveKitCameraFacing.BACK
+        )
     }
 
     override fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean {

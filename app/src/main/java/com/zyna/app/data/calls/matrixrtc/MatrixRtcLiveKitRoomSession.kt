@@ -10,9 +10,19 @@ import io.livekit.android.e2ee.BaseKeyProvider
 import io.livekit.android.e2ee.E2EEOptions
 import io.livekit.android.e2ee.KeyProvider
 import io.livekit.android.events.RoomEvent
+import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.participant.Participant
+import io.livekit.android.room.participant.LocalParticipant
 import io.livekit.android.room.participant.RemoteParticipant
+import io.livekit.android.room.track.CameraPosition
+import io.livekit.android.room.track.LocalTrackPublication
+import io.livekit.android.room.track.LocalVideoTrack
+import io.livekit.android.room.track.RemoteVideoTrack
+import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.TrackPublication
+import io.livekit.android.room.track.video.CameraCapturerUtils
+import io.livekit.android.room.track.video.CameraCapturerUtils.createCameraEnumerator
+import io.livekit.android.room.track.video.CameraCapturerUtils.findCamera
 import livekit.org.webrtc.FrameCryptorKeyDerivationAlgorithm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -91,6 +101,17 @@ data class MatrixRtcAudioOutputState(
     }
 }
 
+enum class MatrixRtcLiveKitCameraFacing {
+    FRONT,
+    BACK,
+    UNKNOWN
+}
+
+data class MatrixRtcLiveKitCameraSwitchResult(
+    val switched: Boolean,
+    val facing: MatrixRtcLiveKitCameraFacing
+)
+
 sealed class MatrixRtcLiveKitRoomSessionException(message: String) : Exception(message) {
     data object AlreadyConnecting :
         MatrixRtcLiveKitRoomSessionException("LiveKit room session is already connecting")
@@ -100,6 +121,9 @@ sealed class MatrixRtcLiveKitRoomSessionException(message: String) : Exception(m
 
     data object NotConnected :
         MatrixRtcLiveKitRoomSessionException("LiveKit room session is not connected")
+
+    data object CameraNotEnabled :
+        MatrixRtcLiveKitRoomSessionException("LiveKit camera track is not enabled")
 }
 
 data class MatrixRtcLiveKitParticipantInfo(
@@ -124,12 +148,161 @@ data class MatrixRtcLiveKitTrackPublicationInfo(
     val isSubscribed: Boolean
 )
 
+interface MatrixRtcLiveKitVideoTrackReference {
+    val id: String
+    fun initializeRenderer(renderer: TextureViewRenderer)
+    fun addRenderer(renderer: TextureViewRenderer)
+    fun removeRenderer(renderer: TextureViewRenderer)
+}
+
+class MatrixRtcLiveKitLocalVideoTrack private constructor(
+    val trackSid: String,
+    val trackName: String,
+    private val videoTrack: LocalVideoTrack?,
+    private val testingFacing: MatrixRtcLiveKitCameraFacing?,
+    private val rendererInitializer: ((TextureViewRenderer) -> Unit)?
+) : MatrixRtcLiveKitVideoTrackReference {
+    override val id: String = "local:$trackSid"
+
+    val facing: MatrixRtcLiveKitCameraFacing
+        get() = videoTrack?.options?.position.toMatrixRtcLiveKitCameraFacingOrNull()
+            ?: testingFacing
+            ?: MatrixRtcLiveKitCameraFacing.UNKNOWN
+
+    val isFrontFacing: Boolean
+        get() = facing == MatrixRtcLiveKitCameraFacing.FRONT
+
+    override fun initializeRenderer(renderer: TextureViewRenderer) {
+        rendererInitializer?.invoke(renderer)
+    }
+
+    override fun addRenderer(renderer: TextureViewRenderer) {
+        videoTrack?.addRenderer(renderer)
+    }
+
+    override fun removeRenderer(renderer: TextureViewRenderer) {
+        videoTrack?.removeRenderer(renderer)
+    }
+
+    override fun equals(other: Any?): Boolean {
+        return other is MatrixRtcLiveKitLocalVideoTrack && other.id == id
+    }
+
+    override fun hashCode(): Int = id.hashCode()
+
+    companion object {
+        fun create(
+            publication: LocalTrackPublication,
+            videoTrack: LocalVideoTrack,
+            rendererInitializer: (TextureViewRenderer) -> Unit
+        ): MatrixRtcLiveKitLocalVideoTrack {
+            return MatrixRtcLiveKitLocalVideoTrack(
+                trackSid = publication.sid,
+                trackName = publication.name,
+                videoTrack = videoTrack,
+                testingFacing = null,
+                rendererInitializer = rendererInitializer
+            )
+        }
+
+        fun testing(
+            trackSid: String,
+            trackName: String = "",
+            facing: MatrixRtcLiveKitCameraFacing = MatrixRtcLiveKitCameraFacing.FRONT
+        ): MatrixRtcLiveKitLocalVideoTrack {
+            return MatrixRtcLiveKitLocalVideoTrack(
+                trackSid = trackSid,
+                trackName = trackName,
+                videoTrack = null,
+                testingFacing = facing,
+                rendererInitializer = null
+            )
+        }
+    }
+}
+
+class MatrixRtcLiveKitRemoteVideoTrack private constructor(
+    val participantIdentity: String?,
+    val participantSid: String?,
+    val trackSid: String,
+    val trackName: String,
+    private val videoTrack: RemoteVideoTrack?,
+    private val rendererInitializer: ((TextureViewRenderer) -> Unit)?
+) : MatrixRtcLiveKitVideoTrackReference {
+    override val id: String = "${participantIdentity ?: participantSid ?: "unknown"}:$trackSid"
+
+    override fun initializeRenderer(renderer: TextureViewRenderer) {
+        rendererInitializer?.invoke(renderer)
+    }
+
+    override fun addRenderer(renderer: TextureViewRenderer) {
+        videoTrack?.addRenderer(renderer)
+    }
+
+    override fun removeRenderer(renderer: TextureViewRenderer) {
+        videoTrack?.removeRenderer(renderer)
+    }
+
+    override fun equals(other: Any?): Boolean {
+        return other is MatrixRtcLiveKitRemoteVideoTrack && other.id == id
+    }
+
+    override fun hashCode(): Int = id.hashCode()
+
+    companion object {
+        fun create(
+            participant: RemoteParticipant,
+            publication: TrackPublication,
+            videoTrack: RemoteVideoTrack,
+            rendererInitializer: (TextureViewRenderer) -> Unit
+        ): MatrixRtcLiveKitRemoteVideoTrack {
+            return MatrixRtcLiveKitRemoteVideoTrack(
+                participantIdentity = participant.identity?.value,
+                participantSid = participant.sid?.value,
+                trackSid = publication.sid,
+                trackName = publication.name,
+                videoTrack = videoTrack,
+                rendererInitializer = rendererInitializer
+            )
+        }
+
+        fun testing(
+            participantIdentity: String?,
+            participantSid: String? = null,
+            trackSid: String,
+            trackName: String = ""
+        ): MatrixRtcLiveKitRemoteVideoTrack {
+            return MatrixRtcLiveKitRemoteVideoTrack(
+                participantIdentity = participantIdentity,
+                participantSid = participantSid,
+                trackSid = trackSid,
+                trackName = trackName,
+                videoTrack = null,
+                rendererInitializer = null
+            )
+        }
+    }
+}
+
 sealed interface MatrixRtcLiveKitRoomSessionEvent {
     data object Connected : MatrixRtcLiveKitRoomSessionEvent
     data class Disconnected(val error: String?, val reason: String?) : MatrixRtcLiveKitRoomSessionEvent
     data class FailedToConnect(val error: String?) : MatrixRtcLiveKitRoomSessionEvent
     data object Reconnecting : MatrixRtcLiveKitRoomSessionEvent
     data object Reconnected : MatrixRtcLiveKitRoomSessionEvent
+    data class LocalTrackPublished(
+        val publication: MatrixRtcLiveKitTrackPublicationInfo
+    ) : MatrixRtcLiveKitRoomSessionEvent
+    data class LocalTrackUnpublished(
+        val publication: MatrixRtcLiveKitTrackPublicationInfo
+    ) : MatrixRtcLiveKitRoomSessionEvent
+    data class LocalVideoTrackPublished(
+        val publication: MatrixRtcLiveKitTrackPublicationInfo,
+        val videoTrack: MatrixRtcLiveKitLocalVideoTrack
+    ) : MatrixRtcLiveKitRoomSessionEvent
+    data class LocalVideoTrackUnpublished(
+        val publication: MatrixRtcLiveKitTrackPublicationInfo
+    ) : MatrixRtcLiveKitRoomSessionEvent
     data class LocalTrackSubscribedByRemote(
         val publication: MatrixRtcLiveKitTrackPublicationInfo
     ) : MatrixRtcLiveKitRoomSessionEvent
@@ -151,7 +324,16 @@ sealed interface MatrixRtcLiveKitRoomSessionEvent {
         val participant: MatrixRtcLiveKitParticipantInfo,
         val publication: MatrixRtcLiveKitTrackPublicationInfo
     ) : MatrixRtcLiveKitRoomSessionEvent
+    data class RemoteVideoTrackSubscribed(
+        val participant: MatrixRtcLiveKitParticipantInfo,
+        val publication: MatrixRtcLiveKitTrackPublicationInfo,
+        val videoTrack: MatrixRtcLiveKitRemoteVideoTrack
+    ) : MatrixRtcLiveKitRoomSessionEvent
     data class RemoteTrackUnsubscribed(
+        val participant: MatrixRtcLiveKitParticipantInfo,
+        val publication: MatrixRtcLiveKitTrackPublicationInfo
+    ) : MatrixRtcLiveKitRoomSessionEvent
+    data class RemoteVideoTrackUnsubscribed(
         val participant: MatrixRtcLiveKitParticipantInfo,
         val publication: MatrixRtcLiveKitTrackPublicationInfo
     ) : MatrixRtcLiveKitRoomSessionEvent
@@ -203,6 +385,7 @@ interface MatrixRtcLiveKitRoomController : AutoCloseable {
     fun disconnect()
     suspend fun setMicrophoneEnabled(enabled: Boolean)
     suspend fun setCameraEnabled(enabled: Boolean)
+    suspend fun switchCamera(): MatrixRtcLiveKitCameraSwitchResult
     val audioOutputState: MatrixRtcAudioOutputState
     fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean
 }
@@ -281,6 +464,14 @@ class MatrixRtcLiveKitRoomSession(
         synchronized(lock) {
             cameraEnabled = enabled
         }
+    }
+
+    suspend fun switchCamera(): MatrixRtcLiveKitCameraSwitchResult {
+        ensureConnected()
+        if (!isCameraEnabled) {
+            throw MatrixRtcLiveKitRoomSessionException.CameraNotEnabled
+        }
+        return controller.switchCamera()
     }
 
     fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean {
@@ -468,6 +659,41 @@ class AndroidMatrixRtcLiveKitRoomController(
         room.localParticipant.setCameraEnabled(enabled)
     }
 
+    override suspend fun switchCamera(): MatrixRtcLiveKitCameraSwitchResult {
+        val publication = room.localParticipant.getTrackPublication(Track.Source.CAMERA)
+        val videoTrack = publication?.track as? LocalVideoTrack
+            ?: throw MatrixRtcLiveKitRoomSessionException.CameraNotEnabled
+        val targetDevice = nextCameraDevice(videoTrack)
+        if (targetDevice == null) {
+            val currentFacing = videoTrack.options.position.toMatrixRtcLiveKitCameraFacing()
+            MatrixRtcCallDebugLog.d("switchCamera skipped facing=$currentFacing")
+            return MatrixRtcLiveKitCameraSwitchResult(
+                switched = false,
+                facing = currentFacing
+            )
+        }
+        val targetFacing = targetDevice.position.toMatrixRtcLiveKitCameraFacing()
+        MatrixRtcCallDebugLog.d("switchCamera deviceId=${targetDevice.deviceId} facing=$targetFacing")
+        videoTrack.switchCamera(deviceId = targetDevice.deviceId)
+        return MatrixRtcLiveKitCameraSwitchResult(
+            switched = true,
+            facing = targetFacing
+        )
+    }
+
+    private fun nextCameraDevice(
+        videoTrack: LocalVideoTrack
+    ): CameraCapturerUtils.CameraDeviceInfo? {
+        val enumerator = createCameraEnumerator(appContext)
+        val deviceNames = enumerator.deviceNames
+        if (deviceNames.size < 2) {
+            return null
+        }
+        val currentIndex = deviceNames.indexOf(videoTrack.options.deviceId)
+        val targetDeviceId = deviceNames[(currentIndex + 1) % deviceNames.size]
+        return enumerator.findCamera(deviceId = targetDeviceId, fallback = false)
+    }
+
     override val audioOutputState: MatrixRtcAudioOutputState
         get() = audioOutputStateFrom(
             audioDevices = room.audioSwitchHandler?.availableAudioDevices.orEmpty(),
@@ -507,6 +733,14 @@ internal fun MatrixRtcLiveKitRoomSessionEvent.debugSummary(): String {
             "FailedToConnect error=$error"
         MatrixRtcLiveKitRoomSessionEvent.Reconnecting -> "Reconnecting"
         MatrixRtcLiveKitRoomSessionEvent.Reconnected -> "Reconnected"
+        is MatrixRtcLiveKitRoomSessionEvent.LocalTrackPublished ->
+            "LocalTrackPublished publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.LocalTrackUnpublished ->
+            "LocalTrackUnpublished publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.LocalVideoTrackPublished ->
+            "LocalVideoTrackPublished publication=${publication.debugSummary()} videoTrack=${videoTrack.id}"
+        is MatrixRtcLiveKitRoomSessionEvent.LocalVideoTrackUnpublished ->
+            "LocalVideoTrackUnpublished publication=${publication.debugSummary()}"
         is MatrixRtcLiveKitRoomSessionEvent.LocalTrackSubscribedByRemote ->
             "LocalTrackSubscribedByRemote publication=${publication.debugSummary()}"
         is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined ->
@@ -522,8 +756,14 @@ internal fun MatrixRtcLiveKitRoomSessionEvent.debugSummary(): String {
         is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed ->
             "RemoteTrackSubscribed participant=${participant.debugSummary()} " +
                 "publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackSubscribed ->
+            "RemoteVideoTrackSubscribed participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()} videoTrack=${videoTrack.id}"
         is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackUnsubscribed ->
             "RemoteTrackUnsubscribed participant=${participant.debugSummary()} " +
+                "publication=${publication.debugSummary()}"
+        is MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackUnsubscribed ->
+            "RemoteVideoTrackUnsubscribed participant=${participant.debugSummary()} " +
                 "publication=${publication.debugSummary()}"
         is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscriptionFailed ->
             "RemoteTrackSubscriptionFailed participant=${participant.debugSummary()} " +
@@ -616,26 +856,87 @@ private fun RoomEvent.toMatrixRtcLiveKitEvent(): MatrixRtcLiveKitRoomSessionEven
         is RoomEvent.ParticipantDisconnected -> MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft(
             participant = participant.toMatrixRtcLiveKitInfo()
         )
-        is RoomEvent.TrackPublished -> if (participant is RemoteParticipant) {
-            MatrixRtcLiveKitRoomSessionEvent.RemoteTrackPublished(
+        is RoomEvent.TrackPublished -> when (participant) {
+            is RemoteParticipant -> MatrixRtcLiveKitRoomSessionEvent.RemoteTrackPublished(
                 participant = participant.toMatrixRtcLiveKitInfo(),
                 publication = publication.toMatrixRtcLiveKitInfo()
             )
-        } else {
-            null
+            is LocalParticipant -> {
+                val localPublication = publication as? LocalTrackPublication
+                val videoTrack = localPublication?.track as? LocalVideoTrack
+                if (localPublication != null && videoTrack != null) {
+                    MatrixRtcLiveKitRoomSessionEvent.LocalVideoTrackPublished(
+                        publication = localPublication.toMatrixRtcLiveKitInfo(),
+                        videoTrack = MatrixRtcLiveKitLocalVideoTrack.create(
+                            publication = localPublication,
+                            videoTrack = videoTrack,
+                            rendererInitializer = room::initVideoRenderer
+                        )
+                    )
+                } else {
+                    MatrixRtcLiveKitRoomSessionEvent.LocalTrackPublished(
+                        publication = publication.toMatrixRtcLiveKitInfo()
+                    )
+                }
+            }
+            else -> null
         }
-        is RoomEvent.TrackUnpublished -> if (participant is RemoteParticipant) {
-            MatrixRtcLiveKitRoomSessionEvent.RemoteTrackUnpublished(
+        is RoomEvent.TrackUnpublished -> when (participant) {
+            is RemoteParticipant -> MatrixRtcLiveKitRoomSessionEvent.RemoteTrackUnpublished(
                 participant = participant.toMatrixRtcLiveKitInfo(),
                 publication = publication.toMatrixRtcLiveKitInfo()
             )
-        } else {
-            null
+            is LocalParticipant -> {
+                val publicationInfo = publication.toMatrixRtcLiveKitInfo()
+                if (publicationInfo.isVideo) {
+                    MatrixRtcLiveKitRoomSessionEvent.LocalVideoTrackUnpublished(
+                        publication = publicationInfo
+                    )
+                } else {
+                    MatrixRtcLiveKitRoomSessionEvent.LocalTrackUnpublished(
+                        publication = publicationInfo
+                    )
+                }
+            }
+            else -> null
         }
-        is RoomEvent.TrackSubscribed -> MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed(
-            participant = participant.toMatrixRtcLiveKitInfo(),
-            publication = publication.toMatrixRtcLiveKitInfo()
-        )
+        is RoomEvent.TrackSubscribed -> {
+            val participantInfo = participant.toMatrixRtcLiveKitInfo()
+            val publicationInfo = publication.toMatrixRtcLiveKitInfo()
+            val videoTrack = track as? RemoteVideoTrack
+            if (videoTrack != null) {
+                MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackSubscribed(
+                    participant = participantInfo,
+                    publication = publicationInfo,
+                    videoTrack = MatrixRtcLiveKitRemoteVideoTrack.create(
+                        participant = participant,
+                        publication = publication,
+                        videoTrack = videoTrack,
+                        rendererInitializer = room::initVideoRenderer
+                    )
+                )
+            } else {
+                MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed(
+                    participant = participantInfo,
+                    publication = publicationInfo
+                )
+            }
+        }
+        is RoomEvent.TrackUnsubscribed -> {
+            val participantInfo = participant.toMatrixRtcLiveKitInfo()
+            val publicationInfo = publications.toMatrixRtcLiveKitInfo()
+            if (track is RemoteVideoTrack || publicationInfo.isVideo) {
+                MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackUnsubscribed(
+                    participant = participantInfo,
+                    publication = publicationInfo
+                )
+            } else {
+                MatrixRtcLiveKitRoomSessionEvent.RemoteTrackUnsubscribed(
+                    participant = participantInfo,
+                    publication = publicationInfo
+                )
+            }
+        }
         is RoomEvent.TrackSubscriptionFailed -> MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscriptionFailed(
             participant = participant.toMatrixRtcLiveKitInfo(),
             trackSid = sid,
@@ -678,7 +979,7 @@ private fun RoomEvent.toMatrixRtcLiveKitEvent(): MatrixRtcLiveKitRoomSessionEven
 private fun Participant.toMatrixRtcLiveKitInfo(): MatrixRtcLiveKitParticipantInfo {
     return MatrixRtcLiveKitParticipantInfo(
         identity = identity?.value,
-        sid = sid?.toString()
+        sid = sid?.value
     )
 }
 
@@ -691,4 +992,21 @@ private fun TrackPublication.toMatrixRtcLiveKitInfo(): MatrixRtcLiveKitTrackPubl
         isMuted = muted,
         isSubscribed = subscribed
     )
+}
+
+private val MatrixRtcLiveKitTrackPublicationInfo.isVideo: Boolean
+    get() = source.equals("CAMERA", ignoreCase = true) ||
+        source.equals("SCREEN_SHARE", ignoreCase = true) ||
+        kind.equals("VIDEO", ignoreCase = true)
+
+private fun CameraPosition?.toMatrixRtcLiveKitCameraFacing(): MatrixRtcLiveKitCameraFacing {
+    return toMatrixRtcLiveKitCameraFacingOrNull() ?: MatrixRtcLiveKitCameraFacing.UNKNOWN
+}
+
+private fun CameraPosition?.toMatrixRtcLiveKitCameraFacingOrNull(): MatrixRtcLiveKitCameraFacing? {
+    return when (this) {
+        CameraPosition.FRONT -> MatrixRtcLiveKitCameraFacing.FRONT
+        CameraPosition.BACK -> MatrixRtcLiveKitCameraFacing.BACK
+        null -> null
+    }
 }

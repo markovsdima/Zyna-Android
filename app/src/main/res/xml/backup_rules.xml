@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="matrix_session.xml" />
+    <exclude domain="sharedpref" path="matrix_store_secrets.xml" />
+    <exclude domain="file" path="matrix/" />
+</full-backup-content>

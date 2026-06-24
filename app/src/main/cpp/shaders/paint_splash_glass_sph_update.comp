@@ -1,0 +1,600 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+const uint GLASS_NOZZLE_SLOTS_PER_TARGET = 8u;
+const uint SPH_PARTICLES_PER_NOZZLE = 4u;
+const uint SPH_PARTICLES_PER_TARGET = GLASS_NOZZLE_SLOTS_PER_TARGET * SPH_PARTICLES_PER_NOZZLE;
+const float SPH_STATE_EMPTY = 0.0;
+const float SPH_STATE_ATTACHED = 1.0;
+const float SPH_STATE_DETACHED = 2.0;
+
+struct GlassHitTarget {
+    vec4 rect;
+    vec4 params;
+};
+
+struct GlassSPHParticle {
+    vec4 positionVelocity;
+    vec4 color;
+    vec4 radiusMassDensityPressure;
+    vec4 ageLifetimeSeedActive;
+    vec4 anchorStrengthAnchorState;
+    vec4 normalCurvatureProfilePad;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer ParticlesInBuffer {
+    GlassSPHParticle particlesIn[];
+};
+
+layout(set = 0, binding = 1, std430) buffer ParticlesOutBuffer {
+    GlassSPHParticle particlesOut[];
+};
+
+layout(set = 0, binding = 2, std430) readonly buffer GlassHitTargetBuffer {
+    GlassHitTarget glassHitTargets[];
+};
+
+layout(set = 0, binding = 3) uniform sampler2D surfaceTex;
+layout(set = 0, binding = 4) uniform sampler2D velocityTex;
+
+layout(push_constant) uniform PushConstants {
+    float timeStep;
+    uint hitTargetCount;
+    uint particleCapacity;
+    uint _padding0;
+    vec2 viewportSize;
+    vec2 _padding1;
+} pc;
+
+float saturate(float value) {
+    return clamp(value, 0.0, 1.0);
+}
+
+float splashHash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+float roundedRectDistance(vec2 point, vec2 size, float radius) {
+    radius = min(radius, min(size.x, size.y) * 0.5);
+    vec2 halfSize = size * 0.5;
+    vec2 q = abs(point - halfSize) - (halfSize - vec2(radius));
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float circleDistance(vec2 point, vec2 size) {
+    vec2 center = size * 0.5;
+    float radius = min(size.x, size.y) * 0.5;
+    return length(point - center) - radius;
+}
+
+float glassTargetDistance(vec2 point, vec2 size, vec4 params) {
+    if (params.z > 0.5) {
+        return circleDistance(point, size);
+    }
+    return roundedRectDistance(point, size, params.x);
+}
+
+float roundedRectBottomY(float x, vec2 size, float radius) {
+    radius = min(radius, min(size.x, size.y) * 0.5);
+    float clampedX = clamp(x, 0.0, size.x);
+    if (radius <= 0.001) {
+        return size.y;
+    }
+    if (clampedX < radius) {
+        float dx = clampedX - radius;
+        return size.y - radius + sqrt(max(radius * radius - dx * dx, 0.0));
+    }
+    if (clampedX > size.x - radius) {
+        float dx = clampedX - (size.x - radius);
+        return size.y - radius + sqrt(max(radius * radius - dx * dx, 0.0));
+    }
+    return size.y;
+}
+
+vec2 glassTargetNormal(vec2 point, vec2 size, vec4 params) {
+    float eps = max(0.35, min(size.x, size.y) * 0.002);
+    float dx = glassTargetDistance(point + vec2(eps, 0.0), size, params)
+        - glassTargetDistance(point - vec2(eps, 0.0), size, params);
+    float dy = glassTargetDistance(point + vec2(0.0, eps), size, params)
+        - glassTargetDistance(point - vec2(0.0, eps), size, params);
+    vec2 normal = vec2(dx, dy);
+    float len = length(normal);
+    return len > 0.0001 ? normal / len : vec2(0.0, 1.0);
+}
+
+float paintedSurfaceMask(vec4 state) {
+    float mass = max(state.a, 0.0);
+    if (mass <= 0.001) {
+        return 0.0;
+    }
+    float paintMass = max(max(state.r, state.g), state.b);
+    float paintRatio = paintMass / max(mass, 0.001);
+    return smoothstep(0.006, 0.026, paintMass)
+        * smoothstep(0.010, 0.055, paintRatio);
+}
+
+struct GlassNozzleInfo {
+    float enabled;
+    vec2 sourcePoint;
+    float width;
+    float seed;
+    vec2 normal;
+    float curvature;
+};
+
+GlassNozzleInfo glassTargetNozzleInfo(GlassHitTarget target, uint slot) {
+    GlassNozzleInfo info;
+    info.enabled = 0.0;
+    info.sourcePoint = vec2(0.0);
+    info.width = 7.0;
+    info.seed = 0.0;
+    info.normal = vec2(0.0, 1.0);
+    info.curvature = 0.0;
+
+    vec4 rect = target.rect;
+    vec4 params = target.params;
+    vec2 origin = rect.xy;
+    vec2 size = rect.zw;
+    if (size.x <= 0.0 || size.y <= 0.0) {
+        return info;
+    }
+
+    float seed = params.w;
+    if (params.z > 0.5) {
+        float radius = min(size.x, size.y) * 0.5;
+        vec2 center = size * 0.5;
+        float slotF = float(min(slot, GLASS_NOZZLE_SLOTS_PER_TARGET - 1u));
+        float slot01 = GLASS_NOZZLE_SLOTS_PER_TARGET > 1u
+            ? slotF / float(GLASS_NOZZLE_SLOTS_PER_TARGET - 1u)
+            : 0.5;
+        float jitter = (splashHash(vec2(seed + slotF * 3.17, 9.4)) - 0.5) * 0.10;
+        float arc = mix(-0.58, 0.58, slot01) + jitter;
+        vec2 radial = normalize(vec2(sin(arc), cos(arc)));
+        float edgeWeight = smoothstep(0.0, 0.20, slot01)
+            * (1.0 - smoothstep(0.80, 1.0, slot01));
+        float slotEnergy = splashHash(vec2(seed + slotF * 5.31, 21.0));
+        info.enabled = mix(0.46, 0.92, slotEnergy) * mix(0.82, 1.0, edgeWeight);
+        info.width = max(5.4, radius * mix(0.13, 0.23, edgeWeight) * mix(0.78, 1.20, slotEnergy));
+        info.sourcePoint = origin + center + radial * radius;
+        info.seed = seed + 1.37 + slotF * 0.91;
+        info.normal = radial;
+        info.curvature = 1.0 / max(radius, 1.0);
+        return info;
+    }
+
+    float radius = min(params.x, min(size.x, size.y) * 0.5);
+    float width = max(7.0, min(size.y * 0.34, size.x * 0.070));
+    float slotF = float(min(slot, GLASS_NOZZLE_SLOTS_PER_TARGET - 1u));
+    float slot01 = GLASS_NOZZLE_SLOTS_PER_TARGET > 1u
+        ? slotF / float(GLASS_NOZZLE_SLOTS_PER_TARGET - 1u)
+        : 0.5;
+    float selectedSeed = seed + 3.0 + slotF;
+    float jitter = (splashHash(vec2(selectedSeed, 16.9)) - 0.5) * 0.052;
+    float x = clamp(mix(0.12, 0.88, slot01) + jitter, 0.08, 0.92) * size.x;
+    float bottomY = roundedRectBottomY(x, size, radius);
+    vec2 surfaceLocal = vec2(x, bottomY);
+    vec2 surfaceNormal = glassTargetNormal(surfaceLocal, size, params);
+    float curvedPart = radius > 0.001
+        ? max(1.0 - smoothstep(radius - 0.75, radius + 0.75, x),
+              smoothstep(size.x - radius - 0.75, size.x - radius + 0.75, x))
+        : 0.0;
+    float slotEnergy = splashHash(vec2(selectedSeed, 21.0));
+    float activityRoll = splashHash(vec2(selectedSeed, 51.0));
+    float slotActivity = mix(0.34, 1.34, pow(activityRoll, 1.65));
+
+    info.sourcePoint = origin + vec2(x, bottomY);
+    info.seed = selectedSeed;
+    info.normal = surfaceNormal;
+    info.curvature = curvedPart / max(radius, 1.0);
+    float flatRim = 1.0 - smoothstep(0.001, 0.024, info.curvature);
+    float centerBias = 1.0 - abs(slot01 * 2.0 - 1.0);
+    info.enabled = mix(0.58, 1.0, slotEnergy)
+        * mix(0.88, 1.0, centerBias)
+        * mix(0.92, 1.08, flatRim)
+        * slotActivity;
+    info.width = width
+        * mix(0.72, 1.42, slotEnergy)
+        * mix(0.68, 1.18, activityRoll)
+        * mix(1.0, 1.18, flatRim);
+    return info;
+}
+
+GlassSPHParticle clearParticle(GlassSPHParticle p) {
+    p.radiusMassDensityPressure.y = 0.0;
+    p.ageLifetimeSeedActive.x = 0.0;
+    p.ageLifetimeSeedActive.w = 0.0;
+    p.anchorStrengthAnchorState.w = SPH_STATE_EMPTY;
+    return p;
+}
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.particleCapacity) {
+        return;
+    }
+
+    GlassSPHParticle p = particlesIn[gid];
+    float dt = clamp(pc.timeStep, 0.001, 0.05);
+    uint targetIndex = gid / SPH_PARTICLES_PER_TARGET;
+    uint targetLocal = gid - targetIndex * SPH_PARTICLES_PER_TARGET;
+    uint nozzleSlot = targetLocal / SPH_PARTICLES_PER_NOZZLE;
+    uint particleSlot = targetLocal - nozzleSlot * SPH_PARTICLES_PER_NOZZLE;
+
+    if (targetIndex >= pc.hitTargetCount || pc.hitTargetCount == 0u) {
+        particlesOut[gid] = clearParticle(p);
+        return;
+    }
+
+    GlassHitTarget target = glassHitTargets[targetIndex];
+    vec4 targetRect = target.rect;
+    vec4 targetParams = target.params;
+    vec2 targetOrigin = targetRect.xy;
+    vec2 targetSize = targetRect.zw;
+    GlassNozzleInfo nozzle = glassTargetNozzleInfo(target, nozzleSlot);
+    if (nozzle.enabled <= 0.001) {
+        particlesOut[gid] = clearParticle(p);
+        return;
+    }
+
+    vec2 surfaceNormal = length(nozzle.normal) > 0.001 ? normalize(nozzle.normal) : vec2(0.0, 1.0);
+    vec2 surfaceTangent = vec2(-surfaceNormal.y, surfaceNormal.x);
+    vec2 texel = 1.0 / max(vec2(textureSize(surfaceTex, 0)), vec2(1.0));
+    vec2 sourceUV = clamp(nozzle.sourcePoint / max(pc.viewportSize, vec2(1.0)), vec2(0.0), vec2(1.0));
+
+    float flatRimFeed = 1.0 - smoothstep(0.001, 0.024, nozzle.curvature);
+    vec2 sourceInside = surfaceNormal * texel * mix(1.8, 2.5, flatRimFeed);
+    vec2 sourceDeep = surfaceNormal * texel * mix(3.1, 5.2, flatRimFeed);
+    vec2 sourceSide = surfaceTangent * nozzle.width / max(pc.viewportSize, vec2(1.0))
+        * mix(1.0, 2.35, flatRimFeed);
+
+    vec4 source0 = texture(surfaceTex, sourceUV - sourceInside);
+    vec4 sourceL1 = texture(surfaceTex, sourceUV - sourceInside - sourceSide * 0.55);
+    vec4 sourceR1 = texture(surfaceTex, sourceUV - sourceInside + sourceSide * 0.55);
+    vec4 sourceL2 = texture(surfaceTex, sourceUV - sourceInside - sourceSide * 1.25);
+    vec4 sourceR2 = texture(surfaceTex, sourceUV - sourceInside + sourceSide * 1.25);
+    vec4 sourceD0 = texture(surfaceTex, sourceUV - sourceDeep);
+    vec4 sourceDL = texture(surfaceTex, sourceUV - sourceDeep - sourceSide * 0.95);
+    vec4 sourceDR = texture(surfaceTex, sourceUV - sourceDeep + sourceSide * 0.95);
+    vec4 sourceState = source0 * 0.22
+        + (sourceL1 + sourceR1) * 0.14
+        + (sourceL2 + sourceR2) * 0.075
+        + sourceD0 * 0.17
+        + (sourceDL + sourceDR) * 0.09;
+    float sourcePeak = max(max(max(source0.a, sourceL1.a), max(sourceR1.a, sourceL2.a)),
+                           max(max(sourceR2.a, sourceD0.a), max(sourceDL.a, sourceDR.a)));
+    vec4 sourceVelocityState = texture(velocityTex, sourceUV - sourceInside) * 0.42
+        + texture(velocityTex, sourceUV - sourceInside - sourceSide * 0.55) * 0.18
+        + texture(velocityTex, sourceUV - sourceInside + sourceSide * 0.55) * 0.18
+        + texture(velocityTex, sourceUV - sourceDeep) * 0.22;
+
+    float capsuleRimFeed = 1.0 - smoothstep(0.45, 0.55, targetParams.z);
+    float capsuleReservoirGeometry = capsuleRimFeed * mix(0.62, 1.0, flatRimFeed);
+    vec4 rimReservoirState = vec4(0.0);
+    vec4 rimReservoirVelocity = vec4(0.0);
+    float rimReservoirWeight = 0.0;
+    float rimReservoirPeak = 0.0;
+    float rimReservoirPaintedPeak = 0.0;
+    if (capsuleReservoirGeometry > 0.001) {
+        float radius = min(targetParams.x, min(targetSize.x, targetSize.y) * 0.5);
+        float nozzle01 = clamp((nozzle.sourcePoint.x - targetOrigin.x) / max(targetSize.x, 1.0), 0.0, 1.0);
+        for (uint rimTap = 0u; rimTap < 7u; ++rimTap) {
+            float tap01 = mix(0.14, 0.86, (float(rimTap) + 0.5) / 7.0);
+            float tapX = tap01 * targetSize.x;
+            float tapY = roundedRectBottomY(tapX, targetSize, radius);
+            vec2 tapLocal = vec2(tapX, tapY);
+            vec2 tapNormal = glassTargetNormal(tapLocal, targetSize, targetParams);
+            tapNormal = length(tapNormal) > 0.001 ? normalize(tapNormal) : vec2(0.0, 1.0);
+            vec2 tapTangent = vec2(-tapNormal.y, tapNormal.x);
+            vec2 tapUV = clamp((targetOrigin + tapLocal) / max(pc.viewportSize, vec2(1.0)), vec2(0.0), vec2(1.0));
+            vec2 tapInside = tapNormal * texel * 3.4;
+            vec2 tapSide = tapTangent * nozzle.width * 0.88 / max(pc.viewportSize, vec2(1.0));
+            vec4 tapState = texture(surfaceTex, tapUV - tapInside) * 0.58
+                + texture(surfaceTex, tapUV - tapInside - tapSide) * 0.21
+                + texture(surfaceTex, tapUV - tapInside + tapSide) * 0.21;
+            vec4 tapVelocity = texture(velocityTex, tapUV - tapInside);
+            float nearSlot = exp(-pow((tap01 - nozzle01) / 0.34, 2.0));
+            float tapWeight = mix(0.44, 1.0, nearSlot);
+            rimReservoirState += tapState * tapWeight;
+            rimReservoirVelocity += tapVelocity * tapWeight;
+            rimReservoirWeight += tapWeight;
+            rimReservoirPeak = max(rimReservoirPeak, tapState.a);
+            rimReservoirPaintedPeak = max(rimReservoirPaintedPeak, paintedSurfaceMask(tapState));
+        }
+        rimReservoirState /= max(rimReservoirWeight, 0.001);
+        rimReservoirVelocity /= max(rimReservoirWeight, 0.001);
+    }
+
+    float sampledSourceMass = max(sourceState.a, 0.0);
+    float rimReservoirMass = max(max(rimReservoirState.a, 0.0), rimReservoirPeak * 0.58);
+    float rimReservoirPainted = max(paintedSurfaceMask(rimReservoirState),
+                                    rimReservoirPaintedPeak * smoothstep(0.018, 0.12, rimReservoirPeak));
+    float rimReservoirWet = capsuleReservoirGeometry
+        * smoothstep(0.014, 0.12, rimReservoirMass)
+        * rimReservoirPainted;
+    float reservoirBlend = rimReservoirWet * (1.0 - smoothstep(0.055, 0.22, sampledSourceMass));
+    sourceState = mix(sourceState, rimReservoirState, reservoirBlend * 0.82);
+    sourceVelocityState = mix(sourceVelocityState, rimReservoirVelocity, reservoirBlend * 0.58);
+
+    sampledSourceMass = max(sourceState.a, 0.0);
+    float feedMass = mix(sampledSourceMass, max(sampledSourceMass, sourcePeak * 0.76), flatRimFeed);
+    feedMass = max(feedMass, rimReservoirMass * rimReservoirWet * 1.05);
+    float sourceMass = max(sampledSourceMass, feedMass * flatRimFeed * 0.68);
+    float paintedSource = max(paintedSurfaceMask(sourceState), rimReservoirWet);
+    float localFeed = smoothstep(mix(0.075, 0.042, flatRimFeed),
+                                 mix(0.46, 0.32, flatRimFeed),
+                                 feedMass) * paintedSource * nozzle.enabled;
+    float reservoirSlotGain = mix(0.72, 1.18, splashHash(vec2(nozzle.seed, 91.0)));
+    float reservoirFeed = smoothstep(0.014, 0.13, rimReservoirMass)
+        * rimReservoirWet
+        * nozzle.enabled
+        * reservoirSlotGain;
+    float curvedNozzle = smoothstep(0.003, 0.014, max(nozzle.curvature, 0.0));
+    float feed = saturate(
+        max(localFeed, reservoirFeed)
+            * mix(1.0, 1.18, capsuleRimFeed)
+            * mix(1.28, 0.98, curvedNozzle)
+    );
+    vec3 sourceColor = clamp(sourceState.rgb / max(sampledSourceMass, 0.001), 0.0, 1.0);
+    vec2 sourceVelocity = sourceVelocityState.xy;
+
+    float seed = nozzle.seed + float(gid) * 0.173 + float(particleSlot) * 0.619;
+    float nozzleProfile = splashHash(vec2(nozzle.seed, 41.0));
+    float stickyProfile = 1.0 - smoothstep(0.18, 0.46, nozzleProfile);
+    float thinProfile = smoothstep(0.18, 0.48, nozzleProfile)
+        * (1.0 - smoothstep(0.52, 0.78, nozzleProfile));
+    float heavyProfile = smoothstep(0.62, 0.96, nozzleProfile);
+    float fastProfile = smoothstep(0.36, 0.66, splashHash(vec2(nozzle.seed, 73.0)))
+        * (1.0 - heavyProfile * 0.45);
+    float slot01 = SPH_PARTICLES_PER_NOZZLE > 1u
+        ? float(particleSlot) / float(SPH_PARTICLES_PER_NOZZLE - 1u)
+        : 0.0;
+    float particleJitter = splashHash(vec2(seed, 13.7));
+    float lane = (fract(slot01 * 3.999 + particleJitter * 0.37) - 0.5) * 2.0;
+    float rowBase = floor(slot01 * 3.999) / 3.0;
+    float row = clamp(mix(rowBase, particleJitter, 0.32 + thinProfile * 0.22), 0.0, 1.0);
+    float contactParticle = particleSlot < 3u ? 1.0 : 0.0;
+
+    float isLive = p.ageLifetimeSeedActive.w;
+    float state = p.anchorStrengthAnchorState.w;
+    if (isLive < 0.5 || state < 0.5) {
+        p.ageLifetimeSeedActive.x += dt;
+        p.normalCurvatureProfilePad.w += 0.0;
+        p.ageLifetimeSeedActive.z = seed;
+        p.anchorStrengthAnchorState.w = SPH_STATE_EMPTY;
+        p.ageLifetimeSeedActive.w = 0.0;
+        p.normalCurvatureProfilePad = vec4(p.normalCurvatureProfilePad.xyz, nozzleProfile);
+
+        float idleTime = p.ageLifetimeSeedActive.x;
+        float attempt = floor(idleTime * mix(14.0, 24.0, feed) + seed * 2.7);
+        float spawnRoll = splashHash(vec2(seed * 11.0 + attempt, float(gid) * 0.071));
+        float feedProfile = mix(0.72, 1.42, heavyProfile)
+            * mix(1.0, 1.34, thinProfile)
+            * mix(1.0, 0.78, stickyProfile);
+        float pulse = mix(0.72, 1.26, splashHash(vec2(nozzle.seed, attempt * 0.37 + 133.0)));
+        float spawnRate = feed * dt * mix(6.0, 18.5, row) * mix(1.35, 0.70, contactParticle) * feedProfile
+            * mix(pulse, 1.08, curvedNozzle);
+        if (feed <= 0.030 || spawnRoll > min(spawnRate, 0.48)) {
+            particlesOut[gid] = p;
+            return;
+        }
+
+        float seedA = splashHash(vec2(seed, 19.0 + attempt));
+        float seedB = splashHash(vec2(seed, 31.0 + attempt));
+        float laneWidth = nozzle.width * mix(0.12, 0.74, seedA) * mix(0.72, 1.34, thinProfile);
+        laneWidth *= mix(1.0, 1.45, capsuleRimFeed);
+        float outletWander = (splashHash(vec2(nozzle.seed + attempt * 0.173, seedA * 11.0)) - 0.5)
+            * targetSize.x
+            * 0.026
+            * capsuleRimFeed;
+        float lateral = lane * laneWidth
+            + (splashHash(vec2(seed, attempt + 47.0)) - 0.5) * nozzle.width * mix(0.22, 0.46, capsuleRimFeed)
+            + outletWander;
+        float normalOffset = mix(0.55, 3.2, row) + seedB * 1.4;
+        vec2 anchor = nozzle.sourcePoint + surfaceTangent * lateral;
+        vec2 pos = anchor + surfaceNormal * normalOffset;
+        vec2 vel = sourceVelocity * mix(0.030, 0.105, row)
+            + surfaceTangent * (seedA - 0.5) * mix(2.0, 26.0, row) * mix(0.62, 1.35, thinProfile)
+            + surfaceNormal * mix(2.0, 24.0, seedB) * mix(0.48, 1.15, row) * mix(0.82, 1.20, fastProfile);
+
+        p.positionVelocity = vec4(pos, vel);
+        p.color = vec4(sourceColor, 1.0);
+        p.radiusMassDensityPressure.x = mix(1.35, 5.2, seedA)
+            * mix(0.60, 1.34, row)
+            * mix(0.72, 1.28, heavyProfile)
+            * mix(1.0, 0.64, thinProfile)
+            * mix(1.22, 1.02, curvedNozzle);
+        p.radiusMassDensityPressure.y = mix(0.052, 0.21, seedB)
+            * mix(0.46, 1.36, row)
+            * max(feed, 0.28)
+            * mix(0.74, 1.44, heavyProfile)
+            * mix(1.0, 0.62, thinProfile)
+            * mix(1.16, 1.04, curvedNozzle);
+        p.radiusMassDensityPressure.z = p.radiusMassDensityPressure.y;
+        p.radiusMassDensityPressure.w = 0.0;
+        p.ageLifetimeSeedActive = vec4(
+            0.0,
+            mix(0.86, 1.95, seedB) * mix(0.78, 1.28, heavyProfile) * mix(1.0, 0.72, fastProfile),
+            seed,
+            1.0
+        );
+        p.anchorStrengthAnchorState = vec4(
+            mix(6.8, 0.92, row)
+                * mix(1.32, 0.68, contactParticle)
+                * mix(0.64, 1.62, stickyProfile)
+                * mix(1.0, 0.68, fastProfile),
+            anchor,
+            SPH_STATE_ATTACHED
+        );
+        p.normalCurvatureProfilePad = vec4(surfaceNormal, nozzle.curvature, nozzleProfile);
+        particlesOut[gid] = p;
+        return;
+    }
+
+    vec2 pos = p.positionVelocity.xy;
+    vec2 vel = p.positionVelocity.zw;
+    vec3 color = clamp(p.color.rgb, 0.0, 1.0);
+    float radius = p.radiusMassDensityPressure.x;
+    float mass = p.radiusMassDensityPressure.y;
+    float age = p.ageLifetimeSeedActive.x;
+    float lifetime = p.ageLifetimeSeedActive.y;
+    bool attached = state < 1.5;
+    vec2 particleNormal = length(p.normalCurvatureProfilePad.xy) > 0.001
+        ? normalize(p.normalCurvatureProfilePad.xy)
+        : surfaceNormal;
+    vec2 particleTangent = vec2(-particleNormal.y, particleNormal.x);
+    float profile = p.normalCurvatureProfilePad.w;
+    float pSticky = 1.0 - smoothstep(0.18, 0.46, profile);
+    float pThin = smoothstep(0.18, 0.48, profile) * (1.0 - smoothstep(0.52, 0.78, profile));
+    float pHeavy = smoothstep(0.62, 0.96, profile);
+    float pFast = smoothstep(0.36, 0.66, splashHash(vec2(nozzle.seed, 73.0))) * (1.0 - pHeavy * 0.45);
+
+    float density = mass * 0.86;
+    float support = max(9.5, radius * 3.8);
+    for (uint i = 0u; i < pc.particleCapacity; ++i) {
+        GlassSPHParticle q = particlesIn[i];
+        if (q.ageLifetimeSeedActive.w < 0.5) {
+            continue;
+        }
+        vec2 delta = pos - q.positionVelocity.xy;
+        float dist = length(delta);
+        float h = max(support, (radius + q.radiusMassDensityPressure.x) * 2.55);
+        if (dist >= h) {
+            continue;
+        }
+        float x = 1.0 - dist / max(h, 0.001);
+        density += q.radiusMassDensityPressure.y * x * x * x * 1.48;
+    }
+
+    float restDensity = mix(0.22, 0.48, saturate(mass * 2.4));
+    float pressure = max(density - restDensity, 0.0) * 92.0;
+    float anchorStrength = p.anchorStrengthAnchorState.x;
+    vec2 accel = vec2(0.0, mix(520.0, 330.0, saturate(anchorStrength / 6.0)))
+        * mix(1.0, 1.16, pHeavy)
+        * mix(1.0, 0.88, pSticky);
+
+    for (uint i = 0u; i < pc.particleCapacity; ++i) {
+        if (i == gid) {
+            continue;
+        }
+        GlassSPHParticle q = particlesIn[i];
+        if (q.ageLifetimeSeedActive.w < 0.5) {
+            continue;
+        }
+        vec2 delta = pos - q.positionVelocity.xy;
+        float dist = length(delta);
+        float h = max(10.5, (radius + q.radiusMassDensityPressure.x) * 2.75);
+        if (dist <= 0.001 || dist >= h) {
+            continue;
+        }
+        vec2 dir = delta / dist;
+        float x = 1.0 - dist / h;
+        float w = x * x;
+        float qPressure = max(q.radiusMassDensityPressure.w, max(q.radiusMassDensityPressure.z - restDensity, 0.0) * 82.0);
+        float pressureTerm = (pressure + qPressure) * 0.018 * w;
+        float cohesionTerm = mix(20.0, 7.0, saturate(dist / h)) * w;
+        vec2 visc = (q.positionVelocity.zw - vel) * (2.6 * w);
+
+        accel += dir * pressureTerm;
+        accel -= dir * cohesionTerm;
+        accel += visc;
+    }
+
+    if (attached) {
+        vec2 anchor = p.anchorStrengthAnchorState.yz;
+        vec2 toAnchor = anchor - pos;
+        float anchorDistance = length(toAnchor);
+        float contactWidth = max(nozzle.width * mix(0.45, 0.88, pThin), 4.8);
+        float contactFalloff = exp(-anchorDistance * anchorDistance / max(contactWidth * contactWidth, 0.001));
+        float adhesion = anchorStrength
+            * mix(0.54, 1.30, feed)
+            * mix(0.70, 1.62, pSticky)
+            * mix(1.0, 0.76, pFast)
+            * (0.31 + contactFalloff);
+        accel += toAnchor * adhesion * 6.4;
+        accel += sourceVelocity * feed * 0.20;
+        accel += particleTangent * dot(vec2(0.0, 1.0), particleTangent) * mix(18.0, 54.0, pThin + pHeavy * 0.45);
+
+        float tangentVelocity = dot(vel, particleTangent);
+        vel -= particleTangent * tangentVelocity * min(dt * adhesion * mix(0.20, 0.50, pSticky), 0.34);
+        vel *= max(0.0, 1.0 - dt * mix(0.52, 3.6, contactFalloff) * mix(0.82, 1.30, pSticky));
+
+        float rimXForSurface = dot(pos - anchor, particleTangent);
+        float surfaceCurve = -min(0.5 * max(p.normalCurvatureProfilePad.z, 0.0) * rimXForSurface * rimXForSurface,
+                                  max(radius * 1.20, 1.0));
+        float signedSurface = dot(pos - anchor, particleNormal) - surfaceCurve;
+        if (signedSurface < 0.0) {
+            pos -= particleNormal * signedSurface;
+            float vn = dot(vel, particleNormal);
+            if (vn < 0.0) {
+                vel -= particleNormal * vn;
+            }
+        }
+
+        color = mix(color, sourceColor, saturate(feed * dt * 4.0));
+        float feedGain = feed * dt * mix(0.016, 0.104, row) * (0.45 + sourceMass)
+            * mix(0.62, 1.46, pHeavy)
+            * mix(1.0, 0.58, pSticky)
+            * mix(1.0, 0.72, pThin);
+        mass = min(0.82, mass + feedGain);
+        float desiredRadius = mix(1.55, 6.8, saturate(mass * 1.55))
+            * mix(0.64, 1.34, row)
+            * mix(0.78, 1.24, pHeavy)
+            * mix(1.0, 0.66, pThin)
+            * mix(1.18, 1.02, curvedNozzle);
+        radius = mix(radius, desiredRadius, saturate(dt * 3.8));
+
+        float load = anchorDistance * 0.018
+            + mass * mix(0.18, 1.62, row) * mix(0.72, 1.46, pHeavy)
+            + max(vel.y, 0.0) * 0.0012;
+        float release = mix(0.52, 1.18, contactParticle)
+            + feed * mix(0.16, 0.36, pSticky)
+            + anchorStrength * mix(0.026, 0.050, pSticky)
+            + pHeavy * 0.18
+            - pFast * 0.22
+            - pThin * 0.10;
+        float releaseAge = mix(0.16, 0.38, pSticky) * mix(1.0, 0.70, pFast);
+        if (particleSlot >= 3u && age > releaseAge && load > release) {
+            state = SPH_STATE_DETACHED;
+            anchorStrength = 0.0;
+            lifetime = mix(1.05, 1.65, splashHash(vec2(seed, age + 5.1)));
+            vel += particleNormal * mix(12.0, 58.0, saturate(load - release));
+        }
+    } else {
+        mass *= max(0.0, 1.0 - dt * mix(0.052, 0.102, pThin + pFast * 0.5));
+        radius *= max(0.0, 1.0 - dt * mix(0.022, 0.045, pThin));
+    }
+
+    vel += accel * dt;
+    vel *= max(0.0, 1.0 - dt * mix(0.42, 1.35, saturate(density)));
+    vel = clamp(vel, vec2(-210.0), vec2(280.0, 520.0));
+    pos += vel * dt;
+
+    age += dt;
+    if (!attached) {
+        lifetime -= dt;
+    }
+
+    float kill = 0.0;
+    kill = max(kill, pos.y - pc.viewportSize.y - 42.0);
+    kill = max(kill, 0.018 - mass);
+    kill = max(kill, -lifetime);
+    if (kill > 0.0) {
+        p.positionVelocity = vec4(pos, vel);
+        p.radiusMassDensityPressure.y = 0.0;
+        p.ageLifetimeSeedActive = vec4(0.0, lifetime, seed, 0.0);
+        p.anchorStrengthAnchorState.w = SPH_STATE_EMPTY;
+        particlesOut[gid] = p;
+        return;
+    }
+
+    p.positionVelocity = vec4(pos, vel);
+    p.color = vec4(color, 1.0);
+    p.radiusMassDensityPressure = vec4(radius, mass, density, pressure);
+    p.ageLifetimeSeedActive = vec4(age, lifetime, seed, 1.0);
+    p.anchorStrengthAnchorState.x = anchorStrength;
+    p.anchorStrengthAnchorState.w = state;
+    particlesOut[gid] = p;
+}

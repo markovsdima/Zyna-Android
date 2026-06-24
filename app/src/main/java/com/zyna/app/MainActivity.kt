@@ -309,6 +309,7 @@ class MainActivity : ComponentActivity() {
         )
         val actions = NativeMatrixRtcCallViewActions(
             onToggleMicrophone = controller::toggleMicrophone,
+            onToggleSpeakerphone = controller::toggleSpeakerphone,
             onEndCall = controller::endCall
         )
 

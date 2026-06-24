@@ -1,6 +1,8 @@
 package com.zyna.app.data.calls.matrixrtc
 
 import android.content.Context
+import com.twilio.audioswitch.AudioDevice
+import com.twilio.audioswitch.AudioDeviceChangeListener
 import io.livekit.android.ConnectOptions
 import io.livekit.android.LiveKit
 import io.livekit.android.RoomOptions
@@ -29,6 +31,64 @@ enum class MatrixRtcLiveKitRoomSessionState {
 enum class MatrixRtcLiveKitMediaEncryptionMode {
     PER_PARTICIPANT_KEYS,
     UNENCRYPTED
+}
+
+enum class MatrixRtcAudioOutputDeviceKind {
+    BLUETOOTH,
+    WIRED_HEADSET,
+    EARPIECE,
+    SPEAKERPHONE
+}
+
+data class MatrixRtcAudioOutputDevice(
+    val kind: MatrixRtcAudioOutputDeviceKind,
+    val name: String
+)
+
+data class MatrixRtcAudioOutputState(
+    val availableDevices: List<MatrixRtcAudioOutputDevice> = emptyList(),
+    val selectedDevice: MatrixRtcAudioOutputDevice? = null
+) {
+    val isSpeakerphoneEnabled: Boolean
+        get() = selectedDevice?.kind == MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE
+
+    val canToggleSpeakerphone: Boolean
+        get() {
+            val hasSpeakerphone = availableDevices.any {
+                it.kind == MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE
+            }
+            val hasNonSpeakerphone = availableDevices.any {
+                it.kind != MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE
+            }
+            return hasSpeakerphone && hasNonSpeakerphone
+        }
+
+    val selectedDeviceLabel: String?
+        get() {
+            val device = selectedDevice ?: return null
+            return when (device.kind) {
+                MatrixRtcAudioOutputDeviceKind.BLUETOOTH -> device.name
+                MatrixRtcAudioOutputDeviceKind.WIRED_HEADSET -> "Headset"
+                MatrixRtcAudioOutputDeviceKind.EARPIECE -> "Phone"
+                MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE -> "Speaker"
+            }
+        }
+
+    fun preferredKindForSpeakerphone(enabled: Boolean): MatrixRtcAudioOutputDeviceKind? {
+        if (enabled) {
+            return availableDevices
+                .firstOrNull { it.kind == MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE }
+                ?.kind
+        }
+
+        return listOf(
+            MatrixRtcAudioOutputDeviceKind.BLUETOOTH,
+            MatrixRtcAudioOutputDeviceKind.WIRED_HEADSET,
+            MatrixRtcAudioOutputDeviceKind.EARPIECE
+        ).firstNotNullOfOrNull { kind ->
+            availableDevices.firstOrNull { it.kind == kind }?.kind
+        }
+    }
 }
 
 sealed class MatrixRtcLiveKitRoomSessionException(message: String) : Exception(message) {
@@ -121,6 +181,9 @@ sealed interface MatrixRtcLiveKitRoomSessionEvent {
         val keyIndex: Int,
         val participantId: String
     ) : MatrixRtcLiveKitRoomSessionEvent
+    data class AudioOutputChanged(
+        val state: MatrixRtcAudioOutputState
+    ) : MatrixRtcLiveKitRoomSessionEvent
 }
 
 fun interface MatrixRtcLiveKitRoomSessionFactory {
@@ -140,6 +203,8 @@ interface MatrixRtcLiveKitRoomController : AutoCloseable {
     fun disconnect()
     suspend fun setMicrophoneEnabled(enabled: Boolean)
     suspend fun setCameraEnabled(enabled: Boolean)
+    val audioOutputState: MatrixRtcAudioOutputState
+    fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean
 }
 
 class MatrixRtcLiveKitRoomSession(
@@ -163,6 +228,9 @@ class MatrixRtcLiveKitRoomSession(
 
     val isCameraEnabled: Boolean
         get() = synchronized(lock) { cameraEnabled }
+
+    val audioOutputState: MatrixRtcAudioOutputState
+        get() = controller.audioOutputState
 
     suspend fun connect(
         sfuConfig: MatrixRtcLiveKitSfuConfig,
@@ -213,6 +281,11 @@ class MatrixRtcLiveKitRoomSession(
         synchronized(lock) {
             cameraEnabled = enabled
         }
+    }
+
+    fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean {
+        ensureConnected()
+        return controller.selectAudioOutput(kind)
     }
 
     fun handleMediaKeyChanged(event: MatrixRtcMediaKeyChangedEvent): MatrixRtcMediaKey {
@@ -340,10 +413,24 @@ class AndroidMatrixRtcLiveKitRoomController(
         LiveKit.create(appContext, roomOptions)
     }
 
+    init {
+        room.audioSwitchHandler?.preferredDeviceList = callPreferredAudioDeviceList
+    }
+
     override fun startEventCollection(
         scope: CoroutineScope,
         onEvent: (MatrixRtcLiveKitRoomSessionEvent) -> Unit
     ): MatrixRtcCancellable {
+        val audioSwitchHandler = room.audioSwitchHandler
+        val audioOutputListener: AudioDeviceChangeListener = { audioDevices, selectedAudioDevice ->
+            val state = audioOutputStateFrom(
+                audioDevices = audioDevices,
+                selectedAudioDevice = selectedAudioDevice
+            )
+            MatrixRtcCallDebugLog.d("liveKitAudioOutputChanged ${state.debugSummary()}")
+            onEvent(MatrixRtcLiveKitRoomSessionEvent.AudioOutputChanged(state))
+        }
+        audioSwitchHandler?.registerAudioDeviceChangeListener(audioOutputListener)
         val job = scope.launch {
             room.events.events.collect { event ->
                 event.toMatrixRtcLiveKitEvent()?.let { mapped ->
@@ -354,6 +441,7 @@ class AndroidMatrixRtcLiveKitRoomController(
         }
         return object : MatrixRtcCancellable {
             override fun cancel() {
+                audioSwitchHandler?.unregisterAudioDeviceChangeListener(audioOutputListener)
                 job.cancel()
             }
         }
@@ -380,8 +468,33 @@ class AndroidMatrixRtcLiveKitRoomController(
         room.localParticipant.setCameraEnabled(enabled)
     }
 
+    override val audioOutputState: MatrixRtcAudioOutputState
+        get() = audioOutputStateFrom(
+            audioDevices = room.audioSwitchHandler?.availableAudioDevices.orEmpty(),
+            selectedAudioDevice = room.audioSwitchHandler?.selectedAudioDevice
+        )
+
+    override fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean {
+        val audioSwitchHandler = room.audioSwitchHandler ?: return false
+        val targetDevice = audioSwitchHandler.availableAudioDevices.firstOrNull { device ->
+            device.toMatrixRtcAudioOutputDevice().kind == kind
+        } ?: return false
+        MatrixRtcCallDebugLog.d("selectAudioOutput kind=$kind device=${targetDevice.name}")
+        audioSwitchHandler.selectDevice(targetDevice)
+        return true
+    }
+
     override fun close() {
         room.release()
+    }
+
+    private companion object {
+        private val callPreferredAudioDeviceList = listOf(
+            AudioDevice.BluetoothHeadset::class.java,
+            AudioDevice.WiredHeadset::class.java,
+            AudioDevice.Earpiece::class.java,
+            AudioDevice.Speakerphone::class.java
+        )
     }
 }
 
@@ -427,6 +540,8 @@ internal fun MatrixRtcLiveKitRoomSessionEvent.debugSummary(): String {
                 "publication=${publication.debugSummary()} state=$state"
         is MatrixRtcLiveKitRoomSessionEvent.MediaKeyApplied ->
             "MediaKeyApplied participantId=$participantId keyIndex=$keyIndex"
+        is MatrixRtcLiveKitRoomSessionEvent.AudioOutputChanged ->
+            "AudioOutputChanged ${state.debugSummary()}"
     }
 }
 
@@ -442,6 +557,42 @@ private fun MatrixRtcLiveKitTrackPublicationInfo.debugSummary(): String {
 private fun MatrixRtcLiveKitSpeakingParticipantInfo.debugSummary(): String {
     return "identity=$identity sid=$sid speaking=$isSpeaking " +
         "level=$audioLevel lastSpokeAt=$lastSpokeAtMillis"
+}
+
+private fun audioOutputStateFrom(
+    audioDevices: List<AudioDevice>,
+    selectedAudioDevice: AudioDevice?
+): MatrixRtcAudioOutputState {
+    return MatrixRtcAudioOutputState(
+        availableDevices = audioDevices.map { it.toMatrixRtcAudioOutputDevice() },
+        selectedDevice = selectedAudioDevice?.toMatrixRtcAudioOutputDevice()
+    )
+}
+
+private fun AudioDevice.toMatrixRtcAudioOutputDevice(): MatrixRtcAudioOutputDevice {
+    return when (this) {
+        is AudioDevice.BluetoothHeadset -> MatrixRtcAudioOutputDevice(
+            kind = MatrixRtcAudioOutputDeviceKind.BLUETOOTH,
+            name = name.ifBlank { "Bluetooth" }
+        )
+        is AudioDevice.WiredHeadset -> MatrixRtcAudioOutputDevice(
+            kind = MatrixRtcAudioOutputDeviceKind.WIRED_HEADSET,
+            name = name.ifBlank { "Headset" }
+        )
+        is AudioDevice.Earpiece -> MatrixRtcAudioOutputDevice(
+            kind = MatrixRtcAudioOutputDeviceKind.EARPIECE,
+            name = name.ifBlank { "Phone" }
+        )
+        is AudioDevice.Speakerphone -> MatrixRtcAudioOutputDevice(
+            kind = MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE,
+            name = name.ifBlank { "Speaker" }
+        )
+    }
+}
+
+private fun MatrixRtcAudioOutputState.debugSummary(): String {
+    return "selected=${selectedDevice?.kind}:${selectedDevice?.name} " +
+        "available=${availableDevices.joinToString { "${it.kind}:${it.name}" }}"
 }
 
 private fun RoomEvent.toMatrixRtcLiveKitEvent(): MatrixRtcLiveKitRoomSessionEvent? {

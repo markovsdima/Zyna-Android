@@ -14,6 +14,7 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcAudioOutputState
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceException
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceState
@@ -35,6 +36,9 @@ data class NativeMatrixRtcCallViewState(
     val roomName: String,
     val statusText: String,
     val isMuted: Boolean,
+    val isSpeakerphoneEnabled: Boolean,
+    val canToggleSpeakerphone: Boolean,
+    val audioOutputLabel: String?,
     val isBusy: Boolean,
     val canToggleMicrophone: Boolean,
     val canEnd: Boolean,
@@ -44,6 +48,7 @@ data class NativeMatrixRtcCallViewState(
 
 data class NativeMatrixRtcCallViewActions(
     val onToggleMicrophone: () -> Unit,
+    val onToggleSpeakerphone: () -> Unit,
     val onEndCall: () -> Unit
 )
 
@@ -59,6 +64,9 @@ internal class NativeMatrixRtcCallController(
             roomName = launchContext.roomName,
             statusText = "Connecting",
             isMuted = false,
+            isSpeakerphoneEnabled = false,
+            canToggleSpeakerphone = false,
+            audioOutputLabel = null,
             isBusy = true,
             canToggleMicrophone = false,
             canEnd = true,
@@ -70,11 +78,13 @@ internal class NativeMatrixRtcCallController(
 
     private var serviceStateJob: Job? = null
     private var microphoneStateJob: Job? = null
+    private var audioOutputStateJob: Job? = null
     private var dismissJob: Job? = null
     private var hasStarted = false
     private var hasObservedRelevantCall = !startCallOnStart
     private var wasConnected = false
     private var isMuted = false
+    private var audioOutputState = MatrixRtcAudioOutputState()
     private var isEnding = false
     private var isClosed = false
 
@@ -96,14 +106,24 @@ internal class NativeMatrixRtcCallController(
                 }
             }
         }
+        audioOutputStateJob = scope.launch {
+            callService.audioOutputState.collect { state ->
+                audioOutputState = state
+                if (viewState.value.canToggleMicrophone && !isEnding) {
+                    renderConnected()
+                }
+            }
+        }
 
         if (startCallOnStart) {
             callService.startAudioCallAsync(
                 roomId = launchContext.roomId,
                 waitForPickup = false,
                 onFailure = { error ->
-                    if (!isEnding && !isClosed && !hasObservedRelevantCall) {
-                        showFailure(error.callStartMessage())
+                    scope.launch {
+                        if (!isEnding && !isClosed && !hasObservedRelevantCall) {
+                            showFailure(error.callStartMessage())
+                        }
                     }
                 }
             )
@@ -115,6 +135,7 @@ internal class NativeMatrixRtcCallController(
             return
         }
         isMuted = !callService.currentMicrophoneEnabled()
+        audioOutputState = callService.currentAudioOutputState()
         handleServiceState(callService.state.value)
     }
 
@@ -128,9 +149,29 @@ internal class NativeMatrixRtcCallController(
         callService.setMicrophoneEnabledAsync(
             enabled = !nextMuted,
             onFailure = {
-                if (!isEnding && !isClosed) {
-                    isMuted = !nextMuted
-                    renderConnected(statusOverride = "Could not change microphone")
+                scope.launch {
+                    if (!isEnding && !isClosed) {
+                        isMuted = !nextMuted
+                        renderConnected(statusOverride = "Could not change microphone")
+                    }
+                }
+            }
+        )
+    }
+
+    fun toggleSpeakerphone() {
+        if (isClosed || isEnding || !viewState.value.canToggleSpeakerphone) {
+            return
+        }
+        val nextSpeakerphoneEnabled = !audioOutputState.isSpeakerphoneEnabled
+        callService.setSpeakerphoneEnabledAsync(
+            enabled = nextSpeakerphoneEnabled,
+            onFailure = {
+                scope.launch {
+                    if (!isEnding && !isClosed) {
+                        audioOutputState = callService.currentAudioOutputState()
+                        renderConnected(statusOverride = "Could not change audio output")
+                    }
                 }
             }
         )
@@ -145,13 +186,16 @@ internal class NativeMatrixRtcCallController(
             statusText = "Ending",
             isBusy = true,
             canToggleMicrophone = false,
+            canToggleSpeakerphone = false,
             canEnd = false,
             isEnding = true
         )
         callService.leaveActiveCallAsync(
             onFailure = {
-                if (!isClosed && callService.state.value != NativeMatrixRtcCallServiceState.IDLE) {
-                    showFailure("Could not end call")
+                scope.launch {
+                    if (!isClosed && callService.state.value != NativeMatrixRtcCallServiceState.IDLE) {
+                        showFailure("Could not end call")
+                    }
                 }
             }
         )
@@ -163,6 +207,8 @@ internal class NativeMatrixRtcCallController(
         serviceStateJob = null
         microphoneStateJob?.cancel()
         microphoneStateJob = null
+        audioOutputStateJob?.cancel()
+        audioOutputStateJob = null
         dismissJob?.cancel()
         dismissJob = null
     }
@@ -190,6 +236,7 @@ internal class NativeMatrixRtcCallController(
                         statusText = "Connecting",
                         isBusy = true,
                         canToggleMicrophone = false,
+                        canToggleSpeakerphone = false,
                         canEnd = true,
                         isEnding = false,
                         isFailed = false
@@ -201,6 +248,7 @@ internal class NativeMatrixRtcCallController(
                     hasObservedRelevantCall = true
                     wasConnected = true
                     isMuted = !callService.currentMicrophoneEnabled()
+                    audioOutputState = callService.currentAudioOutputState()
                     renderConnected()
                 }
             }
@@ -212,6 +260,7 @@ internal class NativeMatrixRtcCallController(
                         statusText = "Ending",
                         isBusy = true,
                         canToggleMicrophone = false,
+                        canToggleSpeakerphone = false,
                         canEnd = false,
                         isEnding = true
                     )
@@ -221,9 +270,17 @@ internal class NativeMatrixRtcCallController(
     }
 
     private fun renderConnected(statusOverride: String? = null) {
+        val audioOutputLabel = audioOutputState.selectedDeviceLabel
         _viewState.value = viewState.value.copy(
-            statusText = statusOverride ?: if (isMuted) "Microphone muted" else "Connected",
+            statusText = statusOverride ?: when {
+                isMuted -> "Microphone muted"
+                audioOutputLabel != null -> "Connected on $audioOutputLabel"
+                else -> "Connected"
+            },
             isMuted = isMuted,
+            isSpeakerphoneEnabled = audioOutputState.isSpeakerphoneEnabled,
+            canToggleSpeakerphone = audioOutputState.canToggleSpeakerphone,
+            audioOutputLabel = audioOutputLabel,
             isBusy = false,
             canToggleMicrophone = true,
             canEnd = true,
@@ -237,6 +294,7 @@ internal class NativeMatrixRtcCallController(
             statusText = "Call ended",
             isBusy = false,
             canToggleMicrophone = false,
+            canToggleSpeakerphone = false,
             canEnd = false,
             isEnding = false,
             isFailed = false
@@ -252,6 +310,7 @@ internal class NativeMatrixRtcCallController(
             statusText = message,
             isBusy = false,
             canToggleMicrophone = false,
+            canToggleSpeakerphone = false,
             canEnd = true,
             isEnding = false,
             isFailed = true
@@ -316,6 +375,14 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
         gravity = Gravity.CENTER
     }
     private val microphoneButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 16f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+        isClickable = true
+        isFocusable = true
+    }
+    private val speakerButton = TextView(context).apply {
         gravity = Gravity.CENTER
         textSize = 16f
         typeface = Typeface.DEFAULT_BOLD
@@ -393,13 +460,19 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
         )
         controlsRow.addView(
             microphoneButton,
-            LinearLayout.LayoutParams(dp(132), dp(56)).apply {
-                rightMargin = dp(14)
+            LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+                rightMargin = dp(10)
+            }
+        )
+        controlsRow.addView(
+            speakerButton,
+            LinearLayout.LayoutParams(0, dp(56), 1f).apply {
+                rightMargin = dp(10)
             }
         )
         controlsRow.addView(
             endButton,
-            LinearLayout.LayoutParams(dp(132), dp(56))
+            LinearLayout.LayoutParams(0, dp(56), 1f)
         )
 
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -429,6 +502,15 @@ internal class NativeMatrixRtcCallView(context: Context) : FrameLayout(context) 
             strokeColor = Color.argb(48, 255, 255, 255)
         )
         microphoneButton.setOnClickListener { actions.onToggleMicrophone() }
+
+        speakerButton.text = if (state.isSpeakerphoneEnabled) "Phone" else "Speaker"
+        speakerButton.isEnabled = state.canToggleSpeakerphone && !state.isBusy
+        speakerButton.alpha = if (speakerButton.isEnabled) 1f else 0.42f
+        speakerButton.background = roundedRect(
+            color = if (state.isSpeakerphoneEnabled) Color.rgb(45, 93, 82) else Color.rgb(58, 76, 82),
+            strokeColor = Color.argb(48, 255, 255, 255)
+        )
+        speakerButton.setOnClickListener { actions.onToggleSpeakerphone() }
 
         endButton.text = when {
             state.isFailed -> "Close"

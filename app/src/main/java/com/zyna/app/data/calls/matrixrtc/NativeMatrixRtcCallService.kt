@@ -30,6 +30,9 @@ sealed class NativeMatrixRtcCallServiceException(message: String) : Exception(me
 
     data object NoActiveCall :
         NativeMatrixRtcCallServiceException("No active native MatrixRTC call")
+
+    data object MissingAudioOutputRoute :
+        NativeMatrixRtcCallServiceException("Requested MatrixRTC audio output route is unavailable")
 }
 
 data class NativeMatrixRtcCallStartResult(
@@ -72,6 +75,8 @@ class NativeMatrixRtcCallService(
     val state: StateFlow<NativeMatrixRtcCallServiceState> = _state.asStateFlow()
     private val _microphoneEnabled = MutableStateFlow(true)
     val microphoneEnabled: StateFlow<Boolean> = _microphoneEnabled.asStateFlow()
+    private val _audioOutputState = MutableStateFlow(MatrixRtcAudioOutputState())
+    val audioOutputState: StateFlow<MatrixRtcAudioOutputState> = _audioOutputState.asStateFlow()
     private val _lastFailure = MutableStateFlow<Throwable?>(null)
 
     private var activeCall: ActiveCall? = null
@@ -217,6 +222,7 @@ class NativeMatrixRtcCallService(
                 publishAudio = true
             )
             _microphoneEnabled.value = true
+            _audioOutputState.value = liveKit.audioOutputState
             MatrixRtcCallDebugLog.d("nativeCallLiveKitConnected roomId=$roomId attemptId=$attemptId")
             ensureJoiningAttemptCurrent(attemptId)
 
@@ -304,6 +310,42 @@ class NativeMatrixRtcCallService(
         _microphoneEnabled.value = enabled
     }
 
+    fun setSpeakerphoneEnabledAsync(
+        enabled: Boolean,
+        onFailure: (Throwable) -> Unit = {}
+    ): Job {
+        return coroutineScope.launch {
+            try {
+                setSpeakerphoneEnabled(enabled)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onError(error)
+                onFailure(error)
+            }
+        }
+    }
+
+    suspend fun setSpeakerphoneEnabled(enabled: Boolean) {
+        val call = currentActiveCall()
+            ?: throw NativeMatrixRtcCallServiceException.NoActiveCall
+        val currentState = call.liveKitSession.audioOutputState
+            .takeIf { it.availableDevices.isNotEmpty() }
+            ?: _audioOutputState.value
+        val targetKind = currentState.preferredKindForSpeakerphone(enabled)
+            ?: throw NativeMatrixRtcCallServiceException.MissingAudioOutputRoute
+        val selected = currentState.availableDevices.firstOrNull { device ->
+            device.kind == targetKind
+        }
+        val didSelect = call.liveKitSession.selectAudioOutput(targetKind)
+        if (!didSelect) {
+            throw NativeMatrixRtcCallServiceException.MissingAudioOutputRoute
+        }
+        if (selected != null) {
+            _audioOutputState.value = currentState.copy(selectedDevice = selected)
+        }
+    }
+
     fun leaveActiveCallAsync(
         onFailure: (Throwable) -> Unit = {}
     ): Job {
@@ -340,6 +382,7 @@ class NativeMatrixRtcCallService(
 
     fun currentRoomId(): String? = activeRoomId
     fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
+    fun currentAudioOutputState(): MatrixRtcAudioOutputState = _audioOutputState.value
     fun currentFailure(): Throwable? = _lastFailure.value
 
     private suspend fun sendCallNotificationIfNeeded(
@@ -384,6 +427,8 @@ class NativeMatrixRtcCallService(
                 scheduleAutoLeaveWhenOthersLeftCheck(attemptId)
             is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined ->
                 cancelAutoLeaveWhenOthersLeftCheck(attemptId)
+            is MatrixRtcLiveKitRoomSessionEvent.AudioOutputChanged ->
+                updateAudioOutputState(attemptId, event.state)
             else -> Unit
         }
 
@@ -406,6 +451,20 @@ class NativeMatrixRtcCallService(
     private fun scheduleEndActiveCall(attemptId: String) {
         coroutineScope.launch {
             endActiveCall(attemptId)
+        }
+    }
+
+    private fun updateAudioOutputState(
+        attemptId: String,
+        state: MatrixRtcAudioOutputState
+    ) {
+        coroutineScope.launch {
+            val isCurrentAttempt = lock.withLock {
+                activeAttemptId == attemptId
+            }
+            if (isCurrentAttempt) {
+                _audioOutputState.value = state
+            }
         }
     }
 
@@ -579,6 +638,7 @@ class NativeMatrixRtcCallService(
             activeRoomId = roomId
             _lastFailure.value = null
             _microphoneEnabled.value = true
+            _audioOutputState.value = MatrixRtcAudioOutputState()
             joiningCall = JoiningCall(
                 attemptId = attemptId
             )
@@ -667,6 +727,7 @@ class NativeMatrixRtcCallService(
             joiningCall = null
             autoLeaveWhenOthersLeftJob = null
             _microphoneEnabled.value = true
+            _audioOutputState.value = MatrixRtcAudioOutputState()
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
@@ -708,6 +769,7 @@ class NativeMatrixRtcCallService(
             joiningCall = null
             autoLeaveWhenOthersLeftJob = null
             _microphoneEnabled.value = true
+            _audioOutputState.value = MatrixRtcAudioOutputState()
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }

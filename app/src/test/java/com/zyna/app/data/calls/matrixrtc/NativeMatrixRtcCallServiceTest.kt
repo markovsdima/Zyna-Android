@@ -411,6 +411,66 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun setSpeakerphoneEnabledSelectsAudioOutputRoutes() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(environment)
+
+        service.startAudioCall(roomId = ROOM_ID)
+        assertEquals(false, service.currentAudioOutputState().isSpeakerphoneEnabled)
+
+        service.setSpeakerphoneEnabled(true)
+        service.setSpeakerphoneEnabled(false)
+
+        assertEquals(
+            listOf(
+                MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE,
+                MatrixRtcAudioOutputDeviceKind.EARPIECE
+            ),
+            environment.liveKitSessions.single().controller.selectedAudioOutputKinds
+        )
+        assertEquals(false, service.currentAudioOutputState().isSpeakerphoneEnabled)
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
+    fun setSpeakerphoneEnabledFailsWhenRouteIsUnavailable() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(environment)
+
+        service.startAudioCall(roomId = ROOM_ID)
+        environment.liveKitSessions.single().controller.audioOutputState = MatrixRtcAudioOutputState(
+            availableDevices = listOf(FakeNativeLiveKitRoomController.phoneOutputDevice),
+            selectedDevice = FakeNativeLiveKitRoomController.phoneOutputDevice
+        )
+
+        val failure = runCatching {
+            service.setSpeakerphoneEnabled(true)
+        }.exceptionOrNull()
+
+        assertEquals(NativeMatrixRtcCallServiceException.MissingAudioOutputRoute, failure)
+        assertEquals(emptyList<MatrixRtcAudioOutputDeviceKind>(), environment.liveKitSessions.single().controller.selectedAudioOutputKinds)
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
     fun leaveActiveCallCancelsJoiningAttemptAndReturnsIdle() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         val membershipClient = environment.membershipClientFor(ROOM_ID)
@@ -765,6 +825,11 @@ private class FakeNativeLiveKitRoomController : MatrixRtcLiveKitRoomController {
     var connectedTokens: List<String> = emptyList()
     var microphoneHistory: List<Boolean> = emptyList()
     var cameraHistory: List<Boolean> = emptyList()
+    override var audioOutputState = MatrixRtcAudioOutputState(
+        availableDevices = listOf(phoneOutputDevice, speakerOutputDevice),
+        selectedDevice = phoneOutputDevice
+    )
+    var selectedAudioOutputKinds: List<MatrixRtcAudioOutputDeviceKind> = emptyList()
     var disconnectCount = 0
     var closeCount = 0
     private var eventHandler: ((MatrixRtcLiveKitRoomSessionEvent) -> Unit)? = null
@@ -798,12 +863,33 @@ private class FakeNativeLiveKitRoomController : MatrixRtcLiveKitRoomController {
         cameraHistory = cameraHistory + enabled
     }
 
+    override fun selectAudioOutput(kind: MatrixRtcAudioOutputDeviceKind): Boolean {
+        val selected = audioOutputState.availableDevices.firstOrNull { device ->
+            device.kind == kind
+        } ?: return false
+        selectedAudioOutputKinds = selectedAudioOutputKinds + kind
+        audioOutputState = audioOutputState.copy(selectedDevice = selected)
+        emit(MatrixRtcLiveKitRoomSessionEvent.AudioOutputChanged(audioOutputState))
+        return true
+    }
+
     override fun close() {
         closeCount += 1
     }
 
     fun emit(event: MatrixRtcLiveKitRoomSessionEvent) {
         eventHandler?.invoke(event)
+    }
+
+    companion object {
+        val phoneOutputDevice = MatrixRtcAudioOutputDevice(
+            kind = MatrixRtcAudioOutputDeviceKind.EARPIECE,
+            name = "Phone"
+        )
+        val speakerOutputDevice = MatrixRtcAudioOutputDevice(
+            kind = MatrixRtcAudioOutputDeviceKind.SPEAKERPHONE,
+            name = "Speaker"
+        )
     }
 }
 

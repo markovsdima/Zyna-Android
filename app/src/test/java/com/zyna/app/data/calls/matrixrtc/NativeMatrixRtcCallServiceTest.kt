@@ -152,79 +152,6 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
-    fun loadRoomCallStatusReportsJoinableRemoteAudioMemberships() = runBlocking {
-        val environment = FakeNativeMatrixRtcCallEnvironment()
-        val membershipClient = environment.membershipClientFor(ROOM_ID)
-        val ownMembership = nativeMembership(
-            eventId = "\$own",
-            sender = "@alice:example.org",
-            deviceId = "ALICEDEVICE",
-            createdTimestamp = 10_000,
-            callIntent = "audio"
-        )
-        val bobMembership = nativeMembership(
-            eventId = "\$bob",
-            sender = "@bob:example.org",
-            deviceId = "BOBDEVICE",
-            createdTimestamp = 20_000,
-            callIntent = "m.audio"
-        )
-        val carolVideoMembership = nativeMembership(
-            eventId = "\$carol",
-            sender = "@carol:example.org",
-            deviceId = "CAROLDEVICE",
-            createdTimestamp = 30_000,
-            callIntent = "m.video"
-        )
-        membershipClient.activeMembershipResponses = mutableListOf(
-            listOf(ownMembership, bobMembership, carolVideoMembership)
-        )
-        val service = nativeService(
-            environment = environment,
-            timestampProvider = { 40_000 }
-        )
-
-        val status = service.loadRoomCallStatus(ROOM_ID)
-
-        assertEquals(ROOM_ID, status.roomId)
-        assertEquals(true, status.hasJoinableCall)
-        assertEquals(1, status.remoteMembershipCount)
-        assertEquals(40_000, status.checkedAtMillis)
-        assertEquals(1, membershipClient.loadCount)
-        assertEquals(1, membershipClient.closeCount)
-    }
-
-    @Test
-    fun loadRoomCallStatusIgnoresOwnAndNonAudioMemberships() = runBlocking {
-        val environment = FakeNativeMatrixRtcCallEnvironment()
-        val membershipClient = environment.membershipClientFor(ROOM_ID)
-        val ownMembership = nativeMembership(
-            eventId = "\$own",
-            sender = "@alice:example.org",
-            deviceId = "ALICEDEVICE",
-            createdTimestamp = 10_000,
-            memberId = "rtc-own-member-id"
-        )
-        val bobVideoMembership = nativeMembership(
-            eventId = "\$bob",
-            sender = "@bob:example.org",
-            deviceId = "BOBDEVICE",
-            createdTimestamp = 20_000,
-            callIntent = "m.video"
-        )
-        membershipClient.activeMembershipResponses = mutableListOf(
-            listOf(ownMembership, bobVideoMembership)
-        )
-        val service = nativeService(environment)
-
-        val status = service.loadRoomCallStatus(ROOM_ID)
-
-        assertEquals(false, status.hasJoinableCall)
-        assertEquals(0, status.remoteMembershipCount)
-        assertEquals(1, membershipClient.closeCount)
-    }
-
-    @Test
     fun refreshActiveMembershipsSharesCurrentKeyWithLateJoiner() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         val membershipClient = environment.membershipClientFor(ROOM_ID)
@@ -439,13 +366,12 @@ class NativeMatrixRtcCallServiceTest {
         deviceId: String,
         createdTimestamp: Long,
         expires: Long = MatrixRtcCallMembership.DEFAULT_EXPIRE_DURATION_MILLIS,
-        memberId: String = "$sender:$deviceId",
         callIntent: String? = null
     ): MatrixRtcCallMembership {
         val identity = MatrixRtcMembershipIdentity(
             userId = sender,
             deviceId = deviceId,
-            memberId = memberId
+            memberId = "$sender:$deviceId"
         )
         return MatrixRtcCallMembership(
             kind = MatrixRtcCallMembership.Kind.LEGACY_STATE,

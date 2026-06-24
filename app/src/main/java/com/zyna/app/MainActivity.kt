@@ -606,11 +606,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        appViewModel.setChatCallStatusPollingEnabled(true)
+        appViewModel.setChatCallInfoObserverEnabled(true)
     }
 
     override fun onStop() {
-        appViewModel.setChatCallStatusPollingEnabled(false)
+        appViewModel.setChatCallInfoObserverEnabled(false)
         stopActiveVoiceRecordingToPreviewForBackground()
         super.onStop()
     }

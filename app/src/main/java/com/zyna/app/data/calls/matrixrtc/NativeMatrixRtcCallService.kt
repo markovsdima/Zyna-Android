@@ -44,13 +44,6 @@ data class NativeMatrixRtcCallStartResult(
     val callNotification: MatrixRtcCallNotificationSendResult?
 )
 
-data class NativeMatrixRtcRoomCallStatus(
-    val roomId: String,
-    val hasJoinableCall: Boolean,
-    val remoteMembershipCount: Int,
-    val checkedAtMillis: Long
-)
-
 interface NativeMatrixRtcCallEnvironment {
     fun ownDevice(): MatrixRtcOwnDevice
     suspend fun isRoomEncrypted(roomId: String): Boolean
@@ -341,30 +334,6 @@ class NativeMatrixRtcCallService(
     fun currentRoomId(): String? = activeRoomId
     fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
     fun currentFailure(): Throwable? = _lastFailure.value
-
-    suspend fun loadRoomCallStatus(roomId: String): NativeMatrixRtcRoomCallStatus {
-        val ownDevice = environment.ownDevice()
-        val now = timestampProvider()
-        val membershipClient = environment.sessionMembershipClient(roomId)
-        val memberships = try {
-            membershipClient.loadActiveMemberships(
-                slot = MatrixRtcSlotDescription.MATRIX_CALL_ROOM,
-                joinedUserIds = null,
-                now = now
-            )
-        } finally {
-            membershipClient.close()
-        }
-        val joinableMemberships = memberships.filter { membership ->
-            !membership.isOwnDevice(ownDevice) && membership.isNativeAudioCallIntent()
-        }
-        return NativeMatrixRtcRoomCallStatus(
-            roomId = roomId,
-            hasJoinableCall = joinableMemberships.isNotEmpty(),
-            remoteMembershipCount = joinableMemberships.size,
-            checkedAtMillis = now
-        )
-    }
 
     private suspend fun sendCallNotificationIfNeeded(
         roomId: String,
@@ -729,19 +698,6 @@ class NativeMatrixRtcCallService(
             }
         }
     }
-}
-
-private fun MatrixRtcCallMembership.isNativeAudioCallIntent(): Boolean {
-    return when (callIntent) {
-        null,
-        NativeMatrixRtcCallService.AUDIO_CALL_INTENT,
-        "m.audio" -> true
-        else -> false
-    }
-}
-
-private fun MatrixRtcCallMembership.isOwnDevice(ownDevice: MatrixRtcOwnDevice): Boolean {
-    return userId == ownDevice.userId && deviceId == ownDevice.deviceId
 }
 
 private fun MatrixRtcCallMembership.debugSummary(): String {

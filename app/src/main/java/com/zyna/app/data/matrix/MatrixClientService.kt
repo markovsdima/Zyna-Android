@@ -2,6 +2,7 @@ package com.zyna.app.data.matrix
 
 import android.content.Context
 import android.util.Log
+import com.zyna.app.BuildConfig
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCustomToDeviceEncrypting
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcOwnDevice
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
@@ -28,8 +29,11 @@ import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
@@ -54,27 +58,36 @@ import org.matrix.rustcomponents.sdk.MediaFileHandle
 import org.matrix.rustcomponents.sdk.MediaSource
 import org.matrix.rustcomponents.sdk.MessageFormat
 import org.matrix.rustcomponents.sdk.MessageContent
+import org.matrix.rustcomponents.sdk.MessageLikeEventContent
 import org.matrix.rustcomponents.sdk.MessageType
 import org.matrix.rustcomponents.sdk.MsgLikeContent
 import org.matrix.rustcomponents.sdk.MsgLikeKind
+import org.matrix.rustcomponents.sdk.NotificationEvent
+import org.matrix.rustcomponents.sdk.NotificationItem
 import org.matrix.rustcomponents.sdk.ProfileDetails
 import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomInfo
+import org.matrix.rustcomponents.sdk.RoomInfoListener
 import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
 import org.matrix.rustcomponents.sdk.RoomListEntriesListener
 import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
 import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomListServiceState
 import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
+import org.matrix.rustcomponents.sdk.RtcCallIntent
+import org.matrix.rustcomponents.sdk.RtcCallIntentConsensus
+import org.matrix.rustcomponents.sdk.RtcNotificationType
 import org.matrix.rustcomponents.sdk.Session
 import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
+import org.matrix.rustcomponents.sdk.SyncNotificationListener
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.TaskHandle
 import org.matrix.rustcomponents.sdk.Timeline
 import org.matrix.rustcomponents.sdk.TimelineConfiguration
 import org.matrix.rustcomponents.sdk.TimelineDiff
+import org.matrix.rustcomponents.sdk.TimelineEventContent
 import org.matrix.rustcomponents.sdk.TimelineFilter
 import org.matrix.rustcomponents.sdk.TimelineFocus
 import org.matrix.rustcomponents.sdk.TimelineItem
@@ -109,6 +122,30 @@ data class MatrixRoomSummary(
     val unreadCount: Long = 0,
     val unreadMentionCount: Long = 0,
     val isMarkedUnread: Boolean = false
+)
+
+data class MatrixRoomCallInfo(
+    val roomId: String,
+    val hasRoomCall: Boolean,
+    val activeParticipantUserIds: List<String>,
+    val isAudioCall: Boolean
+) {
+    val activeParticipantCount: Int
+        get() = activeParticipantUserIds.size
+}
+
+enum class MatrixIncomingRtcCallNotificationKind {
+    RING,
+    NOTIFICATION
+}
+
+data class MatrixIncomingRtcCallNotification(
+    val eventId: String,
+    val roomId: String,
+    val senderId: String,
+    val kind: MatrixIncomingRtcCallNotificationKind,
+    val isAudioCall: Boolean,
+    val expiresAtMillis: Long
 )
 
 enum class MatrixLastOwnMessageStatus {
@@ -259,6 +296,12 @@ class MatrixClientService(
     private var client: Client? = null
     private var syncService: SyncService? = null
     private var roomListService: RoomListService? = null
+    private var matrixRtcNotificationHandlerClient: Client? = null
+    private val deliveredMatrixRtcNotificationIds = LinkedHashSet<String>()
+    private val _incomingMatrixRtcCallNotifications =
+        MutableSharedFlow<MatrixIncomingRtcCallNotification>(extraBufferCapacity = 64)
+    val incomingMatrixRtcCallNotifications: SharedFlow<MatrixIncomingRtcCallNotification> =
+        _incomingMatrixRtcCallNotifications.asSharedFlow()
     private val activeTimelineLock = Any()
     private val activeRoomTimelines = mutableMapOf<String, Timeline>()
     private val timelinePaginationMutex = Mutex()
@@ -283,6 +326,7 @@ class MatrixClientService(
         } catch (error: Throwable) {
             restoredClient?.close()
             client = null
+            matrixRtcNotificationHandlerClient = null
             roomListService?.close()
             roomListService = null
             syncService = null
@@ -312,6 +356,7 @@ class MatrixClientService(
         } catch (error: Throwable) {
             loginClient?.close()
             client = null
+            matrixRtcNotificationHandlerClient = null
             roomListService?.close()
             roomListService = null
             syncService = null
@@ -328,6 +373,7 @@ class MatrixClientService(
         syncService = null
         client?.close()
         client = null
+        matrixRtcNotificationHandlerClient = null
         clearStoredMatrixState()
     }
 
@@ -339,6 +385,7 @@ class MatrixClientService(
         syncService = null
         client?.close()
         client = null
+        matrixRtcNotificationHandlerClient = null
         clearStoredMatrixState()
         _state.value = MatrixClientState.LoggedOut
     }
@@ -405,6 +452,32 @@ class MatrixClientService(
         )
     }
 
+    suspend fun hasActiveMatrixRtcMembership(roomId: String, senderId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            matrixRtcMembershipClient()
+                .loadActiveMemberships(roomId = roomId, joinedUserIds = setOf(senderId))
+                .any { membership ->
+                    membership.userId == senderId && membership.callIntent.isAudioCompatible()
+                }
+        }
+
+    suspend fun loadRoomCallInfo(roomId: String): MatrixRoomCallInfo =
+        withContext(Dispatchers.IO) {
+            val audioMemberships = matrixRtcMembershipClient()
+                .loadActiveMemberships(roomId = roomId)
+                .filter { membership ->
+                    membership.callIntent.isAudioCompatible()
+                }
+            MatrixRoomCallInfo(
+                roomId = roomId,
+                hasRoomCall = audioMemberships.isNotEmpty(),
+                activeParticipantUserIds = audioMemberships
+                    .map { membership -> membership.userId }
+                    .distinct(),
+                isAudioCall = true
+            )
+        }
+
     suspend fun matrixRtcMediaEncryptionEnabled(roomId: String): Boolean = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
@@ -467,6 +540,75 @@ class MatrixClientService(
             stateListenerHandle.cancelAndDestroy()
         }
     }.buffer(Channel.CONFLATED)
+        .flowOn(Dispatchers.IO)
+
+    fun roomCallInfoUpdates(roomId: String): Flow<MatrixRoomCallInfo> = callbackFlow {
+        val activeClient = client
+        if (activeClient == null) {
+            close(IllegalStateException("Matrix client is not ready"))
+            return@callbackFlow
+        }
+        val room = activeClient.getRoom(roomId)
+        if (room == null) {
+            close(IllegalStateException("Matrix room is not available"))
+            return@callbackFlow
+        }
+
+        var listenerHandle: TaskHandle? = null
+        val hasCleanedUp = AtomicBoolean(false)
+
+        fun emit(roomInfo: RoomInfo) {
+            val consensusIntent = roomInfo.activeRoomCallConsensusIntent.debugSummary()
+            val directHasActiveCall = runCatching { room.hasActiveRoomCall() }.getOrDefault(false)
+            val directParticipantUserIds = runCatching { room.activeRoomCallParticipants() }.getOrDefault(emptyList())
+            val callInfo = try {
+                roomInfo.toRoomCallInfo(
+                    directHasActiveCall = directHasActiveCall,
+                    directParticipantUserIds = directParticipantUserIds
+                )
+            } finally {
+                roomInfo.destroy()
+            }
+            if (BuildConfig.DEBUG) {
+                Log.d(
+                    TAG,
+                    "roomCallInfo roomId=$roomId hasRoomCall=${callInfo.hasRoomCall} " +
+                        "participants=${callInfo.activeParticipantCount} " +
+                        "isAudioCall=${callInfo.isAudioCall} consensus=$consensusIntent " +
+                        "directHasActiveCall=$directHasActiveCall " +
+                        "directParticipants=${directParticipantUserIds.size}"
+                )
+            }
+            trySendBlocking(callInfo)
+        }
+
+        fun cleanup() {
+            if (hasCleanedUp.compareAndSet(false, true)) {
+                listenerHandle?.cancelAndDestroy()
+                room.destroy()
+            }
+        }
+
+        try {
+            emit(room.roomInfo())
+            listenerHandle = room.subscribeToRoomInfoUpdates(
+                object : RoomInfoListener {
+                    override fun call(roomInfo: RoomInfo) {
+                        emit(roomInfo)
+                    }
+                }
+            )
+        } catch (error: Throwable) {
+            cleanup()
+            close(error)
+            return@callbackFlow
+        }
+
+        awaitClose {
+            cleanup()
+        }
+    }.buffer(Channel.CONFLATED)
+        .distinctUntilChanged()
         .flowOn(Dispatchers.IO)
 
     fun roomTimelineMessageUpserts(roomId: String): Flow<MatrixTimelineUpdate> = callbackFlow {
@@ -1348,6 +1490,96 @@ class MatrixClientService(
             ?.takeIf { it.isNotBlank() }
     }
 
+    private fun RoomInfo.toRoomCallInfo(
+        directHasActiveCall: Boolean,
+        directParticipantUserIds: List<String>
+    ): MatrixRoomCallInfo {
+        val participantUserIds = activeRoomCallParticipants
+            .takeIf { it.isNotEmpty() }
+            ?: directParticipantUserIds
+
+        return MatrixRoomCallInfo(
+            roomId = id,
+            hasRoomCall = hasRoomCall || directHasActiveCall,
+            activeParticipantUserIds = participantUserIds.toList(),
+            isAudioCall = activeRoomCallConsensusIntent.isAudioCompatible()
+        )
+    }
+
+    private fun parseIncomingMatrixRtcCallNotification(
+        notification: NotificationItem,
+        roomId: String,
+        ownUserId: String
+    ): MatrixIncomingRtcCallNotification? {
+        val timelineEvent = (notification.event as? NotificationEvent.Timeline)?.event ?: return null
+        val eventContent = timelineEvent.content()
+        try {
+            val messageLike = eventContent as? TimelineEventContent.MessageLike ?: return null
+            val rtcNotification = messageLike.content as? MessageLikeEventContent.RtcNotification ?: return null
+            val senderId = timelineEvent.senderId()
+            if (senderId == ownUserId) {
+                return null
+            }
+
+            val expiresAtMillis = rtcNotification.expirationTs.toLong()
+            if (expiresAtMillis <= System.currentTimeMillis()) {
+                return null
+            }
+
+            return MatrixIncomingRtcCallNotification(
+                eventId = timelineEvent.eventId(),
+                roomId = roomId,
+                senderId = senderId,
+                kind = when (rtcNotification.notificationType) {
+                    RtcNotificationType.RING -> MatrixIncomingRtcCallNotificationKind.RING
+                    RtcNotificationType.NOTIFICATION -> MatrixIncomingRtcCallNotificationKind.NOTIFICATION
+                },
+                isAudioCall = rtcNotification.callIntent.isAudioCompatible(),
+                expiresAtMillis = expiresAtMillis
+            )
+        } finally {
+            eventContent.destroy()
+        }
+    }
+
+    private fun markMatrixRtcNotificationDelivered(eventId: String): Boolean {
+        synchronized(deliveredMatrixRtcNotificationIds) {
+            if (!deliveredMatrixRtcNotificationIds.add(eventId)) {
+                return false
+            }
+            if (deliveredMatrixRtcNotificationIds.size > 200) {
+                deliveredMatrixRtcNotificationIds.firstOrNull()?.let { oldest ->
+                    deliveredMatrixRtcNotificationIds.remove(oldest)
+                }
+            }
+            return true
+        }
+    }
+
+    private fun String?.isAudioCompatible(): Boolean {
+        return this == null || this == "audio" || this == "m.audio"
+    }
+
+    private fun RtcCallIntent?.isAudioCompatible(): Boolean {
+        return this == null || this == RtcCallIntent.AUDIO
+    }
+
+    private fun RtcCallIntentConsensus.isAudioCompatible(): Boolean {
+        return when (this) {
+            is RtcCallIntentConsensus.Full -> v1 == RtcCallIntent.AUDIO
+            is RtcCallIntentConsensus.Partial -> intent == RtcCallIntent.AUDIO
+            RtcCallIntentConsensus.None -> true
+        }
+    }
+
+    private fun RtcCallIntentConsensus.debugSummary(): String {
+        return when (this) {
+            is RtcCallIntentConsensus.Full -> "Full($v1)"
+            is RtcCallIntentConsensus.Partial -> "Partial($intent,$agreeingCount/$totalCount)"
+            RtcCallIntentConsensus.None -> "None"
+        }
+    }
+
     private suspend fun Room.resolveLastOwnMessageStatus(
         preview: MatrixRoomPreview
     ): MatrixLastOwnMessageStatus? {
@@ -1537,8 +1769,53 @@ class MatrixClientService(
         val roomList = service.roomListService()
         syncService = service
         roomListService = roomList
+        registerMatrixRtcNotificationHandler(activeClient)
         service.start()
         _state.value = MatrixClientState.Syncing(activeClient.userId())
+    }
+
+    private suspend fun registerMatrixRtcNotificationHandler(activeClient: Client) {
+        if (matrixRtcNotificationHandlerClient === activeClient) {
+            return
+        }
+
+        val ownUserId = activeClient.userId()
+        withContext(Dispatchers.IO) {
+            activeClient.registerNotificationHandler(
+                object : SyncNotificationListener {
+                    override fun onNotification(notification: NotificationItem, roomId: String) {
+                        val incoming = try {
+                            parseIncomingMatrixRtcCallNotification(
+                                notification = notification,
+                                roomId = roomId,
+                                ownUserId = ownUserId
+                            )
+                        } catch (error: Throwable) {
+                            Log.w(TAG, "Failed to parse MatrixRTC notification", error)
+                            null
+                        } finally {
+                            notification.destroy()
+                        } ?: return
+
+                        if (!markMatrixRtcNotificationDelivered(incoming.eventId)) {
+                            return
+                        }
+
+                        if (BuildConfig.DEBUG) {
+                            Log.d(
+                                TAG,
+                                "incomingMatrixRtcNotification roomId=$roomId " +
+                                    "eventId=${incoming.eventId} sender=${incoming.senderId} " +
+                                    "kind=${incoming.kind} audio=${incoming.isAudioCall} " +
+                                    "expiresAt=${incoming.expiresAtMillis}"
+                            )
+                        }
+                        _incomingMatrixRtcCallNotifications.tryEmit(incoming)
+                    }
+                }
+            )
+        }
+        matrixRtcNotificationHandlerClient = activeClient
     }
 
     private fun matrixStorePaths(): MatrixStorePaths {

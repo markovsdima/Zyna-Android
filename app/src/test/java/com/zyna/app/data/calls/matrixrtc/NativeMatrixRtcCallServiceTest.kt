@@ -106,6 +106,47 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun startAudioCallAsyncBootstrapsSession() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(environment)
+
+        service.startAudioCallAsync(roomId = ROOM_ID).join()
+
+        assertEquals(NativeMatrixRtcCallServiceState.CONNECTED, service.state.value)
+        assertEquals(ROOM_ID, service.currentRoomId())
+        assertEquals(true, service.currentMicrophoneEnabled())
+        assertEquals(listOf(true), environment.liveKitSessions.single().controller.microphoneHistory)
+
+        assertEquals(true, service.leaveActiveCall())
+    }
+
+    @Test
+    fun startAudioCallAsyncStoresFailureAndReturnsIdle() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        environment.focusClient.discoveredTransport = null
+        val service = nativeService(environment)
+        var reportedFailure: Throwable? = null
+
+        service.startAudioCallAsync(
+            roomId = ROOM_ID,
+            onFailure = { error -> reportedFailure = error }
+        ).join()
+
+        assertEquals(NativeMatrixRtcCallServiceException.MissingLiveKitTransport, reportedFailure)
+        assertEquals(NativeMatrixRtcCallServiceException.MissingLiveKitTransport, service.currentFailure())
+        assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
+        assertNull(service.currentRoomId())
+    }
+
+    @Test
     fun refreshActiveMembershipsSharesCurrentKeyWithLateJoiner() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         val membershipClient = environment.membershipClientFor(ROOM_ID)
@@ -221,15 +262,17 @@ class NativeMatrixRtcCallServiceTest {
         val service = nativeService(environment)
 
         service.startAudioCall(roomId = ROOM_ID)
-        service.setMicrophoneEnabled(false)
-        val left = service.leaveActiveCall()
+        service.setMicrophoneEnabledAsync(false).join()
+        assertEquals(false, service.currentMicrophoneEnabled())
+        val leftJob = service.leaveActiveCallAsync()
+        leftJob.join()
 
-        assertEquals(true, left)
         assertEquals(1, membershipClient.leaveCount)
         assertEquals(listOf(true, false), environment.liveKitSessions.single().controller.microphoneHistory)
         assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
         assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
         assertNull(service.currentRoomId())
+        assertEquals(true, service.currentMicrophoneEnabled())
         assertEquals(false, service.leaveActiveCall())
     }
 

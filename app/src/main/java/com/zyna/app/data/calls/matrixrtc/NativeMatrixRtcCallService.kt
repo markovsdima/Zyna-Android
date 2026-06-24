@@ -4,6 +4,7 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -67,11 +68,36 @@ class NativeMatrixRtcCallService(
     private val lock = Mutex()
     private val _state = MutableStateFlow(NativeMatrixRtcCallServiceState.IDLE)
     val state: StateFlow<NativeMatrixRtcCallServiceState> = _state.asStateFlow()
+    private val _microphoneEnabled = MutableStateFlow(true)
+    val microphoneEnabled: StateFlow<Boolean> = _microphoneEnabled.asStateFlow()
+    private val _lastFailure = MutableStateFlow<Throwable?>(null)
 
     private var activeCall: ActiveCall? = null
     private var joiningCall: JoiningCall? = null
     private var activeAttemptId: String? = null
     private var activeRoomId: String? = null
+
+    fun startAudioCallAsync(
+        roomId: String,
+        fallbackLiveKitServiceUrl: String? = null,
+        waitForPickup: Boolean = false,
+        onFailure: (Throwable) -> Unit = {}
+    ): Job {
+        return coroutineScope.launch {
+            try {
+                startAudioCall(
+                    roomId = roomId,
+                    fallbackLiveKitServiceUrl = fallbackLiveKitServiceUrl,
+                    waitForPickup = waitForPickup
+                )
+            } catch (_: CancellationException) {
+                // A newer call or explicit leave took ownership of cleanup.
+            } catch (error: Throwable) {
+                onError(error)
+                onFailure(error)
+            }
+        }
+    }
 
     suspend fun startAudioCall(
         roomId: String,
@@ -184,6 +210,7 @@ class NativeMatrixRtcCallService(
                 sfuConfig = sfuConfig,
                 publishAudio = true
             )
+            _microphoneEnabled.value = true
             MatrixRtcCallDebugLog.d("nativeCallLiveKitConnected roomId=$roomId attemptId=$attemptId")
             ensureJoiningAttemptCurrent(attemptId)
 
@@ -223,6 +250,7 @@ class NativeMatrixRtcCallService(
                 error
             )
             if (shouldCleanupFailedJoin(attemptId)) {
+                _lastFailure.value = error
                 runCatching { liveKitSession?.close() }
                 matrixRtcSession?.runCatchingLeave()
                 finishFailed(attemptId)
@@ -245,11 +273,43 @@ class NativeMatrixRtcCallService(
             ?: throw NativeMatrixRtcCallServiceException.NoActiveCall
     }
 
+    fun setMicrophoneEnabledAsync(
+        enabled: Boolean,
+        onFailure: (Throwable) -> Unit = {}
+    ): Job {
+        return coroutineScope.launch {
+            try {
+                setMicrophoneEnabled(enabled)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onError(error)
+                onFailure(error)
+            }
+        }
+    }
+
     suspend fun setMicrophoneEnabled(enabled: Boolean) {
         currentActiveCall()
             ?.liveKitSession
             ?.setMicrophoneEnabled(enabled)
             ?: throw NativeMatrixRtcCallServiceException.NoActiveCall
+        _microphoneEnabled.value = enabled
+    }
+
+    fun leaveActiveCallAsync(
+        onFailure: (Throwable) -> Unit = {}
+    ): Job {
+        return coroutineScope.launch {
+            try {
+                leaveActiveCall()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                onError(error)
+                onFailure(error)
+            }
+        }
     }
 
     suspend fun leaveActiveCall(): Boolean {
@@ -272,6 +332,8 @@ class NativeMatrixRtcCallService(
     }
 
     fun currentRoomId(): String? = activeRoomId
+    fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
+    fun currentFailure(): Throwable? = _lastFailure.value
 
     private suspend fun sendCallNotificationIfNeeded(
         roomId: String,
@@ -402,6 +464,8 @@ class NativeMatrixRtcCallService(
             val attemptId = UUID.randomUUID().toString()
             activeAttemptId = attemptId
             activeRoomId = roomId
+            _lastFailure.value = null
+            _microphoneEnabled.value = true
             joiningCall = JoiningCall(
                 attemptId = attemptId
             )
@@ -488,6 +552,7 @@ class NativeMatrixRtcCallService(
             activeRoomId = null
             activeCall = null
             joiningCall = null
+            _microphoneEnabled.value = true
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
@@ -501,6 +566,7 @@ class NativeMatrixRtcCallService(
             if (attemptId != null && activeAttemptId != attemptId) {
                 return@withLock null
             }
+            _lastFailure.value = null
             activeCall?.let { call ->
                 _state.value = NativeMatrixRtcCallServiceState.LEAVING
                 return@withLock LeavingCall.Active(call)
@@ -526,6 +592,7 @@ class NativeMatrixRtcCallService(
             activeRoomId = null
             activeCall = null
             joiningCall = null
+            _microphoneEnabled.value = true
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }

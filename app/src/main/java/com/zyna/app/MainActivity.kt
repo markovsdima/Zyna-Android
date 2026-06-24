@@ -185,11 +185,7 @@ class MainActivity : ComponentActivity() {
                 dismissNativeMatrixRtcCall()
                 pendingNativeMatrixRtcCall = null
                 pendingRecordAudioPermissionRequest = null
-                lifecycleScope.launch {
-                    runCatching {
-                        appContainer.nativeMatrixRtcCallService.leaveActiveCall()
-                    }
-                }
+                appContainer.nativeMatrixRtcCallService.leaveActiveCallAsync()
                 appContainer.audioPlaybackController.stop()
                 sendVoiceAfterFinish = false
                 appContainer.voiceRecorderController.clear()
@@ -328,6 +324,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         controller.start()
+        controller.restoreServiceState()
     }
 
     private fun restoreNativeMatrixRtcCallOverlayIfNeeded(state: AppUiState) {
@@ -623,11 +620,7 @@ class MainActivity : ComponentActivity() {
         nativeMatrixRtcCallController = null
         if (isFinishing) {
             appContainer.voiceRecorderController.clear()
-            lifecycleScope.launch {
-                runCatching {
-                    appContainer.nativeMatrixRtcCallService.leaveActiveCall()
-                }
-            }
+            appContainer.nativeMatrixRtcCallService.leaveActiveCallAsync()
         }
         super.onDestroy()
     }

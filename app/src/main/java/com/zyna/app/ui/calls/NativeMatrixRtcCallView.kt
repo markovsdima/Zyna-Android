@@ -18,7 +18,6 @@ import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceException
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceState
 import kotlin.math.roundToInt
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -70,9 +69,10 @@ internal class NativeMatrixRtcCallController(
     val viewState: StateFlow<NativeMatrixRtcCallViewState> = _viewState.asStateFlow()
 
     private var serviceStateJob: Job? = null
-    private var startJob: Job? = null
-    private var endJob: Job? = null
+    private var microphoneStateJob: Job? = null
+    private var dismissJob: Job? = null
     private var hasStarted = false
+    private var hasObservedRelevantCall = !startCallOnStart
     private var wasConnected = false
     private var isMuted = false
     private var isEnding = false
@@ -88,25 +88,34 @@ internal class NativeMatrixRtcCallController(
                 handleServiceState(serviceState)
             }
         }
-        if (!startCallOnStart) {
-            return
-        }
-        startJob = scope.launch {
-            try {
-                callService.startAudioCall(
-                    roomId = launchContext.roomId,
-                    waitForPickup = false
-                )
-            } catch (error: CancellationException) {
-                if (!isEnding && !isClosed) {
-                    showFailure("Call was cancelled")
-                }
-            } catch (error: Throwable) {
-                if (!isEnding && !isClosed) {
-                    showFailure(error.callStartMessage())
+        microphoneStateJob = scope.launch {
+            callService.microphoneEnabled.collect { enabled ->
+                isMuted = !enabled
+                if (viewState.value.canToggleMicrophone && !isEnding) {
+                    renderConnected()
                 }
             }
         }
+
+        if (startCallOnStart) {
+            callService.startAudioCallAsync(
+                roomId = launchContext.roomId,
+                waitForPickup = false,
+                onFailure = { error ->
+                    if (!isEnding && !isClosed && !hasObservedRelevantCall) {
+                        showFailure(error.callStartMessage())
+                    }
+                }
+            )
+        }
+    }
+
+    fun restoreServiceState() {
+        if (isClosed) {
+            return
+        }
+        isMuted = !callService.currentMicrophoneEnabled()
+        handleServiceState(callService.state.value)
     }
 
     fun toggleMicrophone() {
@@ -116,16 +125,15 @@ internal class NativeMatrixRtcCallController(
         val nextMuted = !isMuted
         isMuted = nextMuted
         renderConnected()
-        scope.launch {
-            try {
-                callService.setMicrophoneEnabled(enabled = !nextMuted)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                isMuted = !nextMuted
-                renderConnected(statusOverride = "Could not change microphone")
+        callService.setMicrophoneEnabledAsync(
+            enabled = !nextMuted,
+            onFailure = {
+                if (!isEnding && !isClosed) {
+                    isMuted = !nextMuted
+                    renderConnected(statusOverride = "Could not change microphone")
+                }
             }
-        }
+        )
     }
 
     fun endCall() {
@@ -140,31 +148,23 @@ internal class NativeMatrixRtcCallController(
             canEnd = false,
             isEnding = true
         )
-        endJob = scope.launch {
-            try {
-                callService.leaveActiveCall()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (!isClosed) {
+        callService.leaveActiveCallAsync(
+            onFailure = {
+                if (!isClosed && callService.state.value != NativeMatrixRtcCallServiceState.IDLE) {
                     showFailure("Could not end call")
                 }
-                return@launch
             }
-            if (!isClosed) {
-                onDismiss()
-            }
-        }
+        )
     }
 
     override fun close() {
         isClosed = true
         serviceStateJob?.cancel()
         serviceStateJob = null
-        startJob?.cancel()
-        startJob = null
-        endJob?.cancel()
-        endJob = null
+        microphoneStateJob?.cancel()
+        microphoneStateJob = null
+        dismissJob?.cancel()
+        dismissJob = null
     }
 
     private fun handleServiceState(serviceState: NativeMatrixRtcCallServiceState) {
@@ -173,12 +173,19 @@ internal class NativeMatrixRtcCallController(
         }
         when (serviceState) {
             NativeMatrixRtcCallServiceState.IDLE -> {
-                if (wasConnected && !isEnding) {
-                    showEndedAndDismiss()
+                when {
+                    isEnding -> onDismiss()
+                    wasConnected -> showEndedAndDismiss()
+                    !startCallOnStart -> onDismiss()
+                    hasObservedRelevantCall -> {
+                        val error = callService.currentFailure()
+                        showFailure(error?.callStartMessage() ?: "Could not start call")
+                    }
                 }
             }
             NativeMatrixRtcCallServiceState.JOINING -> {
                 if (callService.currentRoomId() == launchContext.roomId) {
+                    hasObservedRelevantCall = true
                     _viewState.value = viewState.value.copy(
                         statusText = "Connecting",
                         isBusy = true,
@@ -191,12 +198,16 @@ internal class NativeMatrixRtcCallController(
             }
             NativeMatrixRtcCallServiceState.CONNECTED -> {
                 if (callService.currentRoomId() == launchContext.roomId) {
+                    hasObservedRelevantCall = true
                     wasConnected = true
+                    isMuted = !callService.currentMicrophoneEnabled()
                     renderConnected()
                 }
             }
             NativeMatrixRtcCallServiceState.LEAVING -> {
                 if (callService.currentRoomId() == launchContext.roomId || wasConnected || isEnding) {
+                    hasObservedRelevantCall = true
+                    isEnding = true
                     _viewState.value = viewState.value.copy(
                         statusText = "Ending",
                         isBusy = true,
@@ -234,6 +245,9 @@ internal class NativeMatrixRtcCallController(
     }
 
     private fun showFailure(message: String) {
+        if (viewState.value.isFailed && viewState.value.statusText == message) {
+            return
+        }
         _viewState.value = viewState.value.copy(
             statusText = message,
             isBusy = false,
@@ -246,8 +260,8 @@ internal class NativeMatrixRtcCallController(
     }
 
     private fun scheduleDismiss(delayMillis: Long) {
-        endJob?.cancel()
-        endJob = scope.launch {
+        dismissJob?.cancel()
+        dismissJob = scope.launch {
             delay(delayMillis)
             if (!isClosed) {
                 onDismiss()

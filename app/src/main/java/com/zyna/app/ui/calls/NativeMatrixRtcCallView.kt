@@ -79,12 +79,15 @@ internal class NativeMatrixRtcCallController(
     private var serviceStateJob: Job? = null
     private var microphoneStateJob: Job? = null
     private var audioOutputStateJob: Job? = null
+    private var remoteParticipantCountJob: Job? = null
     private var dismissJob: Job? = null
     private var hasStarted = false
     private var hasObservedRelevantCall = !startCallOnStart
     private var wasConnected = false
     private var isMuted = false
     private var audioOutputState = MatrixRtcAudioOutputState()
+    private var remoteParticipantCount = 0
+    private var hasObservedRemoteParticipant = false
     private var isEnding = false
     private var isClosed = false
 
@@ -114,6 +117,17 @@ internal class NativeMatrixRtcCallController(
                 }
             }
         }
+        remoteParticipantCountJob = scope.launch {
+            callService.remoteParticipantCount.collect { count ->
+                remoteParticipantCount = count
+                if (count > 0) {
+                    hasObservedRemoteParticipant = true
+                }
+                if (viewState.value.canToggleMicrophone && !isEnding) {
+                    renderConnected()
+                }
+            }
+        }
 
         if (startCallOnStart) {
             callService.startAudioCallAsync(
@@ -136,6 +150,10 @@ internal class NativeMatrixRtcCallController(
         }
         isMuted = !callService.currentMicrophoneEnabled()
         audioOutputState = callService.currentAudioOutputState()
+        remoteParticipantCount = callService.currentRemoteParticipantCount()
+        if (remoteParticipantCount > 0) {
+            hasObservedRemoteParticipant = true
+        }
         handleServiceState(callService.state.value)
     }
 
@@ -209,6 +227,8 @@ internal class NativeMatrixRtcCallController(
         microphoneStateJob = null
         audioOutputStateJob?.cancel()
         audioOutputStateJob = null
+        remoteParticipantCountJob?.cancel()
+        remoteParticipantCountJob = null
         dismissJob?.cancel()
         dismissJob = null
     }
@@ -249,20 +269,25 @@ internal class NativeMatrixRtcCallController(
                     wasConnected = true
                     isMuted = !callService.currentMicrophoneEnabled()
                     audioOutputState = callService.currentAudioOutputState()
+                    remoteParticipantCount = callService.currentRemoteParticipantCount()
+                    if (remoteParticipantCount > 0) {
+                        hasObservedRemoteParticipant = true
+                    }
                     renderConnected()
                 }
             }
             NativeMatrixRtcCallServiceState.LEAVING -> {
                 if (callService.currentRoomId() == launchContext.roomId || wasConnected || isEnding) {
                     hasObservedRelevantCall = true
-                    isEnding = true
+                    val isLocalEnding = isEnding
                     _viewState.value = viewState.value.copy(
-                        statusText = "Ending",
+                        statusText = if (isLocalEnding) "Ending" else "Leaving",
                         isBusy = true,
                         canToggleMicrophone = false,
                         canToggleSpeakerphone = false,
                         canEnd = false,
-                        isEnding = true
+                        isEnding = isLocalEnding,
+                        isFailed = false
                     )
                 }
             }
@@ -273,6 +298,8 @@ internal class NativeMatrixRtcCallController(
         val audioOutputLabel = audioOutputState.selectedDeviceLabel
         _viewState.value = viewState.value.copy(
             statusText = statusOverride ?: when {
+                remoteParticipantCount <= 0 && !hasObservedRemoteParticipant ->
+                    if (startCallOnStart) "Calling" else "Connecting"
                 isMuted -> "Microphone muted"
                 audioOutputLabel != null -> "Connected on $audioOutputLabel"
                 else -> "Connected"

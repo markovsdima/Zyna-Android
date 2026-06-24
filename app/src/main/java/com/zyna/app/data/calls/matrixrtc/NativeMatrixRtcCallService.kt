@@ -3,6 +3,7 @@ package com.zyna.app.data.calls.matrixrtc
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -77,6 +78,8 @@ class NativeMatrixRtcCallService(
     val microphoneEnabled: StateFlow<Boolean> = _microphoneEnabled.asStateFlow()
     private val _audioOutputState = MutableStateFlow(MatrixRtcAudioOutputState())
     val audioOutputState: StateFlow<MatrixRtcAudioOutputState> = _audioOutputState.asStateFlow()
+    private val _remoteParticipantCount = MutableStateFlow(0)
+    val remoteParticipantCount: StateFlow<Int> = _remoteParticipantCount.asStateFlow()
     private val _lastFailure = MutableStateFlow<Throwable?>(null)
 
     private var activeCall: ActiveCall? = null
@@ -84,6 +87,9 @@ class NativeMatrixRtcCallService(
     private var activeAttemptId: String? = null
     private var activeRoomId: String? = null
     private var autoLeaveWhenOthersLeftJob: Job? = null
+    private var remoteParticipantIds: Set<String> = emptySet()
+    private val remoteParticipantPresenceQueueLock = Any()
+    private var remoteParticipantPresenceTail: Job = Job().apply { complete() }
 
     fun startAudioCallAsync(
         roomId: String,
@@ -383,6 +389,7 @@ class NativeMatrixRtcCallService(
     fun currentRoomId(): String? = activeRoomId
     fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
     fun currentAudioOutputState(): MatrixRtcAudioOutputState = _audioOutputState.value
+    fun currentRemoteParticipantCount(): Int = _remoteParticipantCount.value
     fun currentFailure(): Throwable? = _lastFailure.value
 
     private suspend fun sendCallNotificationIfNeeded(
@@ -424,9 +431,15 @@ class NativeMatrixRtcCallService(
             is MatrixRtcLiveKitRoomSessionEvent.FailedToConnect ->
                 scheduleEndActiveCall(attemptId)
             is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft ->
-                scheduleAutoLeaveWhenOthersLeftCheck(attemptId)
+                markRemoteParticipantLeft(attemptId, event.participant)
             is MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined ->
-                cancelAutoLeaveWhenOthersLeftCheck(attemptId)
+                markRemoteParticipantPresent(attemptId, event.participant)
+            is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackPublished ->
+                markRemoteParticipantPresent(attemptId, event.participant)
+            is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed ->
+                markRemoteParticipantPresent(attemptId, event.participant)
+            is MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscriptionFailed ->
+                markRemoteParticipantPresent(attemptId, event.participant)
             is MatrixRtcLiveKitRoomSessionEvent.AudioOutputChanged ->
                 updateAudioOutputState(attemptId, event.state)
             else -> Unit
@@ -468,6 +481,91 @@ class NativeMatrixRtcCallService(
         }
     }
 
+    private fun markRemoteParticipantLeft(
+        attemptId: String,
+        participant: MatrixRtcLiveKitParticipantInfo
+    ) {
+        enqueueRemoteParticipantPresenceChange(
+            RemoteParticipantPresenceChange(
+                attemptId = attemptId,
+                participantId = participant.identity ?: participant.sid,
+                isPresent = false,
+                autoLeaveAction = RemoteParticipantPresenceAutoLeaveAction.SCHEDULE
+            )
+        )
+    }
+
+    private fun markRemoteParticipantPresent(
+        attemptId: String,
+        participant: MatrixRtcLiveKitParticipantInfo
+    ) {
+        enqueueRemoteParticipantPresenceChange(
+            RemoteParticipantPresenceChange(
+                attemptId = attemptId,
+                participantId = participant.identity ?: participant.sid,
+                isPresent = true,
+                autoLeaveAction = RemoteParticipantPresenceAutoLeaveAction.CANCEL
+            )
+        )
+    }
+
+    private fun enqueueRemoteParticipantPresenceChange(change: RemoteParticipantPresenceChange) {
+        synchronized(remoteParticipantPresenceQueueLock) {
+            val previous = remoteParticipantPresenceTail
+            remoteParticipantPresenceTail = coroutineScope.launch {
+                previous.join()
+                try {
+                    applyRemoteParticipantPresenceChange(change)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    onError(error)
+                }
+            }
+        }
+    }
+
+    private suspend fun applyRemoteParticipantPresenceChange(
+        change: RemoteParticipantPresenceChange
+    ) {
+        val nextCount = lock.withLock {
+            if (activeAttemptId != change.attemptId) {
+                null
+            } else {
+                val participantId = change.participantId
+                if (participantId != null) {
+                    remoteParticipantIds = if (change.isPresent) {
+                        remoteParticipantIds + participantId
+                    } else {
+                        remoteParticipantIds - participantId
+                    }
+                }
+                remoteParticipantIds.size
+            }
+        } ?: return
+
+        _remoteParticipantCount.value = nextCount
+
+        when (change.autoLeaveAction) {
+            RemoteParticipantPresenceAutoLeaveAction.SCHEDULE ->
+                scheduleAutoLeaveWhenOthersLeftCheck(change.attemptId)
+            RemoteParticipantPresenceAutoLeaveAction.CANCEL ->
+                cancelAutoLeaveWhenOthersLeftCheck(change.attemptId)
+        }
+    }
+
+    private data class RemoteParticipantPresenceChange(
+        val attemptId: String,
+        val participantId: String?,
+        val isPresent: Boolean,
+        val autoLeaveAction: RemoteParticipantPresenceAutoLeaveAction
+    )
+
+    private enum class RemoteParticipantPresenceAutoLeaveAction {
+        SCHEDULE,
+        CANCEL
+    }
+
     private suspend fun endActiveCall(attemptId: String): Boolean {
         val call = beginLeaving(attemptId = attemptId) ?: return false
         try {
@@ -507,46 +605,45 @@ class NativeMatrixRtcCallService(
         }
     }
 
-    private fun scheduleAutoLeaveWhenOthersLeftCheck(attemptId: String) {
-        coroutineScope.launch {
-            val currentJob = coroutineContext[Job]
-            var shouldCheck = false
-            val previousJob = lock.withLock {
-                val call = activeCall
-                if (
-                    call?.attemptId != attemptId ||
-                    !call.autoLeaveWhenOthersLeft ||
-                    _state.value != NativeMatrixRtcCallServiceState.CONNECTED
-                ) {
-                    null
-                } else {
-                    shouldCheck = true
-                    val previousJob = autoLeaveWhenOthersLeftJob
-                    autoLeaveWhenOthersLeftJob = currentJob
-                    previousJob
-                }
-            }
-            if (!shouldCheck) {
-                return@launch
-            }
-            previousJob?.cancel()
+    private suspend fun scheduleAutoLeaveWhenOthersLeftCheck(attemptId: String) {
+        val newJob = coroutineScope.launch(start = CoroutineStart.LAZY) {
             autoLeaveWhenOthersLeftIfConfirmed(attemptId)
         }
+        var shouldCheck = false
+        val previousJob = lock.withLock {
+            val call = activeCall
+            if (
+                call?.attemptId != attemptId ||
+                !call.autoLeaveWhenOthersLeft ||
+                _state.value != NativeMatrixRtcCallServiceState.CONNECTED
+            ) {
+                null
+            } else {
+                shouldCheck = true
+                val previousJob = autoLeaveWhenOthersLeftJob
+                autoLeaveWhenOthersLeftJob = newJob
+                previousJob
+            }
+        }
+        if (!shouldCheck) {
+            newJob.cancel()
+            return
+        }
+        previousJob?.cancel()
+        newJob.start()
     }
 
-    private fun cancelAutoLeaveWhenOthersLeftCheck(attemptId: String) {
-        coroutineScope.launch {
-            val job = lock.withLock {
-                if (activeCall?.attemptId != attemptId) {
-                    null
-                } else {
-                    val job = autoLeaveWhenOthersLeftJob
-                    autoLeaveWhenOthersLeftJob = null
-                    job
-                }
+    private suspend fun cancelAutoLeaveWhenOthersLeftCheck(attemptId: String) {
+        val job = lock.withLock {
+            if (activeCall?.attemptId != attemptId) {
+                null
+            } else {
+                val job = autoLeaveWhenOthersLeftJob
+                autoLeaveWhenOthersLeftJob = null
+                job
             }
-            job?.cancel()
         }
+        job?.cancel()
     }
 
     private suspend fun autoLeaveWhenOthersLeftIfConfirmed(attemptId: String) {
@@ -639,6 +736,8 @@ class NativeMatrixRtcCallService(
             _lastFailure.value = null
             _microphoneEnabled.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
+            remoteParticipantIds = emptySet()
+            _remoteParticipantCount.value = 0
             joiningCall = JoiningCall(
                 attemptId = attemptId
             )
@@ -728,6 +827,8 @@ class NativeMatrixRtcCallService(
             autoLeaveWhenOthersLeftJob = null
             _microphoneEnabled.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
+            remoteParticipantIds = emptySet()
+            _remoteParticipantCount.value = 0
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
@@ -770,6 +871,8 @@ class NativeMatrixRtcCallService(
             autoLeaveWhenOthersLeftJob = null
             _microphoneEnabled.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
+            remoteParticipantIds = emptySet()
+            _remoteParticipantCount.value = 0
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }

@@ -3,8 +3,13 @@ package com.zyna.app.data.calls.matrixrtc
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -333,6 +338,67 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun liveKitParticipantEventsUpdateRemoteParticipantCount() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = serviceScope
+        )
+
+        try {
+            service.startAudioCall(
+                roomId = ROOM_ID,
+                autoLeaveWhenOthersLeft = false
+            )
+
+            environment.liveKitSessions.single().controller.emit(
+                MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined(
+                    participant = remoteParticipant("@bob:example.org:BOBDEVICE")
+                )
+            )
+
+            waitForRemoteParticipantCount(service, 1)
+
+            environment.liveKitSessions.single().controller.emit(
+                MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed(
+                    participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                    publication = remoteTrackPublication()
+                )
+            )
+            environment.liveKitSessions.single().controller.emit(
+                MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantLeft(
+                    participant = remoteParticipant("@bob:example.org:BOBDEVICE")
+                )
+            )
+
+            waitForRemoteParticipantCount(service, 0)
+
+            environment.liveKitSessions.single().controller.emit(
+                MatrixRtcLiveKitRoomSessionEvent.RemoteTrackSubscribed(
+                    participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                    publication = remoteTrackPublication()
+                )
+            )
+
+            waitForRemoteParticipantCount(service, 1)
+
+            assertEquals(true, service.leaveActiveCall())
+            assertEquals(0, service.currentRemoteParticipantCount())
+        } finally {
+            serviceScope.cancel()
+        }
+    }
+
+    @Test
     fun startAudioCallUsesUnencryptedSessionWhenRoomIsNotEncrypted() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         environment.encrypted = false
@@ -558,6 +624,29 @@ class NativeMatrixRtcCallServiceTest {
             identity = identity,
             sid = "sid-$identity"
         )
+    }
+
+    private fun remoteTrackPublication(): MatrixRtcLiveKitTrackPublicationInfo {
+        return MatrixRtcLiveKitTrackPublicationInfo(
+            sid = "track-audio",
+            name = "audio",
+            kind = "AUDIO",
+            source = "MICROPHONE",
+            isMuted = false,
+            isSubscribed = true
+        )
+    }
+
+    private suspend fun waitForRemoteParticipantCount(
+        service: NativeMatrixRtcCallService,
+        expected: Int
+    ) {
+        withTimeout(1_000) {
+            while (service.currentRemoteParticipantCount() != expected) {
+                delay(10)
+            }
+        }
+        assertEquals(expected, service.currentRemoteParticipantCount())
     }
 
     private fun nativeMembership(

@@ -17,6 +17,7 @@ import androidx.core.view.updatePadding
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcAudioOutputState
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceException
+import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallPickupState
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceState
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
@@ -80,6 +81,7 @@ internal class NativeMatrixRtcCallController(
     private var microphoneStateJob: Job? = null
     private var audioOutputStateJob: Job? = null
     private var remoteParticipantCountJob: Job? = null
+    private var pickupStateJob: Job? = null
     private var dismissJob: Job? = null
     private var hasStarted = false
     private var hasObservedRelevantCall = !startCallOnStart
@@ -88,6 +90,8 @@ internal class NativeMatrixRtcCallController(
     private var audioOutputState = MatrixRtcAudioOutputState()
     private var remoteParticipantCount = 0
     private var hasObservedRemoteParticipant = false
+    private var pickupState: NativeMatrixRtcCallPickupState = NativeMatrixRtcCallPickupState.Inactive
+    private var terminalStatus: String? = null
     private var isEnding = false
     private var isClosed = false
 
@@ -128,11 +132,17 @@ internal class NativeMatrixRtcCallController(
                 }
             }
         }
+        pickupStateJob = scope.launch {
+            callService.pickupState.collect { state ->
+                pickupState = state
+                handlePickupState(state)
+            }
+        }
 
         if (startCallOnStart) {
             callService.startAudioCallAsync(
                 roomId = launchContext.roomId,
-                waitForPickup = false,
+                waitForPickup = true,
                 onFailure = { error ->
                     scope.launch {
                         if (!isEnding && !isClosed && !hasObservedRelevantCall) {
@@ -151,6 +161,7 @@ internal class NativeMatrixRtcCallController(
         isMuted = !callService.currentMicrophoneEnabled()
         audioOutputState = callService.currentAudioOutputState()
         remoteParticipantCount = callService.currentRemoteParticipantCount()
+        pickupState = callService.currentPickupState()
         if (remoteParticipantCount > 0) {
             hasObservedRemoteParticipant = true
         }
@@ -229,12 +240,17 @@ internal class NativeMatrixRtcCallController(
         audioOutputStateJob = null
         remoteParticipantCountJob?.cancel()
         remoteParticipantCountJob = null
+        pickupStateJob?.cancel()
+        pickupStateJob = null
         dismissJob?.cancel()
         dismissJob = null
     }
 
     private fun handleServiceState(serviceState: NativeMatrixRtcCallServiceState) {
         if (isClosed) {
+            return
+        }
+        if (terminalStatus != null) {
             return
         }
         when (serviceState) {
@@ -296,8 +312,13 @@ internal class NativeMatrixRtcCallController(
 
     private fun renderConnected(statusOverride: String? = null) {
         val audioOutputLabel = audioOutputState.selectedDeviceLabel
+        val currentPickupState = callService.currentPickupState()
+        pickupState = currentPickupState
         _viewState.value = viewState.value.copy(
             statusText = statusOverride ?: when {
+                terminalStatus != null -> terminalStatus.orEmpty()
+                currentPickupState is NativeMatrixRtcCallPickupState.Ringing &&
+                    isPickupStateRelevant(currentPickupState.roomId) -> "Ringing"
                 remoteParticipantCount <= 0 && !hasObservedRemoteParticipant ->
                     if (startCallOnStart) "Calling" else "Connecting"
                 isMuted -> "Microphone muted"
@@ -314,6 +335,47 @@ internal class NativeMatrixRtcCallController(
             isEnding = false,
             isFailed = false
         )
+    }
+
+    private fun handlePickupState(pickupState: NativeMatrixRtcCallPickupState) {
+        if (isClosed) {
+            return
+        }
+        when (pickupState) {
+            NativeMatrixRtcCallPickupState.Inactive -> Unit
+            is NativeMatrixRtcCallPickupState.Ringing -> {
+                if (isPickupStateRelevant(pickupState.roomId) && terminalStatus == null && !isEnding) {
+                    _viewState.value = viewState.value.copy(
+                        statusText = "Ringing",
+                        isBusy = false,
+                        canToggleMicrophone = true,
+                        canEnd = true,
+                        isEnding = false,
+                        isFailed = false
+                    )
+                }
+            }
+            is NativeMatrixRtcCallPickupState.Answered -> {
+                if (isPickupStateRelevant(pickupState.roomId) && terminalStatus == null && !isEnding) {
+                    hasObservedRemoteParticipant = true
+                    renderConnected()
+                }
+            }
+            is NativeMatrixRtcCallPickupState.TimedOut -> {
+                if (isPickupStateRelevant(pickupState.roomId)) {
+                    showTerminalStatus("No Answer", delayMillis = 1_200)
+                }
+            }
+        }
+    }
+
+    private fun isPickupStateRelevant(roomId: String): Boolean {
+        return roomId == launchContext.roomId &&
+            (
+                callService.currentRoomId() == roomId ||
+                    hasObservedRelevantCall ||
+                    wasConnected
+                )
     }
 
     private fun showEndedAndDismiss() {
@@ -343,6 +405,23 @@ internal class NativeMatrixRtcCallController(
             isFailed = true
         )
         scheduleDismiss(delayMillis = 1_800)
+    }
+
+    private fun showTerminalStatus(message: String, delayMillis: Long) {
+        if (terminalStatus == message) {
+            return
+        }
+        terminalStatus = message
+        _viewState.value = viewState.value.copy(
+            statusText = message,
+            isBusy = false,
+            canToggleMicrophone = false,
+            canToggleSpeakerphone = false,
+            canEnd = false,
+            isEnding = false,
+            isFailed = false
+        )
+        scheduleDismiss(delayMillis = delayMillis)
     }
 
     private fun scheduleDismiss(delayMillis: Long) {

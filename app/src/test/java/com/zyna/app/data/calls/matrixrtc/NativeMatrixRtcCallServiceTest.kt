@@ -159,6 +159,79 @@ class NativeMatrixRtcCallServiceTest {
     }
 
     @Test
+    fun waitForPickupStartsRingingAndMarksAnsweredWhenRemoteParticipantJoins() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this
+        )
+
+        service.startAudioCall(
+            roomId = ROOM_ID,
+            waitForPickup = true
+        )
+
+        val ringing = service.currentPickupState()
+        assertTrue(ringing is NativeMatrixRtcCallPickupState.Ringing)
+        assertEquals(MatrixRtcCallNotificationType.RING, environment.notificationClientFor(ROOM_ID).requests.single().notificationType)
+
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteParticipantJoined(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE")
+            )
+        )
+
+        waitForPickupState<NativeMatrixRtcCallPickupState.Answered>(service)
+
+        assertEquals(true, service.leaveActiveCall())
+        assertEquals(NativeMatrixRtcCallPickupState.Inactive, service.currentPickupState())
+    }
+
+    @Test
+    fun waitForPickupTimesOutAndLeavesCallWhenNobodyAnswers() = runBlocking {
+        val environment = FakeNativeMatrixRtcCallEnvironment()
+        val membershipClient = environment.membershipClientFor(ROOM_ID)
+        membershipClient.publishResult = nativeMembership(
+            eventId = "\$own",
+            sender = "@alice:example.org",
+            deviceId = "ALICEDEVICE",
+            createdTimestamp = 10_000
+        )
+        membershipClient.activeMembershipResponses = mutableListOf(emptyList())
+        environment.notificationClientFor(ROOM_ID).result = environment.notificationClientFor(ROOM_ID).result.copy(
+            senderTimestamp = 10_000,
+            lifetimeMillis = 0
+        )
+        val service = nativeService(
+            environment = environment,
+            coroutineScope = this,
+            timestampProvider = { 10_000 }
+        )
+
+        service.startAudioCall(
+            roomId = ROOM_ID,
+            waitForPickup = true
+        )
+
+        waitForPickupState<NativeMatrixRtcCallPickupState.TimedOut>(service)
+        waitForServiceState(service, NativeMatrixRtcCallServiceState.IDLE)
+
+        assertEquals(NativeMatrixRtcCallServiceState.IDLE, service.state.value)
+        assertNull(service.currentRoomId())
+        assertEquals(1, membershipClient.leaveCount)
+        assertEquals(1, environment.liveKitSessions.single().controller.closeCount)
+        assertEquals(false, service.leaveActiveCall())
+    }
+
+    @Test
     fun refreshActiveMembershipsSharesCurrentKeyWithLateJoiner() = runBlocking {
         val environment = FakeNativeMatrixRtcCallEnvironment()
         val membershipClient = environment.membershipClientFor(ROOM_ID)
@@ -649,6 +722,29 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals(expected, service.currentRemoteParticipantCount())
     }
 
+    private suspend inline fun <reified T : NativeMatrixRtcCallPickupState> waitForPickupState(
+        service: NativeMatrixRtcCallService
+    ) {
+        withTimeout(1_000) {
+            while (service.currentPickupState() !is T) {
+                delay(10)
+            }
+        }
+        assertTrue(service.currentPickupState() is T)
+    }
+
+    private suspend fun waitForServiceState(
+        service: NativeMatrixRtcCallService,
+        expected: NativeMatrixRtcCallServiceState
+    ) {
+        withTimeout(1_000) {
+            while (service.state.value != expected) {
+                delay(10)
+            }
+        }
+        assertEquals(expected, service.state.value)
+    }
+
     private fun nativeMembership(
         eventId: String,
         sender: String,
@@ -991,7 +1087,7 @@ private class FakeNativeLiveKitKeyApplier : MatrixRtcMediaKeyApplier {
 }
 
 private class FakeNativeCallNotificationClient : MatrixRtcCallNotificationClient {
-    val result = MatrixRtcCallNotificationSendResult(
+    var result = MatrixRtcCallNotificationSendResult(
         sentNotification = true,
         notificationEventId = "\$notification",
         sentLegacyFallback = true,

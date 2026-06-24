@@ -22,6 +22,20 @@ enum class NativeMatrixRtcCallServiceState {
     LEAVING
 }
 
+sealed interface NativeMatrixRtcCallPickupState {
+    data object Inactive : NativeMatrixRtcCallPickupState
+
+    data class Ringing(
+        val roomId: String,
+        val notificationEventId: String,
+        val expiresAtMillis: Long
+    ) : NativeMatrixRtcCallPickupState
+
+    data class Answered(val roomId: String) : NativeMatrixRtcCallPickupState
+
+    data class TimedOut(val roomId: String) : NativeMatrixRtcCallPickupState
+}
+
 sealed class NativeMatrixRtcCallServiceException(message: String) : Exception(message) {
     data class AlreadyActive(val roomId: String) :
         NativeMatrixRtcCallServiceException("Native MatrixRTC call is already active in $roomId")
@@ -80,6 +94,10 @@ class NativeMatrixRtcCallService(
     val audioOutputState: StateFlow<MatrixRtcAudioOutputState> = _audioOutputState.asStateFlow()
     private val _remoteParticipantCount = MutableStateFlow(0)
     val remoteParticipantCount: StateFlow<Int> = _remoteParticipantCount.asStateFlow()
+    private val _pickupState = MutableStateFlow<NativeMatrixRtcCallPickupState>(
+        NativeMatrixRtcCallPickupState.Inactive
+    )
+    val pickupState: StateFlow<NativeMatrixRtcCallPickupState> = _pickupState.asStateFlow()
     private val _lastFailure = MutableStateFlow<Throwable?>(null)
 
     private var activeCall: ActiveCall? = null
@@ -87,6 +105,7 @@ class NativeMatrixRtcCallService(
     private var activeAttemptId: String? = null
     private var activeRoomId: String? = null
     private var autoLeaveWhenOthersLeftJob: Job? = null
+    private var pickupTimeoutJob: Job? = null
     private var remoteParticipantIds: Set<String> = emptySet()
     private val remoteParticipantPresenceQueueLock = Any()
     private var remoteParticipantPresenceTail: Job = Job().apply { complete() }
@@ -241,7 +260,11 @@ class NativeMatrixRtcCallService(
                 discoveredTransport = discoveredTransport,
                 sfuConfig = sfuConfig,
                 mediaEncryptionEnabled = mediaEncryptionEnabled,
-                autoLeaveWhenOthersLeft = autoLeaveWhenOthersLeft
+                autoLeaveWhenOthersLeft = autoLeaveWhenOthersLeft,
+                pickupAttempt = pickupAttemptFrom(
+                    callNotification = callNotification,
+                    waitForPickup = waitForPickup
+                )
             )
             if (!finishJoined(call)) {
                 runCatching { liveKit.close() }
@@ -250,6 +273,7 @@ class NativeMatrixRtcCallService(
                 matrixRtcSession = null
                 throw CancellationException("Stale MatrixRTC join attempt")
             }
+            startCallPickupLifecycleIfNeeded(call)
 
             return NativeMatrixRtcCallStartResult(
                 roomId = roomId,
@@ -390,6 +414,7 @@ class NativeMatrixRtcCallService(
     fun currentMicrophoneEnabled(): Boolean = _microphoneEnabled.value
     fun currentAudioOutputState(): MatrixRtcAudioOutputState = _audioOutputState.value
     fun currentRemoteParticipantCount(): Int = _remoteParticipantCount.value
+    fun currentPickupState(): NativeMatrixRtcCallPickupState = _pickupState.value
     fun currentFailure(): Throwable? = _lastFailure.value
 
     private suspend fun sendCallNotificationIfNeeded(
@@ -528,6 +553,7 @@ class NativeMatrixRtcCallService(
     private suspend fun applyRemoteParticipantPresenceChange(
         change: RemoteParticipantPresenceChange
     ) {
+        var pickupTimeoutJobToCancel: Job? = null
         val shouldApplyAutoLeaveAction = lock.withLock {
             if (activeAttemptId != change.attemptId) {
                 false
@@ -541,9 +567,13 @@ class NativeMatrixRtcCallService(
                     }
                 }
                 _remoteParticipantCount.value = remoteParticipantIds.size
+                if (change.isPresent && remoteParticipantIds.isNotEmpty()) {
+                    pickupTimeoutJobToCancel = markPickupAnsweredLocked(change.attemptId)
+                }
                 true
             }
         }
+        pickupTimeoutJobToCancel?.cancel()
         if (!shouldApplyAutoLeaveAction) {
             return
         }
@@ -566,6 +596,102 @@ class NativeMatrixRtcCallService(
     private enum class RemoteParticipantPresenceAutoLeaveAction {
         SCHEDULE,
         CANCEL
+    }
+
+    private suspend fun startCallPickupLifecycleIfNeeded(call: ActiveCall) {
+        val pickupAttempt = call.pickupAttempt ?: return
+        val timeoutJob = coroutineScope.launch(start = CoroutineStart.LAZY) {
+            val remainingMillis = pickupAttempt.expiresAtMillis - timestampProvider()
+            if (remainingMillis > 0) {
+                delay(remainingMillis)
+            }
+            handleCallPickupTimeout(
+                attemptId = call.attemptId,
+                notificationEventId = pickupAttempt.notificationEventId
+            )
+        }
+        var previousJob: Job? = null
+        val shouldStart = lock.withLock {
+            if (activeCall?.attemptId == call.attemptId) {
+                if (remoteParticipantIds.isNotEmpty()) {
+                    _pickupState.value = NativeMatrixRtcCallPickupState.Answered(call.roomId)
+                    false
+                } else {
+                    previousJob = pickupTimeoutJob
+                    pickupTimeoutJob = timeoutJob
+                    _pickupState.value = NativeMatrixRtcCallPickupState.Ringing(
+                        roomId = call.roomId,
+                        notificationEventId = pickupAttempt.notificationEventId,
+                        expiresAtMillis = pickupAttempt.expiresAtMillis
+                    )
+                    true
+                }
+            } else {
+                false
+            }
+        }
+        previousJob?.cancel()
+        if (shouldStart) {
+            timeoutJob.start()
+        } else {
+            timeoutJob.cancel()
+        }
+    }
+
+    private suspend fun handleCallPickupTimeout(
+        attemptId: String,
+        notificationEventId: String
+    ) {
+        val shouldEnd = lock.withLock {
+            val call = activeCall
+            if (
+                call?.attemptId == attemptId &&
+                call.pickupAttempt?.notificationEventId == notificationEventId &&
+                _pickupState.value is NativeMatrixRtcCallPickupState.Ringing
+            ) {
+                pickupTimeoutJob = null
+                _pickupState.value = NativeMatrixRtcCallPickupState.TimedOut(call.roomId)
+                true
+            } else {
+                false
+            }
+        }
+        if (shouldEnd) {
+            endActiveCall(attemptId)
+        }
+    }
+
+    private fun markPickupAnsweredLocked(attemptId: String): Job? {
+        val call = activeCall ?: return null
+        if (
+            call.attemptId != attemptId ||
+            call.pickupAttempt == null ||
+            _pickupState.value !is NativeMatrixRtcCallPickupState.Ringing
+        ) {
+            return null
+        }
+        val timeoutJob = pickupTimeoutJob
+        pickupTimeoutJob = null
+        _pickupState.value = NativeMatrixRtcCallPickupState.Answered(call.roomId)
+        return timeoutJob
+    }
+
+    private fun pickupAttemptFrom(
+        callNotification: MatrixRtcCallNotificationSendResult?,
+        waitForPickup: Boolean
+    ): PickupAttempt? {
+        if (
+            !waitForPickup ||
+            callNotification?.sentNotification != true ||
+            callNotification.notificationType != MatrixRtcCallNotificationType.RING
+        ) {
+            return null
+        }
+        val notificationEventId = callNotification.notificationEventId ?: return null
+        return PickupAttempt(
+            notificationEventId = notificationEventId,
+            expiresAtMillis = callNotification.senderTimestamp + callNotification.lifetimeMillis
+        )
     }
 
     private suspend fun endActiveCall(attemptId: String): Boolean {
@@ -740,6 +866,9 @@ class NativeMatrixRtcCallService(
             _audioOutputState.value = MatrixRtcAudioOutputState()
             remoteParticipantIds = emptySet()
             _remoteParticipantCount.value = 0
+            pickupTimeoutJob?.cancel()
+            pickupTimeoutJob = null
+            _pickupState.value = NativeMatrixRtcCallPickupState.Inactive
             joiningCall = JoiningCall(
                 attemptId = attemptId
             )
@@ -827,10 +956,13 @@ class NativeMatrixRtcCallService(
             activeCall = null
             joiningCall = null
             autoLeaveWhenOthersLeftJob = null
+            pickupTimeoutJob?.cancel()
+            pickupTimeoutJob = null
             _microphoneEnabled.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
             remoteParticipantIds = emptySet()
             _remoteParticipantCount.value = 0
+            _pickupState.value = NativeMatrixRtcCallPickupState.Inactive
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
@@ -871,10 +1003,15 @@ class NativeMatrixRtcCallService(
             activeCall = null
             joiningCall = null
             autoLeaveWhenOthersLeftJob = null
+            pickupTimeoutJob?.cancel()
+            pickupTimeoutJob = null
             _microphoneEnabled.value = true
             _audioOutputState.value = MatrixRtcAudioOutputState()
             remoteParticipantIds = emptySet()
             _remoteParticipantCount.value = 0
+            if (_pickupState.value !is NativeMatrixRtcCallPickupState.TimedOut) {
+                _pickupState.value = NativeMatrixRtcCallPickupState.Inactive
+            }
             _state.value = NativeMatrixRtcCallServiceState.IDLE
         }
     }
@@ -910,13 +1047,19 @@ class NativeMatrixRtcCallService(
         val discoveredTransport: MatrixRtcLiveKitDiscoveredTransport,
         val sfuConfig: MatrixRtcLiveKitSfuConfig,
         val mediaEncryptionEnabled: Boolean,
-        val autoLeaveWhenOthersLeft: Boolean
+        val autoLeaveWhenOthersLeft: Boolean,
+        val pickupAttempt: PickupAttempt?
     )
 
     private data class JoiningCall(
         val attemptId: String,
         val matrixRtcSession: MatrixRtcSession? = null,
         val liveKitSession: MatrixRtcLiveKitRoomSession? = null
+    )
+
+    private data class PickupAttempt(
+        val notificationEventId: String,
+        val expiresAtMillis: Long
     )
 
     private sealed interface LeavingCall {

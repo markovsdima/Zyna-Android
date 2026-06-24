@@ -528,9 +528,9 @@ class NativeMatrixRtcCallService(
     private suspend fun applyRemoteParticipantPresenceChange(
         change: RemoteParticipantPresenceChange
     ) {
-        val nextCount = lock.withLock {
+        val shouldApplyAutoLeaveAction = lock.withLock {
             if (activeAttemptId != change.attemptId) {
-                null
+                false
             } else {
                 val participantId = change.participantId
                 if (participantId != null) {
@@ -540,11 +540,13 @@ class NativeMatrixRtcCallService(
                         remoteParticipantIds - participantId
                     }
                 }
-                remoteParticipantIds.size
+                _remoteParticipantCount.value = remoteParticipantIds.size
+                true
             }
-        } ?: return
-
-        _remoteParticipantCount.value = nextCount
+        }
+        if (!shouldApplyAutoLeaveAction) {
+            return
+        }
 
         when (change.autoLeaveAction) {
             RemoteParticipantPresenceAutoLeaveAction.SCHEDULE ->

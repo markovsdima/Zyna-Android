@@ -27,6 +27,12 @@ class ZynaPushNotificationWorker(
         val didShow = when (resolution) {
             is ZynaPushNotificationResolution.Resolved ->
                 renderer.showNotification(payload, resolution.content)
+            is ZynaPushNotificationResolution.IncomingCall ->
+                (applicationContext as? ZynaApplication)
+                    ?.appContainer
+                    ?.incomingCallManager
+                    ?.showIncomingCall(resolution.call)
+                    ?: false
             ZynaPushNotificationResolution.Suppressed -> {
                 Log.d(TAG, "Push notification suppressed by Matrix notification resolver")
                 false
@@ -83,6 +89,7 @@ class ZynaPushNotificationWorker(
         private fun ZynaPushNotificationResolution.logName(): String {
             return when (this) {
                 is ZynaPushNotificationResolution.Resolved -> "resolved"
+                is ZynaPushNotificationResolution.IncomingCall -> "incoming_call"
                 ZynaPushNotificationResolution.Suppressed -> "suppressed"
                 ZynaPushNotificationResolution.Unavailable -> "unavailable"
             }

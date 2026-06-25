@@ -4,7 +4,10 @@ import android.content.Context
 import android.util.Log
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCancellable
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallNotificationContent
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCustomToDeviceEncrypting
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCall
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcLegacyCallNotifyContent
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcOwnDevice
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcCallNotificationClient
@@ -313,10 +316,34 @@ class MatrixClientService(
         _incomingMatrixRtcCallNotifications.asSharedFlow()
     private val activeTimelineLock = Any()
     private val activeRoomTimelines = mutableMapOf<String, Timeline>()
+    private val sessionRestoreMutex = Mutex()
     private val timelinePaginationMutex = Mutex()
     private val notificationResolutionMutex = Mutex()
 
     suspend fun restoreSessionIfAvailable() {
+        sessionRestoreMutex.withLock {
+            restoreSessionIfAvailableLocked()
+        }
+    }
+
+    suspend fun ensureSessionRestored(): Boolean {
+        sessionRestoreMutex.withLock {
+            if (client != null) {
+                startSync()
+                return true
+            }
+
+            restoreSessionIfAvailableLocked()
+            return client != null
+        }
+    }
+
+    private suspend fun restoreSessionIfAvailableLocked() {
+        if (client != null) {
+            startSync()
+            return
+        }
+
         val session = sessionStore.loadLastSession()
         if (session == null) {
             clearStoredMatrixState()
@@ -490,6 +517,45 @@ class MatrixClientService(
         val activeClient = client ?: error("Matrix client is not ready")
         val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
         return MatrixRustSdkRtcCallNotificationClient(room)
+    }
+
+    suspend fun declineMatrixRtcCall(
+        roomId: String,
+        notificationEventId: String
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = client
+        if (activeClient != null) {
+            activeClient.declineMatrixRtcCallWithClient(
+                roomId = roomId,
+                notificationEventId = notificationEventId
+            )
+            return@withContext
+        }
+
+        val session = sessionStore.loadLastSession() ?: error("Matrix session is not available")
+        var temporaryClient: Client? = null
+        try {
+            temporaryClient = buildClient(session.homeserverUrl)
+            temporaryClient.restoreSession(session)
+            temporaryClient.declineMatrixRtcCallWithClient(
+                roomId = roomId,
+                notificationEventId = notificationEventId
+            )
+        } finally {
+            temporaryClient?.close()
+        }
+    }
+
+    private suspend fun Client.declineMatrixRtcCallWithClient(
+        roomId: String,
+        notificationEventId: String
+    ) {
+        val room = getRoom(roomId) ?: error("Matrix room is not available")
+        try {
+            room.declineCall(notificationEventId)
+        } finally {
+            room.destroy()
+        }
     }
 
     fun subscribeToMatrixRtcCallDeclineEvents(
@@ -1628,7 +1694,11 @@ class MatrixClientService(
         return try {
             val status = notificationClient.getNotification(roomId = roomId, eventId = eventId)
             try {
-                status.toPushNotificationResolution(unreadCount = unreadCount)
+                status.toPushNotificationResolution(
+                    unreadCount = unreadCount,
+                    ownUserId = userId(),
+                    roomId = roomId
+                )
             } finally {
                 status.destroy()
             }
@@ -1638,11 +1708,15 @@ class MatrixClientService(
     }
 
     private fun NotificationStatus.toPushNotificationResolution(
-        unreadCount: Int?
+        unreadCount: Int?,
+        ownUserId: String,
+        roomId: String
     ): ZynaPushNotificationResolution {
         return when (this) {
             is NotificationStatus.Event -> item.toPushNotificationResolution(
-                unreadCount = unreadCount
+                unreadCount = unreadCount,
+                ownUserId = ownUserId,
+                roomId = roomId
             )
             NotificationStatus.EventFilteredOut,
             NotificationStatus.EventRedacted -> ZynaPushNotificationResolution.Suppressed
@@ -1651,8 +1725,27 @@ class MatrixClientService(
     }
 
     private fun NotificationItem.toPushNotificationResolution(
-        unreadCount: Int?
+        unreadCount: Int?,
+        ownUserId: String,
+        roomId: String
     ): ZynaPushNotificationResolution {
+        val isCallNotificationEvent = rawEvent.isMatrixRtcCallNotificationEvent()
+        val incomingCall = try {
+            pushIncomingCallOrNull(ownUserId = ownUserId, roomId = roomId)
+        } catch (error: Throwable) {
+            if (isCallNotificationEvent) {
+                null
+            } else {
+                throw error
+            }
+        }
+        incomingCall?.let { call ->
+            return ZynaPushNotificationResolution.IncomingCall(call)
+        }
+        if (isCallNotificationEvent) {
+            return ZynaPushNotificationResolution.Suppressed
+        }
+
         val body = pushNotificationBodyOrNull()
             ?: return ZynaPushNotificationResolution.Unavailable
         return ZynaPushNotificationResolution.Resolved(
@@ -1663,6 +1756,47 @@ class MatrixClientService(
                 unreadCount = unreadCount
             )
         )
+    }
+
+    private fun NotificationItem.pushIncomingCallOrNull(
+        ownUserId: String,
+        roomId: String
+    ): MatrixRtcIncomingCall? {
+        val timelineEvent = (event as? NotificationEvent.Timeline)?.event ?: return null
+        val eventContent = timelineEvent.content()
+        return try {
+            val messageLike = eventContent as? TimelineEventContent.MessageLike ?: return null
+            val rtcNotification =
+                messageLike.content as? MessageLikeEventContent.RtcNotification ?: return null
+            if (rtcNotification.notificationType != RtcNotificationType.RING) {
+                return null
+            }
+
+            val senderId = timelineEvent.senderId().takeIf { it.isNotBlank() } ?: return null
+            if (senderId == ownUserId) {
+                return null
+            }
+            val expiresAtMillis = rtcNotification.expirationTs.toLong()
+            if (expiresAtMillis <= System.currentTimeMillis()) {
+                return null
+            }
+            val isAudioCall = rtcNotification.callIntent.isAudioCompatible()
+            if (!isAudioCall) {
+                return null
+            }
+
+            MatrixRtcIncomingCall(
+                eventId = timelineEvent.eventId(),
+                roomId = roomId,
+                senderId = senderId,
+                senderName = senderDisplayNameOrNull() ?: senderId,
+                roomName = roomInfo.displayName.takeIf { it.isNotBlank() },
+                isAudioCall = true,
+                expiresAtMillis = expiresAtMillis
+            )
+        } finally {
+            eventContent.destroy()
+        }
     }
 
     private fun NotificationItem.pushNotificationTitle(): String {
@@ -1775,6 +1909,16 @@ class MatrixClientService(
         }.getOrNull()
     }
 
+    private fun String.isMatrixRtcCallNotificationEvent(): Boolean {
+        return runCatching {
+            when (JSONObject(this).optStringOrNull("type")) {
+                MatrixRtcCallNotificationContent.EVENT_TYPE,
+                MatrixRtcLegacyCallNotifyContent.EVENT_TYPE -> true
+                else -> false
+            }
+        }.getOrDefault(false)
+    }
+
     private fun String.normalizedPushBody(): String? {
         return replace("\r\n", "\n")
             .replace('\r', '\n')
@@ -1791,7 +1935,13 @@ class MatrixClientService(
         ownUserId: String
     ): MatrixIncomingRtcCallNotification? {
         val timelineEvent = (notification.event as? NotificationEvent.Timeline)?.event ?: return null
-        val eventContent = timelineEvent.content()
+        val eventContent = runCatching { timelineEvent.content() }
+            .getOrElse { error ->
+                if (notification.rawEvent.isMatrixRtcCallNotificationEvent()) {
+                    return null
+                }
+                throw error
+            }
         try {
             val messageLike = eventContent as? TimelineEventContent.MessageLike ?: return null
             val rtcNotification = messageLike.content as? MessageLikeEventContent.RtcNotification ?: return null

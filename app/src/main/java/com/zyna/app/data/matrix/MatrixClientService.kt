@@ -18,6 +18,7 @@ import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.data.push.MatrixPushRegistrar
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
@@ -288,7 +289,8 @@ data class MatrixChatMessage(
 class MatrixClientService(
     private val context: Context,
     private val sessionStore: MatrixSessionStore,
-    private val storePassphraseStore: MatrixStorePassphraseStore
+    private val storePassphraseStore: MatrixStorePassphraseStore,
+    private val pushRegistrar: MatrixPushRegistrar
 ) {
     private val _state = MutableStateFlow<MatrixClientState>(MatrixClientState.LoggedOut)
     val state: StateFlow<MatrixClientState> = _state.asStateFlow()
@@ -373,6 +375,9 @@ class MatrixClientService(
         syncService?.stop()
         syncService?.close()
         syncService = null
+        client?.let { activeClient ->
+            unregisterPushPusher(activeClient)
+        }
         client?.close()
         client = null
         matrixRtcNotificationHandlerClient = null
@@ -385,6 +390,9 @@ class MatrixClientService(
         syncService?.stop()
         syncService?.close()
         syncService = null
+        client?.let { activeClient ->
+            unregisterPushPusher(activeClient)
+        }
         client?.close()
         client = null
         matrixRtcNotificationHandlerClient = null
@@ -413,6 +421,11 @@ class MatrixClientService(
 
     fun isRecoveryComplete(userId: String): Boolean {
         return sessionStore.isRecoveryComplete(userId)
+    }
+
+    suspend fun registerPushPusherIfAvailable() {
+        val activeClient = client ?: return
+        registerPushPusher(activeClient)
     }
 
     fun matrixRtcOwnDevice(): MatrixRtcOwnDevice {
@@ -1793,6 +1806,7 @@ class MatrixClientService(
     private suspend fun clearStoredMatrixState() {
         sessionStore.clear()
         storePassphraseStore.clear()
+        pushRegistrar.clearLocalState()
         clearMatrixStoreDirectories()
     }
 
@@ -1800,6 +1814,7 @@ class MatrixClientService(
         val activeClient = client ?: return
         if (syncService != null) {
             _state.value = MatrixClientState.Syncing(activeClient.userId())
+            registerPushPusher(activeClient)
             return
         }
 
@@ -1814,6 +1829,23 @@ class MatrixClientService(
         registerMatrixRtcNotificationHandler(activeClient)
         service.start()
         _state.value = MatrixClientState.Syncing(activeClient.userId())
+        registerPushPusher(activeClient)
+    }
+
+    private suspend fun registerPushPusher(activeClient: Client) {
+        try {
+            pushRegistrar.register(activeClient)
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to register Android push pusher", error)
+        }
+    }
+
+    private suspend fun unregisterPushPusher(activeClient: Client) {
+        try {
+            pushRegistrar.unregister(activeClient)
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to unregister Android push pusher", error)
+        }
     }
 
     private suspend fun registerMatrixRtcNotificationHandler(activeClient: Client) {

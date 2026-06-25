@@ -3,10 +3,12 @@ package com.zyna.app.data.push
 import android.util.Log
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import com.zyna.app.ZynaApplication
 
 class ZynaFirebaseMessagingService : FirebaseMessagingService() {
     override fun onRegistered(installationId: String) {
         FirebaseInstallationIdStore(this).save(installationId)
+        (applicationContext as? ZynaApplication)?.registerMatrixPusherForCurrentSession()
         Log.d(
             TAG,
             "FCM registered installation prefix=${installationId.take(INSTALLATION_ID_LOG_PREFIX_LENGTH)}"

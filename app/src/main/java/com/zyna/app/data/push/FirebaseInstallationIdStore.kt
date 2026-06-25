@@ -11,7 +11,7 @@ class FirebaseInstallationIdStore(context: Context) {
     fun save(installationId: String) {
         preferences.edit()
             .putString(KEY_INSTALLATION_ID, installationId)
-            .apply()
+            .commit()
     }
 
     fun load(): String? = preferences.getString(KEY_INSTALLATION_ID, null)
@@ -19,7 +19,7 @@ class FirebaseInstallationIdStore(context: Context) {
     fun clear() {
         preferences.edit()
             .remove(KEY_INSTALLATION_ID)
-            .apply()
+            .commit()
     }
 
     companion object {

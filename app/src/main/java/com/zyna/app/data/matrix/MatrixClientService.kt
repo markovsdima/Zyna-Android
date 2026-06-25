@@ -19,6 +19,8 @@ import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.data.push.MatrixPushRegistrar
+import com.zyna.app.data.push.ZynaPushNotificationContent
+import com.zyna.app.data.push.ZynaPushNotificationResolution
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
@@ -45,6 +47,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.matrix.rustcomponents.sdk.CallDeclineListener
 import org.matrix.rustcomponents.sdk.DateDividerMode
 import org.matrix.rustcomponents.sdk.Client
@@ -67,6 +70,8 @@ import org.matrix.rustcomponents.sdk.MsgLikeContent
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.NotificationEvent
 import org.matrix.rustcomponents.sdk.NotificationItem
+import org.matrix.rustcomponents.sdk.NotificationProcessSetup
+import org.matrix.rustcomponents.sdk.NotificationStatus
 import org.matrix.rustcomponents.sdk.ProfileDetails
 import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
@@ -309,6 +314,7 @@ class MatrixClientService(
     private val activeTimelineLock = Any()
     private val activeRoomTimelines = mutableMapOf<String, Timeline>()
     private val timelinePaginationMutex = Mutex()
+    private val notificationResolutionMutex = Mutex()
 
     suspend fun restoreSessionIfAvailable() {
         val session = sessionStore.loadLastSession()
@@ -426,6 +432,34 @@ class MatrixClientService(
     suspend fun registerPushPusherIfAvailable() {
         val activeClient = client ?: return
         registerPushPusher(activeClient)
+    }
+
+    suspend fun resolvePushNotification(
+        roomId: String,
+        eventId: String,
+        unreadCount: Int?
+    ): ZynaPushNotificationResolution {
+        if (roomId.isBlank() || eventId.isBlank()) {
+            return ZynaPushNotificationResolution.Unavailable
+        }
+
+        return try {
+            withTimeoutOrNull(PUSH_NOTIFICATION_RESOLVE_TIMEOUT_MS) {
+                notificationResolutionMutex.withLock {
+                    loadPushNotificationResolution(
+                        roomId = roomId,
+                        eventId = eventId,
+                        unreadCount = unreadCount
+                    )
+                        ?: ZynaPushNotificationResolution.Unavailable
+                }
+            } ?: ZynaPushNotificationResolution.Unavailable
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to resolve push notification event=$eventId room=$roomId", error)
+            ZynaPushNotificationResolution.Unavailable
+        }
     }
 
     fun matrixRtcOwnDevice(): MatrixRtcOwnDevice {
@@ -1315,18 +1349,7 @@ class MatrixClientService(
     }
 
     private fun MessageContent.displayBody(): String {
-        return when (val type = msgType) {
-            is MessageType.Text -> type.content.body
-            is MessageType.Notice -> type.content.body
-            is MessageType.Emote -> type.content.body
-            is MessageType.Image -> type.content.caption.normalizedMessageCaption() ?: "Photo"
-            is MessageType.Audio -> type.content.caption.normalizedMessageCaption() ?: body.ifBlank { "Audio" }
-            is MessageType.Video -> type.content.caption.normalizedMessageCaption() ?: body.ifBlank { "Video" }
-            is MessageType.File -> type.content.caption.normalizedMessageCaption() ?: body.ifBlank { "File" }
-            is MessageType.Gallery -> type.content.body
-            is MessageType.Location -> type.content.body
-            is MessageType.Other -> type.body
-        }
+        return msgType.displayBody(fallbackBody = body)
     }
 
     private fun MessageContent.contentType(): MatrixMessageContentType {
@@ -1559,6 +1582,207 @@ class MatrixClientService(
             activeParticipantUserIds = participantUserIds.toList(),
             isAudioCall = activeRoomCallConsensusIntent.isAudioCompatible()
         )
+    }
+
+    private suspend fun loadPushNotificationResolution(
+        roomId: String,
+        eventId: String,
+        unreadCount: Int?
+    ): ZynaPushNotificationResolution? = withContext(Dispatchers.IO) {
+        val activeClient = client
+        if (activeClient != null) {
+            return@withContext activeClient.resolvePushNotificationWithClient(
+                roomId = roomId,
+                eventId = eventId,
+                unreadCount = unreadCount,
+                processSetup = syncService?.let { activeSyncService ->
+                    NotificationProcessSetup.SingleProcess(activeSyncService)
+                }
+                    ?: NotificationProcessSetup.MultipleProcesses
+            )
+        }
+
+        val session = sessionStore.loadLastSession() ?: return@withContext null
+        var temporaryClient: Client? = null
+        try {
+            temporaryClient = buildClient(session.homeserverUrl)
+            temporaryClient.restoreSession(session)
+            temporaryClient.resolvePushNotificationWithClient(
+                roomId = roomId,
+                eventId = eventId,
+                unreadCount = unreadCount,
+                processSetup = NotificationProcessSetup.MultipleProcesses
+            )
+        } finally {
+            temporaryClient?.close()
+        }
+    }
+
+    private suspend fun Client.resolvePushNotificationWithClient(
+        roomId: String,
+        eventId: String,
+        unreadCount: Int?,
+        processSetup: NotificationProcessSetup
+    ): ZynaPushNotificationResolution {
+        val notificationClient = notificationClient(processSetup)
+        return try {
+            val status = notificationClient.getNotification(roomId = roomId, eventId = eventId)
+            try {
+                status.toPushNotificationResolution(unreadCount = unreadCount)
+            } finally {
+                status.destroy()
+            }
+        } finally {
+            notificationClient.destroy()
+        }
+    }
+
+    private fun NotificationStatus.toPushNotificationResolution(
+        unreadCount: Int?
+    ): ZynaPushNotificationResolution {
+        return when (this) {
+            is NotificationStatus.Event -> item.toPushNotificationResolution(
+                unreadCount = unreadCount
+            )
+            NotificationStatus.EventFilteredOut,
+            NotificationStatus.EventRedacted -> ZynaPushNotificationResolution.Suppressed
+            NotificationStatus.EventNotFound -> ZynaPushNotificationResolution.Unavailable
+        }
+    }
+
+    private fun NotificationItem.toPushNotificationResolution(
+        unreadCount: Int?
+    ): ZynaPushNotificationResolution {
+        val body = pushNotificationBodyOrNull()
+            ?: return ZynaPushNotificationResolution.Unavailable
+        return ZynaPushNotificationResolution.Resolved(
+            ZynaPushNotificationContent(
+                title = pushNotificationTitle(),
+                body = formattedPushNotificationBody(body),
+                isNoisy = isNoisy == true,
+                unreadCount = unreadCount
+            )
+        )
+    }
+
+    private fun NotificationItem.pushNotificationTitle(): String {
+        val sender = senderDisplayNameOrNull()
+        val room = roomInfo.displayName.takeIf { it.isNotBlank() }
+        return if (roomInfo.isDirect || roomInfo.isDm) {
+            sender ?: room ?: DEFAULT_PUSH_NOTIFICATION_TITLE
+        } else {
+            room ?: sender ?: DEFAULT_PUSH_NOTIFICATION_TITLE
+        }
+    }
+
+    private fun NotificationItem.formattedPushNotificationBody(body: String): String {
+        if (roomInfo.isDirect || roomInfo.isDm || event is NotificationEvent.Invite) {
+            return body
+        }
+        val sender = senderDisplayNameOrNull() ?: return body
+        return "$sender: $body"
+    }
+
+    private fun NotificationItem.senderDisplayNameOrNull(): String? {
+        return senderInfo.displayName?.takeIf { it.isNotBlank() }
+            ?: when (val notificationEvent = event) {
+                is NotificationEvent.Timeline -> notificationEvent.event.senderId()
+                    .takeIf { it.isNotBlank() }
+                is NotificationEvent.Invite -> notificationEvent.sender.takeIf { it.isNotBlank() }
+            }
+    }
+
+    private fun NotificationItem.pushNotificationBodyOrNull(): String? {
+        val rawEventBody = rawEvent.rawEventBodyOrNull()
+        return when (val notificationEvent = event) {
+            is NotificationEvent.Timeline ->
+                notificationEvent.event.pushNotificationBodyOrNull(rawEventBody = rawEventBody)
+            is NotificationEvent.Invite -> {
+                val sender = senderDisplayNameOrNull()
+                if (sender == null) "Room invitation" else "$sender invited you"
+            }
+        }
+    }
+
+    private fun org.matrix.rustcomponents.sdk.TimelineEvent.pushNotificationBodyOrNull(
+        rawEventBody: String?
+    ): String? {
+        val eventContent = content()
+        return try {
+            (eventContent as? TimelineEventContent.MessageLike)
+                ?.content
+                ?.pushNotificationBodyOrNull(rawEventBody = rawEventBody)
+        } finally {
+            eventContent.destroy()
+        }
+    }
+
+    private fun MessageLikeEventContent.pushNotificationBodyOrNull(rawEventBody: String?): String? {
+        return when (this) {
+            MessageLikeEventContent.CallAnswer -> "Call answered"
+            MessageLikeEventContent.CallInvite -> "Incoming call"
+            MessageLikeEventContent.CallHangup -> "Call ended"
+            MessageLikeEventContent.CallCandidates -> "Call update"
+            MessageLikeEventContent.KeyVerificationReady,
+            MessageLikeEventContent.KeyVerificationStart -> "Verification request"
+            MessageLikeEventContent.KeyVerificationCancel -> "Verification cancelled"
+            MessageLikeEventContent.KeyVerificationAccept,
+            MessageLikeEventContent.KeyVerificationKey,
+            MessageLikeEventContent.KeyVerificationMac,
+            MessageLikeEventContent.KeyVerificationDone -> "Verification update"
+            is MessageLikeEventContent.Poll -> "Poll: $question"
+            is MessageLikeEventContent.ReactionContent -> "Reaction"
+            MessageLikeEventContent.RoomEncrypted -> "Unable to decrypt message"
+            is MessageLikeEventContent.RoomMessage -> messageType
+                .displayBody(fallbackBody = rawEventBody)
+                .stripMatrixReplyFallback()
+            is MessageLikeEventContent.RoomRedaction -> "Deleted message"
+            MessageLikeEventContent.Sticker -> "Sticker"
+            is MessageLikeEventContent.RtcNotification -> "Incoming call"
+        }?.normalizedPushBody()
+    }
+
+    private fun MessageType.displayBody(fallbackBody: String? = null): String {
+        return when (val type = this) {
+            is MessageType.Text -> type.content.body
+            is MessageType.Notice -> type.content.body
+            is MessageType.Emote -> type.content.body
+            is MessageType.Image -> type.content.caption.normalizedMessageCaption() ?: "Photo"
+            is MessageType.Audio ->
+                type.content.caption.normalizedMessageCaption()
+                    ?: fallbackBody?.ifBlank { null }
+                    ?: type.content.filename.ifBlank { "Audio" }
+            is MessageType.Video ->
+                type.content.caption.normalizedMessageCaption()
+                    ?: fallbackBody?.ifBlank { null }
+                    ?: type.content.filename.ifBlank { "Video" }
+            is MessageType.File ->
+                type.content.caption.normalizedMessageCaption()
+                    ?: fallbackBody?.ifBlank { null }
+                    ?: type.content.filename.ifBlank { "File" }
+            is MessageType.Gallery -> type.content.body
+            is MessageType.Location -> type.content.body
+            is MessageType.Other -> type.body
+        }
+    }
+
+    private fun String.rawEventBodyOrNull(): String? {
+        return runCatching {
+            JSONObject(this)
+                .optJSONObject("content")
+                ?.optStringOrNull("body")
+                ?.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
+    private fun String.normalizedPushBody(): String? {
+        return replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .joinToString(separator = " ")
+            .takeIf { it.isNotBlank() }
     }
 
     private fun parseIncomingMatrixRtcCallNotification(
@@ -1951,6 +2175,8 @@ class MatrixClientService(
         const val ROOM_LIST_LIVE_PAGE_SIZE = 512
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
+        const val DEFAULT_PUSH_NOTIFICATION_TITLE = "Zyna"
+        const val PUSH_NOTIFICATION_RESOLVE_TIMEOUT_MS = 10_000L
         const val ZERO_WIDTH_SPACE = "\u200B"
         const val DEFAULT_AUDIO_MIME_TYPE = "audio/mpeg"
         const val MATRIX_WAVEFORM_DEFAULT_PEAK = 1024

@@ -12,37 +12,54 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.zyna.app.MainActivity
 import com.zyna.app.R
-import com.zyna.app.ZynaForegroundState
 import kotlin.math.absoluteValue
 
 class ZynaPushNotificationRenderer(private val context: Context) {
     fun showFallbackNotification(payload: MatrixPushPayload): Boolean {
-        if (ZynaForegroundState.isForeground) {
-            Log.d(TAG, "Notification skipped: app is in foreground")
-            return false
-        }
+        val body = payload.unreadCount
+            ?.let { count -> context.getString(R.string.push_notification_unread_body, count) }
+            ?: context.getString(R.string.push_notification_body)
+        return showNotification(
+            payload = payload,
+            content = ZynaPushNotificationContent(
+                title = context.getString(R.string.push_notification_title),
+                body = body,
+                isNoisy = true,
+                unreadCount = payload.unreadCount
+            )
+        )
+    }
+
+    fun showNotification(
+        payload: MatrixPushPayload,
+        content: ZynaPushNotificationContent
+    ): Boolean {
         if (!canPostNotifications()) {
             Log.d(TAG, "Notification skipped: POST_NOTIFICATIONS is not granted")
             return false
         }
 
         ZynaNotificationChannels.ensureCreated(context)
-        val body = payload.unreadCount
-            ?.let { count -> context.getString(R.string.push_notification_unread_body, count) }
-            ?: context.getString(R.string.push_notification_body)
         val notification = NotificationCompat.Builder(
             context,
             ZynaNotificationChannels.MESSAGES_CHANNEL_ID
         )
             .setSmallIcon(R.drawable.ic_tab_chats_24)
-            .setContentTitle(context.getString(R.string.push_notification_title))
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentTitle(content.title)
+            .setContentText(content.body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(content.body))
             .setContentIntent(contentIntent())
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .setNumber(payload.unreadCount ?: 0)
+            .setPriority(
+                if (content.isNoisy) {
+                    NotificationCompat.PRIORITY_HIGH
+                } else {
+                    NotificationCompat.PRIORITY_DEFAULT
+                }
+            )
+            .setSilent(!content.isNoisy)
+            .setNumber(content.unreadCount ?: 0)
             .build()
 
         return try {

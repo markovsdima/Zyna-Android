@@ -9,6 +9,8 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.zyna.app.ZynaApplication
+import com.zyna.app.ZynaForegroundState
 
 class ZynaPushNotificationWorker(
     appContext: Context,
@@ -16,14 +18,41 @@ class ZynaPushNotificationWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         val payload = payloadFromInputData() ?: return Result.failure()
-        val didShow = ZynaPushNotificationRenderer(applicationContext)
-            .showFallbackNotification(payload)
+        if (ZynaForegroundState.isForeground) {
+            Log.d(TAG, "Push notification skipped: app is in foreground")
+            return Result.success()
+        }
+        val renderer = ZynaPushNotificationRenderer(applicationContext)
+        val resolution = resolveNotification(payload)
+        val didShow = when (resolution) {
+            is ZynaPushNotificationResolution.Resolved ->
+                renderer.showNotification(payload, resolution.content)
+            ZynaPushNotificationResolution.Suppressed -> {
+                Log.d(TAG, "Push notification suppressed by Matrix notification resolver")
+                false
+            }
+            ZynaPushNotificationResolution.Unavailable ->
+                renderer.showFallbackNotification(payload)
+        }
         Log.d(
             TAG,
             "Push notification worker finished event_id=${payload.eventId} " +
-                "room_id=${payload.roomId} displayed=$didShow"
+                "room_id=${payload.roomId} " +
+                "resolution=${resolution.logName()} displayed=$didShow"
         )
         return Result.success()
+    }
+
+    private suspend fun resolveNotification(
+        payload: MatrixPushPayload
+    ): ZynaPushNotificationResolution {
+        val application = applicationContext as? ZynaApplication
+            ?: return ZynaPushNotificationResolution.Unavailable
+        return application.appContainer.matrixClientService.resolvePushNotification(
+            roomId = payload.roomId,
+            eventId = payload.eventId,
+            unreadCount = payload.unreadCount
+        )
     }
 
     private fun payloadFromInputData(): MatrixPushPayload? {
@@ -50,6 +79,14 @@ class ZynaPushNotificationWorker(
         private const val KEY_ROOM_ID = "room_id"
         private const val KEY_UNREAD = "unread"
         private const val KEY_CLIENT_SECRET = "cs"
+
+        private fun ZynaPushNotificationResolution.logName(): String {
+            return when (this) {
+                is ZynaPushNotificationResolution.Resolved -> "resolved"
+                ZynaPushNotificationResolution.Suppressed -> "suppressed"
+                ZynaPushNotificationResolution.Unavailable -> "unavailable"
+            }
+        }
 
         fun enqueue(context: Context, payload: MatrixPushPayload) {
             val request = OneTimeWorkRequestBuilder<ZynaPushNotificationWorker>()

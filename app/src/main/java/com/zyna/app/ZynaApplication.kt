@@ -2,6 +2,7 @@ package com.zyna.app
 
 import android.app.Application
 import com.zyna.app.core.di.AppContainer
+import com.zyna.app.data.push.ZynaNotificationChannels
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,6 +17,8 @@ class ZynaApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        ZynaForegroundState.register(this)
+        ZynaNotificationChannels.ensureCreated(this)
         appContainer = AppContainer(this)
     }
 

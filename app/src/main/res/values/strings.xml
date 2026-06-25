@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">Zyna</string>
+    <string name="notification_channel_messages_name">Messages</string>
+    <string name="notification_channel_messages_description">New message notifications</string>
+    <string name="push_notification_title">New message</string>
+    <string name="push_notification_body">Open Zyna to read it.</string>
+    <string name="push_notification_unread_body">%1$d unread messages</string>
 </resources>

@@ -25,6 +25,7 @@ class ZynaFirebaseMessagingService : FirebaseMessagingService() {
 
     override fun onMessageReceived(message: RemoteMessage) {
         val data = message.data
+        val payload = MatrixPushPayload.fromData(data)
         Log.d(
             TAG,
             "FCM message received " +
@@ -34,6 +35,11 @@ class ZynaFirebaseMessagingService : FirebaseMessagingService() {
                 "unread=${data["unread"].orEmpty()} " +
                 "has_client_secret=${data.containsKey("cs")}"
         )
+        if (payload == null) {
+            Log.w(TAG, "FCM message ignored: missing event_id or room_id")
+            return
+        }
+        ZynaPushNotificationWorker.enqueue(this, payload)
     }
 
     companion object {

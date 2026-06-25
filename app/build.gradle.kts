@@ -66,6 +66,7 @@ dependencies {
     implementation(libs.androidx.recyclerview)
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.work.runtime.ktx)
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
     implementation(libs.livekit.android)

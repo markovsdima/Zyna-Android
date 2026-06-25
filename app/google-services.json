@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "779322151381",
+    "project_id": "zyna-android",
+    "storage_bucket": "zyna-android.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:779322151381:android:789687982e2cc11a81ed5c",
+        "android_client_info": {
+          "package_name": "com.zyna.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBP9T1y3SkKqB8NgYNZ6HVP1ucKzokKpVY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1734,6 +1734,7 @@ class MatrixClientService(
             pushIncomingCallOrNull(ownUserId = ownUserId, roomId = roomId)
         } catch (error: Throwable) {
             if (isCallNotificationEvent) {
+                Log.w(TAG, "MatrixRTC call push ignored: failed to parse notification", error)
                 null
             } else {
                 throw error
@@ -1762,31 +1763,61 @@ class MatrixClientService(
         ownUserId: String,
         roomId: String
     ): MatrixRtcIncomingCall? {
-        val timelineEvent = (event as? NotificationEvent.Timeline)?.event ?: return null
+        val timelineEvent = (event as? NotificationEvent.Timeline)?.event
+            ?: return null.also {
+                Log.d(TAG, "MatrixRTC call push ignored: notification event is not timeline")
+            }
+        val eventId = timelineEvent.eventId()
         val eventContent = timelineEvent.content()
         return try {
-            val messageLike = eventContent as? TimelineEventContent.MessageLike ?: return null
+            val messageLike = eventContent as? TimelineEventContent.MessageLike
+                ?: return null.also {
+                    Log.d(TAG, "MatrixRTC call push ignored: event_id=$eventId content is not message-like")
+                }
             val rtcNotification =
-                messageLike.content as? MessageLikeEventContent.RtcNotification ?: return null
+                messageLike.content as? MessageLikeEventContent.RtcNotification
+                    ?: return null.also {
+                        Log.d(TAG, "MatrixRTC call push ignored: event_id=$eventId content is not rtc notification")
+                    }
             if (rtcNotification.notificationType != RtcNotificationType.RING) {
+                Log.d(
+                    TAG,
+                    "MatrixRTC call push ignored: event_id=$eventId type=${rtcNotification.notificationType}"
+                )
                 return null
             }
 
-            val senderId = timelineEvent.senderId().takeIf { it.isNotBlank() } ?: return null
+            val senderId = timelineEvent.senderId().takeIf { it.isNotBlank() }
+                ?: return null.also {
+                    Log.d(TAG, "MatrixRTC call push ignored: event_id=$eventId missing sender")
+                }
             if (senderId == ownUserId) {
+                Log.d(TAG, "MatrixRTC call push ignored: event_id=$eventId from own user")
                 return null
             }
             val expiresAtMillis = rtcNotification.expirationTs.toLong()
-            if (expiresAtMillis <= System.currentTimeMillis()) {
+            val nowMillis = System.currentTimeMillis()
+            if (expiresAtMillis <= nowMillis) {
+                Log.d(
+                    TAG,
+                    "MatrixRTC call push ignored: event_id=$eventId expired " +
+                        "expires_at=$expiresAtMillis now=$nowMillis " +
+                        "expired_by_ms=${nowMillis - expiresAtMillis}"
+                )
                 return null
             }
             val isAudioCall = rtcNotification.callIntent.isAudioCompatible()
             if (!isAudioCall) {
+                Log.d(
+                    TAG,
+                    "MatrixRTC call push ignored: event_id=$eventId " +
+                        "unsupported_call_intent=${rtcNotification.callIntent}"
+                )
                 return null
             }
 
             MatrixRtcIncomingCall(
-                eventId = timelineEvent.eventId(),
+                eventId = eventId,
                 roomId = roomId,
                 senderId = senderId,
                 senderName = senderDisplayNameOrNull() ?: senderId,

@@ -29,7 +29,9 @@ internal class NativeMatrixRtcLiveKitVideoView(context: Context) : FrameLayout(c
         track: MatrixRtcLiveKitVideoTrackReference?,
         mirror: Boolean
     ) {
-        if (currentTrack?.id == track?.id) {
+        // Track ids are stable publication keys. A resubscribe can deliver a new
+        // LiveKit track with the same id, so only skip work for the same wrapper.
+        if (currentTrack === track) {
             renderer.setMirror(mirror)
             visibility = if (track == null) View.GONE else View.VISIBLE
             return
@@ -37,9 +39,9 @@ internal class NativeMatrixRtcLiveKitVideoView(context: Context) : FrameLayout(c
 
         currentTrack?.removeRenderer(renderer)
         currentTrack = null
+        renderer.clearImage()
 
         if (track == null) {
-            renderer.clearImage()
             visibility = View.GONE
             return
         }

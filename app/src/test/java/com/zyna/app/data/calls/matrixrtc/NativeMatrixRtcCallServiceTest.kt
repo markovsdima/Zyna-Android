@@ -13,6 +13,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -704,14 +705,15 @@ class NativeMatrixRtcCallServiceTest {
                 videoTrack = MatrixRtcLiveKitLocalVideoTrack.testing(trackSid = "local-camera")
             )
         )
+        val initialRemoteVideoTrack = MatrixRtcLiveKitRemoteVideoTrack.testing(
+            participantIdentity = "@bob:example.org:BOBDEVICE",
+            trackSid = "remote-camera"
+        )
         environment.liveKitSessions.single().controller.emit(
             MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackSubscribed(
                 participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
                 publication = videoTrackPublication("remote-camera"),
-                videoTrack = MatrixRtcLiveKitRemoteVideoTrack.testing(
-                    participantIdentity = "@bob:example.org:BOBDEVICE",
-                    trackSid = "remote-camera"
-                )
+                videoTrack = initialRemoteVideoTrack
             )
         )
 
@@ -720,6 +722,50 @@ class NativeMatrixRtcCallServiceTest {
         assertEquals("@bob:example.org:BOBDEVICE:remote-camera", snapshot.primaryRemoteVideoTrack?.id)
         assertEquals(1, snapshot.remoteParticipantCount)
         assertEquals(true, snapshot.remoteParticipants.single().hasSubscribedVideo)
+
+        val replacementRemoteVideoTrack = MatrixRtcLiveKitRemoteVideoTrack.testing(
+            participantIdentity = "@bob:example.org:BOBDEVICE",
+            trackSid = "remote-camera"
+        )
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackSubscribed(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                publication = videoTrackPublication("remote-camera"),
+                videoTrack = replacementRemoteVideoTrack
+            )
+        )
+
+        assertSame(
+            replacementRemoteVideoTrack,
+            service.currentParticipantsSnapshot().primaryRemoteVideoTrack
+        )
+
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.TrackE2EEStateChanged(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                publication = videoTrackPublication("remote-camera"),
+                state = "MISSING_KEY"
+            )
+        )
+
+        assertNull(service.currentParticipantsSnapshot().primaryRemoteVideoTrack)
+        assertEquals(
+            true,
+            service.currentParticipantsSnapshot().remoteParticipants.single().hasSubscribedVideo
+        )
+
+        environment.liveKitSessions.single().controller.emit(
+            MatrixRtcLiveKitRoomSessionEvent.TrackE2EEStateChanged(
+                participant = remoteParticipant("@bob:example.org:BOBDEVICE"),
+                publication = videoTrackPublication("remote-camera"),
+                state = "OK"
+            )
+        )
+
+        assertSame(
+            replacementRemoteVideoTrack,
+            service.currentParticipantsSnapshot().primaryRemoteVideoTrack
+        )
 
         environment.liveKitSessions.single().controller.emit(
             MatrixRtcLiveKitRoomSessionEvent.RemoteVideoTrackUnsubscribed(

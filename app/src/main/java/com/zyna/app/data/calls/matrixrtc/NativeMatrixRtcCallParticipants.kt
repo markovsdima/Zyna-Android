@@ -22,6 +22,11 @@ data class NativeMatrixRtcCallTrackState(
             source.equals("SCREEN_SHARE", ignoreCase = true) ||
             kind.equals("VIDEO", ignoreCase = true)
 
+    val canRenderRemoteVideo: Boolean
+        get() = isVideo && isSubscribed && !isMuted &&
+            (e2eeState == null ||
+                e2eeState.equals(LIVEKIT_E2EE_STATE_OK, ignoreCase = true))
+
     fun updateFrom(publication: MatrixRtcLiveKitTrackPublicationInfo): NativeMatrixRtcCallTrackState {
         return copy(
             name = publication.name,
@@ -95,9 +100,7 @@ data class NativeMatrixRtcCallParticipantsSnapshot(
     val remoteVideoTracks: List<MatrixRtcLiveKitRemoteVideoTrack>
         get() = remoteParticipants.flatMap { participant ->
             participant.sortedTracks.mapNotNull { track ->
-                track.remoteVideoTrack.takeIf {
-                    track.isVideo && track.isSubscribed && !track.isMuted
-                }
+                if (track.canRenderRemoteVideo) track.remoteVideoTrack else null
             }
         }
 
@@ -139,6 +142,8 @@ data class NativeMatrixRtcCallParticipantsSnapshot(
         }
     }
 }
+
+private const val LIVEKIT_E2EE_STATE_OK = "OK"
 
 class NativeMatrixRtcCallParticipantStore(roomId: String? = null) {
     var snapshot: NativeMatrixRtcCallParticipantsSnapshot =

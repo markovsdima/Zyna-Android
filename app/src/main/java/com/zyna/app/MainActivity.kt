@@ -1,6 +1,7 @@
 package com.zyna.app
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
@@ -71,6 +72,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var appViewModel: AppViewModel
     private lateinit var rootHost: ZynaRootHostView
     private lateinit var photoPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>
+    private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var recordAudioPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
     private var latestState: AppUiState = AppUiState()
@@ -86,6 +88,9 @@ class MainActivity : ComponentActivity() {
     private var rootOverlayOwner: RootOverlayOwner? = null
     private var nativeMatrixRtcCallController: NativeMatrixRtcCallController? = null
     private var nativeMatrixRtcCallRenderJob: Job? = null
+    private val notificationPermissionPreferences by lazy {
+        getSharedPreferences(NOTIFICATION_PERMISSION_PREFERENCES, Context.MODE_PRIVATE)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,6 +113,11 @@ class MainActivity : ComponentActivity() {
             ActivityResultContracts.PickMultipleVisualMedia(10)
         ) { uris ->
             handlePickedPhotos(uris)
+        }
+        notificationPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) {
+            // The notification renderer checks permission before posting.
         }
         recordAudioPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
@@ -235,6 +245,7 @@ class MainActivity : ComponentActivity() {
                     latestState = state
                     hasRenderedState = true
                     rootHost.render(state, actions)
+                    requestNotificationPermissionIfNeeded(state)
                     restoreNativeMatrixRtcCallOverlayIfNeeded(state)
                     renderPhotoEditor()
                     ZynaPerfLog.end(
@@ -261,6 +272,28 @@ class MainActivity : ComponentActivity() {
         photoPickerLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
         )
+    }
+
+    private fun requestNotificationPermissionIfNeeded(state: AppUiState) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        if (state.route is AppRoute.Login || state.route is AppRoute.RecoveryKey) {
+            return
+        }
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        if (notificationPermissionPreferences.getBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, false)) {
+            return
+        }
+        notificationPermissionPreferences.edit()
+            .putBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, true)
+            .apply()
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun startNativeMatrixRtcCallWithPermission(roomId: String, roomName: String) {
@@ -810,6 +843,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 }
+
+private const val NOTIFICATION_PERMISSION_PREFERENCES = "zyna_notification_permission"
+private const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
 
 private fun MotionEvent.isInsideView(view: View): Boolean {
     val bounds = Rect()

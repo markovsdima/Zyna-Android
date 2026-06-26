@@ -70,6 +70,7 @@ internal class NativeMatrixRtcCallController(
     private val callService: NativeMatrixRtcCallService,
     private val scope: CoroutineScope,
     private val startCallOnStart: Boolean = true,
+    private val waitForPickupOnStart: Boolean = true,
     private val onDismiss: () -> Unit
 ) : AutoCloseable {
     private val _viewState = MutableStateFlow(
@@ -196,7 +197,7 @@ internal class NativeMatrixRtcCallController(
         if (startCallOnStart) {
             callService.startAudioCallAsync(
                 roomId = launchContext.roomId,
-                waitForPickup = true,
+                waitForPickup = waitForPickupOnStart,
                 onFailure = { error ->
                     scope.launch {
                         if (!isEnding && !isClosed && !hasObservedRelevantCall) {

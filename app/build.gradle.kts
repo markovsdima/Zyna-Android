@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.google.services)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
 }
@@ -17,8 +18,8 @@ android {
         applicationId = "com.zyna.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 4
+        versionName = "0.1.3"
 
         buildConfigField("boolean", "VULKAN_CHAT_GLASS_ENABLED", "true")
 
@@ -65,6 +66,10 @@ dependencies {
     implementation(libs.androidx.recyclerview)
     implementation(libs.androidx.room.ktx)
     implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.work.runtime.ktx)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
+    implementation(libs.androidx.fragment)
     implementation(libs.livekit.android)
     implementation(libs.livekit.android.camerax)
     implementation(libs.matrix.sdk)

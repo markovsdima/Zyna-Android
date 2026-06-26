@@ -39,7 +39,6 @@ import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.ui.app.ChatCallBannerState
-import com.zyna.app.ui.chat.render.ChatBubbleThemes
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -50,6 +49,8 @@ import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.chat.theme.ChatBubbleTheme
+import com.zyna.app.ui.chat.theme.ChatBubbleThemes
 import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.glass.ChatTeleportDirection
@@ -88,7 +89,8 @@ data class ChatScreenViewState(
     val audioPlaybackController: AudioPlaybackController?,
     val voiceRecorderController: VoiceRecorderController?,
     val jumpTargetEventId: String?,
-    val callBanner: ChatCallBannerState?
+    val callBanner: ChatCallBannerState?,
+    val chatBubbleTheme: ChatBubbleTheme
 )
 
 data class ChatScreenViewActions(
@@ -136,7 +138,8 @@ internal class ChatScreenView(
     private val initStart = ZynaPerfLog.start()
     private val density = resources.displayMetrics.density
     private var isDarkTheme = resources.configuration.isNightMode()
-    private var nativeColors = nativeChatColors(isDarkTheme)
+    private var chatBubbleTheme = ChatBubbleThemes.fallback
+    private var nativeColors = nativeChatColors(isDarkTheme, chatBubbleTheme)
     private var palette = nativeColors.palette
     private var messageTheme = nativeColors.messageTheme
     private var sendErrorColor = nativeColors.sendError
@@ -415,7 +418,7 @@ internal class ChatScreenView(
     }
 
     fun render(state: ChatScreenViewState, actions: ChatScreenViewActions) {
-        updateNativeThemeIfNeeded()
+        updateNativeThemeIfNeeded(state.chatBubbleTheme)
         val renderStart = ZynaPerfLog.start()
         ZynaPerfLog.mark {
             "chatView.render.begin roomId=${state.roomId} messages=${state.messages.size} " +
@@ -870,13 +873,14 @@ internal class ChatScreenView(
         )
     }
 
-    private fun updateNativeThemeIfNeeded() {
+    private fun updateNativeThemeIfNeeded(nextBubbleTheme: ChatBubbleTheme) {
         val nextDarkTheme = resources.configuration.isNightMode()
-        if (nextDarkTheme == isDarkTheme) {
+        if (nextDarkTheme == isDarkTheme && nextBubbleTheme == chatBubbleTheme) {
             return
         }
         isDarkTheme = nextDarkTheme
-        nativeColors = nativeChatColors(nextDarkTheme)
+        chatBubbleTheme = nextBubbleTheme
+        nativeColors = nativeChatColors(nextDarkTheme, nextBubbleTheme)
         palette = nativeColors.palette
         messageTheme = nativeColors.messageTheme
         sendErrorColor = nativeColors.sendError
@@ -1153,8 +1157,10 @@ private data class NativeChatColors(
     val callBannerActionText: Int
 )
 
-private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
-    val outgoingBubbleTheme = ChatBubbleThemes.fallback
+private fun nativeChatColors(
+    isDarkTheme: Boolean,
+    outgoingBubbleTheme: ChatBubbleTheme
+): NativeChatColors {
     return if (isDarkTheme) {
         NativeChatColors(
             palette = GlassPalette(

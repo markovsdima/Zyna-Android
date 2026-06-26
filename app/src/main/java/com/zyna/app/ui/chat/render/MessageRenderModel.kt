@@ -7,6 +7,7 @@ import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.theme.MessageBubbleGradientSpec
 
 internal data class MessageRenderModel(
     val id: String,

@@ -46,6 +46,7 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
+import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
@@ -54,6 +55,7 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -200,6 +202,7 @@ class MainActivity : ComponentActivity() {
             onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
             onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
+            onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
             onLogout = {
                 dismissNativeMatrixRtcCall()
                 pendingNativeMatrixRtcCall = null
@@ -233,7 +236,12 @@ class MainActivity : ComponentActivity() {
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                appViewModel.uiState.collect { state ->
+                combine(
+                    appViewModel.uiState,
+                    appContainer.chatBubbleThemeStore.selectedTheme
+                ) { state, chatBubbleTheme ->
+                    state to ZynaRootPreferences(chatBubbleTheme = chatBubbleTheme)
+                }.collect { (state, preferences) ->
                     val collectStart = ZynaPerfLog.start()
                     ZynaPerfLog.mark {
                         "activity.uiState.collect route=${state.route.perfName()} " +
@@ -244,7 +252,7 @@ class MainActivity : ComponentActivity() {
                     }
                     latestState = state
                     hasRenderedState = true
-                    rootHost.render(state, actions)
+                    rootHost.render(state, actions, preferences)
                     requestNotificationPermissionIfNeeded(state)
                     restoreNativeMatrixRtcCallOverlayIfNeeded(state)
                     renderPhotoEditor()

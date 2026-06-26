@@ -7,6 +7,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 
 data class ZynaAppActions(
     val matrixMediaLoader: MatrixMediaLoader?,
@@ -51,5 +52,10 @@ data class ZynaAppActions(
     ) -> Unit,
     val onChatJumpTargetConsumed: (String) -> Unit,
     val onChatScrollToLiveEdgeConsumed: () -> Unit,
+    val onSelectChatBubbleTheme: (String) -> Unit,
     val onLogout: () -> Unit
+)
+
+data class ZynaRootPreferences(
+    val chatBubbleTheme: ChatBubbleTheme
 )

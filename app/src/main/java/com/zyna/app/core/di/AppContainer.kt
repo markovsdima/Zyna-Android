@@ -18,10 +18,12 @@ import com.zyna.app.data.push.MatrixPushRegistrationStore
 import com.zyna.app.data.push.MatrixPushRegistrar
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
+import com.zyna.app.ui.chat.theme.ChatBubbleThemeStore
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
 
+    val chatBubbleThemeStore = ChatBubbleThemeStore(appContext)
     val sessionStore = MatrixSessionStore(appContext)
     val matrixStorePassphraseStore = MatrixStorePassphraseStore(appContext)
     val firebaseInstallationIdStore = FirebaseInstallationIdStore(appContext)

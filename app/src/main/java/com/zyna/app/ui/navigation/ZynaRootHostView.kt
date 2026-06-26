@@ -26,10 +26,21 @@ import com.zyna.app.ui.rooms.RoomsScreenViewActions
 import com.zyna.app.ui.rooms.RoomsScrollAnchor
 import com.zyna.app.ui.rooms.RoomsScreenViewState
 import com.zyna.app.ui.security.RecoveryKeyScreen
+import com.zyna.app.ui.settings.ChatThemeSettingsScreenView
+import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewActions
+import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewState
+import com.zyna.app.ui.settings.SettingsScreenView
+import com.zyna.app.ui.settings.SettingsScreenViewActions
+import com.zyna.app.ui.settings.SettingsScreenViewState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 
 class ZynaRootHostView(context: Context) : FrameLayout(context) {
+    private enum class ProfileStackScreen {
+        SETTINGS,
+        CHAT_THEME
+    }
+
     private val navigationStack = ZynaNavigationStackView(context)
     private val vulkanOverlayHost = VulkanChatOverlayView(context).apply {
         setOverlayEnabled(BuildConfig.VULKAN_CHAT_GLASS_ENABLED)
@@ -49,7 +60,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
     private var latestActions: ZynaAppActions? = null
+    private var latestPreferences: ZynaRootPreferences? = null
     private var selectedTab = ZynaTabBarView.Tab.CHATS
+    private var profileStackScreen = ProfileStackScreen.SETTINGS
     private var renderSequence = 0L
     private var didScheduleVulkanWarmup = false
     private var didScheduleChatViewWarmup = false
@@ -106,6 +119,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
 
         tabBar.onTabSelected = { tab ->
+            if (tab != selectedTab && tab != ZynaTabBarView.Tab.PROFILE) {
+                profileStackScreen = ProfileStackScreen.SETTINGS
+            }
             selectedTab = tab
             renderLatest(animated = false)
         }
@@ -125,7 +141,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
     }
 
-    fun render(state: AppUiState, actions: ZynaAppActions) {
+    fun render(
+        state: AppUiState,
+        actions: ZynaAppActions,
+        preferences: ZynaRootPreferences
+    ) {
         val renderStart = ZynaPerfLog.start()
         renderSequence += 1
         val sequence = renderSequence
@@ -135,9 +155,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
         latestState = state
         latestActions = actions
+        latestPreferences = preferences
 
         if (state.route is AppRoute.Chat || state.route is AppRoute.ForwardPicker) {
             selectedTab = ZynaTabBarView.Tab.CHATS
+            profileStackScreen = ProfileStackScreen.SETTINGS
         }
 
         renderLatest(animated = true)
@@ -185,8 +207,16 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 true
             }
             AppRoute.Rooms -> {
-                if (selectedTab != ZynaTabBarView.Tab.CHATS) {
+                if (
+                    selectedTab == ZynaTabBarView.Tab.PROFILE &&
+                    profileStackScreen == ProfileStackScreen.CHAT_THEME
+                ) {
+                    profileStackScreen = ProfileStackScreen.SETTINGS
+                    renderLatest(animated = true)
+                    true
+                } else if (selectedTab != ZynaTabBarView.Tab.CHATS) {
                     selectedTab = ZynaTabBarView.Tab.CHATS
+                    profileStackScreen = ProfileStackScreen.SETTINGS
                     renderLatest(animated = false)
                     true
                 } else {
@@ -201,11 +231,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val actions = latestActions ?: return
+        val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
             roomsScrollAnchors.clear()
         }
         val entriesStart = ZynaPerfLog.start()
-        val entries = entriesFor(state, actions)
+        val entries = entriesFor(state, actions, preferences)
         ZynaPerfLog.end(
             entriesStart,
             "root.entriesFor"
@@ -245,29 +276,33 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun entriesFor(
         state: AppUiState,
-        actions: ZynaAppActions
+        actions: ZynaAppActions,
+        preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
         return when (val route = state.route) {
             AppRoute.Login -> listOf(loginEntry(state, actions))
             is AppRoute.RecoveryKey -> listOf(recoveryEntry(state, actions, route))
             AppRoute.Rooms -> {
-                if (selectedTab == ZynaTabBarView.Tab.CHATS) {
-                    listOf(roomsEntry(state, actions, title = "Chats", onBack = null, withBottomPadding = true))
-                } else {
-                    listOf(tabPlaceholderEntry(selectedTab))
+                when (selectedTab) {
+                    ZynaTabBarView.Tab.CHATS ->
+                        listOf(roomsEntry(state, actions, title = "Chats", onBack = null, withBottomPadding = true))
+                    ZynaTabBarView.Tab.PROFILE ->
+                        profileEntries(actions, preferences)
+                    else ->
+                        listOf(tabPlaceholderEntry(selectedTab))
                 }
             }
             AppRoute.ForwardPicker -> buildList {
                 add(roomsEntry(state, actions, title = "Chats", onBack = null, withBottomPadding = false))
                 val returnRoute = state.forwardReturnRoute as? AppRoute.Chat
                 if (returnRoute != null) {
-                    add(chatEntry(state, actions, returnRoute))
+                    add(chatEntry(state, actions, preferences, returnRoute))
                 }
                 add(roomsEntry(state, actions, title = "Forward to", onBack = actions.onCancelForwardPicker, withBottomPadding = false))
             }
             is AppRoute.Chat -> listOf(
                 roomsEntry(state, actions, title = "Chats", onBack = null, withBottomPadding = false),
-                chatEntry(state, actions, route)
+                chatEntry(state, actions, preferences, route)
             )
         }
     }
@@ -333,7 +368,6 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         rooms = state.rooms,
                         isRefreshing = state.isRefreshingRooms,
                         title = title,
-                        showLogout = title != "Forward to",
                         showBack = onBack != null,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         initialScrollAnchor = roomsScrollAnchors[entryKey],
@@ -350,7 +384,6 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         } else {
                             actions.onOpenRoom
                         },
-                        onLogout = if (title == "Forward to") null else actions.onLogout,
                         onBack = onBack
                     )
                 )
@@ -376,9 +409,72 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
     }
 
+    private fun profileEntries(
+        actions: ZynaAppActions,
+        preferences: ZynaRootPreferences
+    ): List<ZynaScreenEntry> {
+        return buildList {
+            add(settingsEntry(actions, preferences))
+            if (profileStackScreen == ProfileStackScreen.CHAT_THEME) {
+                add(chatThemeSettingsEntry(actions, preferences))
+            }
+        }
+    }
+
+    private fun settingsEntry(
+        actions: ZynaAppActions,
+        preferences: ZynaRootPreferences
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "profile:settings",
+            createView = { context -> SettingsScreenView(context) },
+            updateView = { view ->
+                (view as SettingsScreenView).render(
+                    state = SettingsScreenViewState(
+                        selectedChatThemeTitle = preferences.chatBubbleTheme.title,
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                    ),
+                    actions = SettingsScreenViewActions(
+                        onOpenChatTheme = {
+                            profileStackScreen = ProfileStackScreen.CHAT_THEME
+                            renderLatest(animated = true)
+                        },
+                        onLogout = actions.onLogout
+                    )
+                )
+            }
+        )
+    }
+
+    private fun chatThemeSettingsEntry(
+        actions: ZynaAppActions,
+        preferences: ZynaRootPreferences
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "profile:settings/chat-theme",
+            createView = { context -> ChatThemeSettingsScreenView(context) },
+            updateView = { view ->
+                (view as ChatThemeSettingsScreenView).render(
+                    state = ChatThemeSettingsScreenViewState(
+                        selectedTheme = preferences.chatBubbleTheme,
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                    ),
+                    actions = ChatThemeSettingsScreenViewActions(
+                        onBack = {
+                            profileStackScreen = ProfileStackScreen.SETTINGS
+                            renderLatest(animated = true)
+                        },
+                        onSelectTheme = actions.onSelectChatBubbleTheme
+                    )
+                )
+            }
+        )
+    }
+
     private fun chatEntry(
         state: AppUiState,
         actions: ZynaAppActions,
+        preferences: ZynaRootPreferences,
         route: AppRoute.Chat
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -415,7 +511,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         audioPlaybackController = actions.audioPlaybackController,
                         voiceRecorderController = actions.voiceRecorderController,
                         jumpTargetEventId = state.chatJumpTargetEventId,
-                        callBanner = state.chatCallBanner
+                        callBanner = state.chatCallBanner,
+                        chatBubbleTheme = preferences.chatBubbleTheme
                     ),
                     actions = ChatScreenViewActions(
                         onRefresh = actions.onRefreshChat,

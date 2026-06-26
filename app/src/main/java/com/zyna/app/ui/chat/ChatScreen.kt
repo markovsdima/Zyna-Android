@@ -97,6 +97,7 @@ data class ChatScreenViewActions(
     val onRefresh: () -> Unit,
     val onStartCall: () -> Unit,
     val onBack: () -> Unit,
+    val onOpenRoomDetails: () -> Unit,
     val onLoadOlder: () -> Unit,
     val onLoadNewer: () -> Unit,
     val onJumpToLiveEdge: () -> Unit,
@@ -178,6 +179,8 @@ internal class ChatScreenView(
     private val titleColumn = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_VERTICAL
+        isClickable = true
+        isFocusable = true
     }
     private val titleText = TextView(context).apply {
         maxLines = 1
@@ -428,6 +431,8 @@ internal class ChatScreenView(
         titleText.text = state.roomName
         subtitleText.text = state.roomId
         backButton.setOnClickListener { actions.onBack() }
+        titleColumn.contentDescription = "${state.roomName}. ${state.roomId}"
+        titleColumn.setOnClickListener { actions.onOpenRoomDetails() }
         callButton.setOnClickListener { actions.onStartCall() }
         renderActiveCallBanner(state.callBanner, actions)
         refreshButton.text = if (state.isLoading) "Loading" else "Refresh"

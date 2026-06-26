@@ -22,6 +22,9 @@ sealed interface AppRoute {
     data object ForwardPicker : AppRoute
     data object Settings : AppRoute
     data object ChatThemeSettings : AppRoute
+    data class RoomDetails(
+        val roomId: String
+    ) : AppRoute
     data class Chat(
         val roomId: String,
         val displayName: String
@@ -137,6 +140,14 @@ data class AppNavState(
             return this
         }
         return copy(chatsStack = chatsStack.dropLast(1).ifEmpty { listOf(AppRoute.Rooms) })
+    }
+
+    fun openRoomDetails(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+            return this
+        }
+        val chatRoute = chatsStack.lastOrNull() as? AppRoute.Chat ?: return this
+        return copy(chatsStack = chatsStack + AppRoute.RoomDetails(chatRoute.roomId))
     }
 
     fun openChatThemeSettings(): AppNavState {

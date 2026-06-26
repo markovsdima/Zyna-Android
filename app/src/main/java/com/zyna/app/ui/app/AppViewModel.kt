@@ -518,6 +518,12 @@ class AppViewModel(
         }
     }
 
+    fun openRoomDetails() {
+        _uiState.update { current ->
+            current.copy(navState = current.navState.openRoomDetails())
+        }
+    }
+
     fun openChatThemeSettings() {
         _uiState.update { current ->
             current.copy(navState = current.navState.openChatThemeSettings())
@@ -2331,6 +2337,7 @@ class AppViewModel(
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             is AppRoute.RecoveryKey -> "RecoveryKey"
+            is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

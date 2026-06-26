@@ -178,6 +178,7 @@ class MainActivity : ComponentActivity() {
             onRefreshChat = appViewModel::refreshCurrentChat,
             onStartNativeMatrixRtcCall = ::startNativeMatrixRtcCallWithPermission,
             onCloseChat = appViewModel::closeChat,
+            onOpenRoomDetails = appViewModel::openRoomDetails,
             onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
             onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
             onJumpToChatLiveEdge = appViewModel::jumpToChatLiveEdge,
@@ -871,6 +872,7 @@ private fun AppRoute.perfName(): String {
         AppRoute.ForwardPicker -> "ForwardPicker"
         AppRoute.Login -> "Login"
         is AppRoute.RecoveryKey -> "RecoveryKey"
+        is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"
         is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

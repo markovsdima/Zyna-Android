@@ -25,6 +25,7 @@ data class ZynaAppActions(
     val onRefreshChat: () -> Unit,
     val onStartNativeMatrixRtcCall: (roomId: String, roomName: String) -> Unit,
     val onCloseChat: () -> Unit,
+    val onOpenRoomDetails: () -> Unit,
     val onLoadOlderChatMessages: () -> Unit,
     val onLoadNewerChatMessages: () -> Unit,
     val onJumpToChatLiveEdge: () -> Unit,

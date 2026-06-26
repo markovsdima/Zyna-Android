@@ -22,6 +22,9 @@ import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
+import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
+import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
+import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
 import com.zyna.app.ui.rooms.RoomsScreenView
 import com.zyna.app.ui.rooms.RoomsScreenViewActions
 import com.zyna.app.ui.rooms.RoomsScrollAnchor
@@ -263,6 +266,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 )
                 AppRoute.Settings -> settingsEntry(actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
+                is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
                 is AppRoute.Chat -> chatEntry(state, actions, preferences, route)
             }
         }
@@ -415,6 +419,36 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
     }
 
+    private fun roomDetailsEntry(
+        state: AppUiState,
+        actions: ZynaAppActions,
+        route: AppRoute.RoomDetails
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "roomDetails:${route.roomId}",
+            createView = { context -> RoomDetailsScreenView(context) },
+            updateView = { view ->
+                val room = state.rooms.firstOrNull { it.id == route.roomId }
+                val chatRoute = state.activeChatRoute?.takeIf { it.roomId == route.roomId }
+                val displayName = room?.displayName
+                    ?: chatRoute?.displayName
+                    ?: route.roomId
+                (view as RoomDetailsScreenView).render(
+                    state = RoomDetailsScreenViewState(
+                        roomId = route.roomId,
+                        displayName = displayName,
+                        directUserId = room?.directUserId,
+                        unreadCount = room?.unreadCount ?: 0,
+                        isMarkedUnread = room?.isMarkedUnread == true
+                    ),
+                    actions = RoomDetailsScreenViewActions(
+                        onBack = { actions.onNavigateBack() }
+                    )
+                )
+            }
+        )
+    }
+
     private fun chatEntry(
         state: AppUiState,
         actions: ZynaAppActions,
@@ -464,6 +498,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             actions.onStartNativeMatrixRtcCall(route.roomId, route.displayName)
                         },
                         onBack = actions.onCloseChat,
+                        onOpenRoomDetails = actions.onOpenRoomDetails,
                         onLoadOlder = actions.onLoadOlderChatMessages,
                         onLoadNewer = actions.onLoadNewerChatMessages,
                         onJumpToLiveEdge = actions.onJumpToChatLiveEdge,
@@ -697,6 +732,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             is AppRoute.RecoveryKey -> "RecoveryKey"
+            is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

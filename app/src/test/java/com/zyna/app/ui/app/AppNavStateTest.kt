@@ -156,6 +156,39 @@ class AppNavStateTest {
     }
 
     @Test
+    fun roomDetailsPushesOverCurrentChatAndPopsBackToIt() {
+        val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
+        val detailsRoute = AppRoute.RoomDetails(roomId = chatRoute.roomId)
+        val state = AppNavState()
+            .enterMain()
+            .openChat(chatRoute.roomId, chatRoute.displayName)
+            .openRoomDetails()
+
+        assertEquals(listOf(AppRoute.Rooms, chatRoute, detailsRoute), state.visibleStack)
+        assertEquals(detailsRoute, state.top)
+        assertEquals(chatRoute, state.activeChatRoute)
+        assertFalse(state.showsTabs)
+
+        val closedState = state.popActiveStack()
+
+        requireNotNull(closedState)
+        assertEquals(listOf(AppRoute.Rooms, chatRoute), closedState.visibleStack)
+        assertEquals(chatRoute, closedState.activeChatRoute)
+    }
+
+    @Test
+    fun openRoomDetails_isIgnoredWithoutTopChatRoute() {
+        val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
+        val noChatState = AppNavState().enterMain()
+        val forwardPickerState = noChatState
+            .openChat(chatRoute.roomId, chatRoute.displayName)
+            .openForwardPicker()
+
+        assertEquals(noChatState, noChatState.openRoomDetails())
+        assertEquals(forwardPickerState, forwardPickerState.openRoomDetails())
+    }
+
+    @Test
     fun forwardPickerPushesOverCurrentChatAndPopsBackToIt() {
         val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
         val state = AppNavState()

@@ -2,7 +2,7 @@
 
 **Zyna Android is an open-source native Android client for Matrix, focused on encrypted communication, durable messaging, native MatrixRTC calls, rich media, and a custom native UI.**
 
-This repository contains the Android client. The current Android release is an early `0.1.0` closed-testing preview and is not expected to be at full feature parity with the iOS app yet.
+This repository contains the Android client. The current Android release is an early `0.1.3` closed-testing preview and is not expected to be at full feature parity with the iOS app yet.
 
 <p align="center">
 <img width="2048" height="2048" alt="zynaandroid" src="https://github.com/user-attachments/assets/c4bdc55a-5837-4abe-a8e6-36962a9fa1e2" />
@@ -16,8 +16,9 @@ This repository contains the Android client. The current Android release is an e
 - Durable local-first outgoing outbox for text, image, voice, edit, and redaction operations
 - Rich media support for incoming and outgoing images, grouped photos, blurhash previews, fullscreen viewing, and upload checkpoints
 - Voice messages with recording, local draft storage, upload, rendering, and playback
+- Android push notifications through Firebase Cloud Messaging and Matrix pushers
 - Encrypted local app database for cached room summaries, timeline messages, outgoing envelopes, and local state
-- Native MatrixRTC calling through LiveKit, including ringing state, call banners, audio route control, pickup timeout handling, peer leave handling, and video support
+- Native MatrixRTC calling through LiveKit, including ringing state, call banners, incoming call notifications, lock-screen call UI, audio route control, pickup timeout handling, peer leave handling, and video support
 - Native Android shell with room list, chat navigation, warmed chat view, bottom tabs, high-refresh-rate support, and native/Compose screens
 - Custom chat rendering with native message cells, context menus, photo viewer transitions, glass input surfaces, and Vulkan-backed chat glass effects
 - Play closed testing metadata, launcher icons, Play icon, and feature graphic for the first Android release
@@ -31,6 +32,7 @@ Zyna Android separates Matrix protocol work, encrypted local storage, outgoing d
 - **Android Keystore** protects local Matrix session data, Matrix store passphrases, and database passphrases.
 - **App-owned outgoing outbox** persists user intent before transport, retries safely after restarts, and reconciles local messages with accepted Matrix events.
 - **Matrix media loaders** manage image/audio downloads, memory and disk caching, blurhash previews, and background decode work.
+- **Firebase Cloud Messaging + Matrix pushers** deliver Android push notifications, wake the app for Matrix notification payloads, and route incoming call pushes into the native call UI.
 - **Native MatrixRTC + LiveKit** provide the Android calling stack, including membership lifecycle, key transport, LiveKit focus discovery, encrypted media keys, and native call UI state.
 - **Native Views + Compose** are used together: Compose covers compact authentication/recovery screens while native Views handle the performance-sensitive room list, chat, call, and glass surfaces.
 - **Vulkan + C++ shaders** power the chat glass and PaintSplash rendering pipeline through hardware buffer capture and native rendering.
@@ -51,13 +53,14 @@ Detailed notes for specific Android subsystems live in the repo:
 - Android SDK / build tools for target SDK 36
 - Android NDK `29.0.14206865`
 - A Matrix account on a compatible homeserver
+- A local Firebase Android app config at `app/google-services.json` for FCM-enabled builds
 - GitHub Packages credentials for the private Matrix/LiveKit package feeds used by this build
 
 The app currently uses:
 
 - Package: `com.zyna.app`
-- Version: `0.1.0`
-- Version code: `1`
+- Version: `0.1.3`
+- Version code: `4`
 - Minimum Android: API 26
 - Target Android: API 36
 
@@ -75,6 +78,12 @@ Add credentials to `~/.gradle/gradle.properties` or another Gradle-supported pro
 ```properties
 gpr.user=YOUR_GITHUB_USERNAME
 gpr.key=YOUR_GITHUB_PACKAGE_TOKEN
+```
+
+For Firebase Messaging builds, place the Android Firebase config at:
+
+```text
+app/google-services.json
 ```
 
 Then build and test:

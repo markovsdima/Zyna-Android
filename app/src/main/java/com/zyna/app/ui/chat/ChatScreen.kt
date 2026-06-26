@@ -39,6 +39,7 @@ import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.ui.app.ChatCallBannerState
+import com.zyna.app.ui.chat.render.ChatBubbleThemes
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -1153,6 +1154,7 @@ private data class NativeChatColors(
 )
 
 private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
+    val outgoingBubbleTheme = ChatBubbleThemes.fallback
     return if (isDarkTheme) {
         NativeChatColors(
             palette = GlassPalette(
@@ -1164,12 +1166,13 @@ private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
                 hint = Color.argb(184, 202, 196, 208)
             ),
             messageTheme = MessageRenderTheme(
-                outgoingBubble = Color.rgb(79, 55, 139),
-                outgoingText = Color.rgb(234, 221, 255),
-                outgoingMetadata = Color.rgb(234, 221, 255),
+                outgoingBubble = outgoingBubbleTheme.actionAccentColor,
+                outgoingText = Color.WHITE,
+                outgoingMetadata = Color.argb(222, 255, 255, 255),
                 incomingBubble = Color.rgb(49, 48, 56),
                 incomingText = Color.rgb(232, 225, 229),
-                incomingMetadata = Color.rgb(202, 196, 208)
+                incomingMetadata = Color.rgb(202, 196, 208),
+                outgoingBubbleGradient = outgoingBubbleTheme.outgoingGradient
             ),
             actionText = Color.rgb(208, 188, 255),
             titleText = Color.rgb(232, 225, 229),
@@ -1192,12 +1195,13 @@ private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
                 hint = Color.argb(153, 73, 69, 79)
             ),
             messageTheme = MessageRenderTheme(
-                outgoingBubble = Color.rgb(234, 221, 255),
-                outgoingText = Color.rgb(33, 0, 93),
-                outgoingMetadata = Color.rgb(33, 0, 93),
+                outgoingBubble = outgoingBubbleTheme.actionAccentColor,
+                outgoingText = Color.WHITE,
+                outgoingMetadata = Color.argb(222, 255, 255, 255),
                 incomingBubble = Color.rgb(231, 224, 236),
                 incomingText = Color.rgb(29, 27, 32),
-                incomingMetadata = Color.rgb(73, 69, 79)
+                incomingMetadata = Color.rgb(73, 69, 79),
+                outgoingBubbleGradient = outgoingBubbleTheme.outgoingGradient
             ),
             actionText = Color.rgb(33, 0, 93),
             titleText = Color.rgb(29, 27, 32),

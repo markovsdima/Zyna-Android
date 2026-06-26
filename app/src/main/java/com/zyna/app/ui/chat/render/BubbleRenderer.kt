@@ -4,6 +4,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.graphics.Shader
 import kotlin.math.roundToInt
 
 internal class BubbleRenderer(
@@ -32,6 +33,21 @@ internal class BubbleRenderer(
         rebuildPathIfNeeded(rect, message)
         paint.color = fillColor
         canvas.drawPath(path, paint)
+    }
+
+    fun drawShader(
+        canvas: Canvas,
+        rect: RectF,
+        shader: Shader,
+        message: MessageRenderModel,
+        alpha: Int = 255
+    ) {
+        rebuildPathIfNeeded(rect, message)
+        paint.alpha = alpha.coerceIn(0, 255)
+        paint.shader = shader
+        canvas.drawPath(path, paint)
+        paint.shader = null
+        paint.alpha = 255
     }
 
     fun drawOverlay(

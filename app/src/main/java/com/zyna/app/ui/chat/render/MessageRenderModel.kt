@@ -94,11 +94,17 @@ internal data class MessageRenderTheme(
     val outgoingMetadata: Int,
     val incomingBubble: Int,
     val incomingText: Int,
-    val incomingMetadata: Int
+    val incomingMetadata: Int,
+    val outgoingBubbleGradient: MessageBubbleGradientSpec? = null
 ) {
     fun bubbleColor(message: MessageRenderModel): Int {
         return message.attributes.bubbleColor
             ?: if (message.isOutgoing) outgoingBubble else incomingBubble
+    }
+
+    fun bubbleGradient(message: MessageRenderModel): MessageBubbleGradientSpec? {
+        return outgoingBubbleGradient
+            ?.takeIf { message.isOutgoing && message.attributes.bubbleColor == null }
     }
 
     fun textColor(message: MessageRenderModel): Int {

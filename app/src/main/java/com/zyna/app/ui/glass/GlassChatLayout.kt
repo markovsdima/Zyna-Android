@@ -33,6 +33,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.render.GradientBubbleRecyclerView
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -57,7 +58,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
 ) : FrameLayout(context, attrs) {
     private val density = resources.displayMetrics.density
     val glassController = GlassBackdropController(this)
-    val recyclerView = RecyclerView(context)
+    val recyclerView = GradientBubbleRecyclerView(context)
     val inputBar = GlassInputBarView(context, glassController)
     var onLoadOlderMessages: () -> Unit = {}
     var onLoadNewerMessages: () -> Unit = {}

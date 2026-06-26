@@ -36,6 +36,7 @@ internal class MessageCellView(
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val contextCancelDistance = touchSlop * 2f
     private val bubbleRenderer = BubbleRenderer(density)
+    private var localBubbleGradientRenderer: MessageBubbleGradientRenderer? = null
     private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
     private val textRenderer = TextMessageRenderer(context)
     private val imageRenderer = ImageMessageRenderer(context, imageLoader)
@@ -204,13 +205,15 @@ internal class MessageCellView(
             layout = it
         }
 
-        if (currentLayout.drawBubble) {
-            bubbleRenderer.draw(
-                canvas = canvas,
-                rect = currentLayout.bubbleRect,
-                fillColor = theme.bubbleColor(model),
-                message = model
-            )
+        if (currentLayout.drawBubble && !drawsBubbleGradientInParent(currentLayout, model, theme)) {
+            if (!drawBubbleGradientLocally(canvas, currentLayout, model, theme)) {
+                bubbleRenderer.draw(
+                    canvas = canvas,
+                    rect = currentLayout.bubbleRect,
+                    fillColor = theme.bubbleColor(model),
+                    message = model
+                )
+            }
         }
         if (bubbleHighlightProgress > 0f) {
             bubbleRenderer.drawOverlay(
@@ -400,6 +403,43 @@ internal class MessageCellView(
         out.set(currentLayout.bubbleRect)
         out.offset(screenLocation[0].toFloat(), screenLocation[1].toFloat())
         return true
+    }
+
+    internal fun drawBubbleBackgroundInParent(
+        canvas: Canvas,
+        gradientRenderer: MessageBubbleGradientRenderer,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        viewportOffsetX: Float,
+        viewportOffsetY: Float,
+        alpha: Int = 255
+    ): Boolean {
+        if (isContextMenuSourceHidden) {
+            return false
+        }
+        val model = renderModel ?: return false
+        val theme = renderTheme ?: return false
+        val currentLayout = layout ?: buildLayout(
+            lastMeasuredWidth.takeIf { it > 0 } ?: width
+        ).also {
+            layout = it
+        }
+        if (!currentLayout.drawBubble) {
+            return false
+        }
+        val gradient = theme.bubbleGradient(model) ?: return false
+        return gradientRenderer.drawBubble(
+            canvas = canvas,
+            bubbleRenderer = bubbleRenderer,
+            rect = currentLayout.bubbleRect,
+            message = model,
+            spec = gradient,
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            viewportOffsetX = viewportOffsetX,
+            viewportOffsetY = viewportOffsetY,
+            alpha = alpha
+        )
     }
 
     override fun photoSourceBoundsInScreen(itemId: String): RectF? {
@@ -669,6 +709,48 @@ internal class MessageCellView(
             contextPhotoSelectionRadius,
             contextPhotoSelectionStrokePaint
         )
+    }
+
+    private fun drawsBubbleGradientInParent(
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel,
+        theme: MessageRenderTheme
+    ): Boolean {
+        if (isDrawingContextMenuCopy || parent !is GradientBubbleRecyclerView) {
+            return false
+        }
+        return currentLayout.drawBubble && theme.bubbleGradient(model) != null
+    }
+
+    private fun drawBubbleGradientLocally(
+        canvas: Canvas,
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel,
+        theme: MessageRenderTheme
+    ): Boolean {
+        val gradient = theme.bubbleGradient(model) ?: return false
+        val viewport = parent as? GradientBubbleRecyclerView
+        val viewportWidth = viewport?.width ?: width
+        val viewportHeight = viewport?.height ?: height
+        val viewportOffsetX = if (viewport != null) left.toFloat() + translationX else 0f
+        val viewportOffsetY = if (viewport != null) top.toFloat() + translationY else 0f
+        return localBubbleGradientRenderer().drawBubble(
+            canvas = canvas,
+            bubbleRenderer = bubbleRenderer,
+            rect = currentLayout.bubbleRect,
+            message = model,
+            spec = gradient,
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            viewportOffsetX = viewportOffsetX,
+            viewportOffsetY = viewportOffsetY
+        )
+    }
+
+    private fun localBubbleGradientRenderer(): MessageBubbleGradientRenderer {
+        return localBubbleGradientRenderer ?: MessageBubbleGradientRenderer().also {
+            localBubbleGradientRenderer = it
+        }
     }
 
     private fun buildLayout(width: Int): MessageCellLayout {

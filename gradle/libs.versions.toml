@@ -11,6 +11,7 @@ kotlin = "2.2.10"
 ksp = "2.2.10-2.0.2"
 composeBom = "2026.02.01"
 firebaseBom = "34.15.0"
+fragment = "1.8.9"
 googleServices = "4.5.0"
 livekit = "2.26.1-zyna.3.1"
 matrixSdk = "26.05.13-latest-own-read-receipts-beta.1"
@@ -44,6 +45,7 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-work-runtime-ktx = { group = "androidx.work", name = "work-runtime-ktx", version.ref = "work" }
 firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging" }
+androidx-fragment = { group = "androidx.fragment", name = "fragment", version.ref = "fragment" }
 livekit-android = { group = "io.livekit", name = "livekit-android", version.ref = "livekit" }
 livekit-android-camerax = { group = "io.livekit", name = "livekit-android-camerax", version.ref = "livekit" }
 livekit-android-track-processors = { group = "io.livekit", name = "livekit-android-track-processors", version.ref = "livekit" }

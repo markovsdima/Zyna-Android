@@ -2,6 +2,7 @@ package com.zyna.app.core.di
 
 import android.content.Context
 import com.zyna.app.data.calls.matrixrtc.MatrixClientNativeMatrixRtcCallEnvironment
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCallManager
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.LocalDatabasePassphraseStore
@@ -12,6 +13,9 @@ import com.zyna.app.data.media.MatrixAudioMediaLoader
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.media.VoiceRecorderController
 import com.zyna.app.data.outgoing.OutgoingOutboxService
+import com.zyna.app.data.push.FirebaseInstallationIdStore
+import com.zyna.app.data.push.MatrixPushRegistrationStore
+import com.zyna.app.data.push.MatrixPushRegistrar
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 
@@ -20,6 +24,13 @@ class AppContainer(context: Context) {
 
     val sessionStore = MatrixSessionStore(appContext)
     val matrixStorePassphraseStore = MatrixStorePassphraseStore(appContext)
+    val firebaseInstallationIdStore = FirebaseInstallationIdStore(appContext)
+    val matrixPushRegistrationStore = MatrixPushRegistrationStore(appContext)
+    val matrixPushRegistrar = MatrixPushRegistrar(
+        firebaseInstallationIdStore = firebaseInstallationIdStore,
+        pushRegistrationStore = matrixPushRegistrationStore,
+        appId = appContext.packageName
+    )
     val localDatabasePassphraseStore = LocalDatabasePassphraseStore(appContext)
     val database = ZynaDatabase.create(
         context = appContext,
@@ -32,13 +43,19 @@ class AppContainer(context: Context) {
     val matrixClientService = MatrixClientService(
         context = appContext,
         sessionStore = sessionStore,
-        storePassphraseStore = matrixStorePassphraseStore
+        storePassphraseStore = matrixStorePassphraseStore,
+        pushRegistrar = matrixPushRegistrar
     )
     val nativeMatrixRtcCallService = NativeMatrixRtcCallService(
         environment = MatrixClientNativeMatrixRtcCallEnvironment(
             matrixClientService = matrixClientService,
             context = appContext
         )
+    )
+    val incomingCallManager = MatrixRtcIncomingCallManager(
+        context = appContext,
+        matrixClientService = matrixClientService,
+        nativeMatrixRtcCallService = nativeMatrixRtcCallService
     )
     val matrixMediaLoader = MatrixMediaLoader(
         matrixClientService = matrixClientService,

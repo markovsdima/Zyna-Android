@@ -100,7 +100,7 @@ class MatrixRtcLiveKitTransportDiscoveryClientTest {
 
     @Test
     fun extractsMatrixServerNameFromUserId() {
-        assertEquals("zyna-app.ru", matrixServerNameFromUserId("@alice:zyna-app.ru"))
+        assertEquals("example.test", matrixServerNameFromUserId("@alice:example.test"))
         assertEquals("matrix.example.org", matrixServerNameFromUserId("@alice:matrix.example.org"))
         assertEquals("matrix.example.org:8448", matrixServerNameFromUserId("@alice:matrix.example.org:8448"))
         assertEquals("[::1]:8448", matrixServerNameFromUserId("@alice:[::1]:8448"))

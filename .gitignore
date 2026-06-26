@@ -15,6 +15,7 @@ gradle/gradle-daemon-jvm.properties
 .externalNativeBuild
 .cxx
 local.properties
+/app/google-services.json
 /app/release/
 /play-assets/phone-screenshots/
 /play-assets/zyna-app-icon-1024-ios.png

@@ -1,3 +1,14 @@
 <resources>
     <string name="app_name">Zyna</string>
+    <string name="notification_channel_messages_name">Messages</string>
+    <string name="notification_channel_messages_description">New message notifications</string>
+    <string name="notification_channel_incoming_calls_name">Incoming calls</string>
+    <string name="notification_channel_incoming_calls_description">Incoming call alerts</string>
+    <string name="push_notification_title">New message</string>
+    <string name="push_notification_body">Open Zyna to read it.</string>
+    <string name="push_notification_unread_body">%1$d unread messages</string>
+    <string name="incoming_call_title">%1$s</string>
+    <string name="incoming_call_audio_body">Incoming audio call</string>
+    <string name="incoming_call_decline">Decline</string>
+    <string name="incoming_call_answer">Answer</string>
 </resources>

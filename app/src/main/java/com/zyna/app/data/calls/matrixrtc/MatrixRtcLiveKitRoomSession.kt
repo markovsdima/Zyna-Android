@@ -184,12 +184,6 @@ class MatrixRtcLiveKitLocalVideoTrack private constructor(
         videoTrack?.removeRenderer(renderer)
     }
 
-    override fun equals(other: Any?): Boolean {
-        return other is MatrixRtcLiveKitLocalVideoTrack && other.id == id
-    }
-
-    override fun hashCode(): Int = id.hashCode()
-
     companion object {
         fun create(
             publication: LocalTrackPublication,
@@ -242,12 +236,6 @@ class MatrixRtcLiveKitRemoteVideoTrack private constructor(
     override fun removeRenderer(renderer: TextureViewRenderer) {
         videoTrack?.removeRenderer(renderer)
     }
-
-    override fun equals(other: Any?): Boolean {
-        return other is MatrixRtcLiveKitRemoteVideoTrack && other.id == id
-    }
-
-    override fun hashCode(): Int = id.hashCode()
 
     companion object {
         fun create(

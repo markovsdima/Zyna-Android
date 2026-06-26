@@ -1,5 +1,6 @@
 package com.zyna.app.ui.settings
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Typeface
@@ -30,6 +31,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     private var palette = SettingsPalette.from(context)
     private var statusTopInset = 0
     private var bottomContentPaddingPx = 0
+    private var logoutDialog: AlertDialog? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -128,6 +130,12 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         ViewCompat.requestApplyInsets(this)
     }
 
+    override fun onDetachedFromWindow() {
+        logoutDialog?.dismiss()
+        logoutDialog = null
+        super.onDetachedFromWindow()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration?) {
         super.onConfigurationChanged(newConfig)
         palette = SettingsPalette.from(context)
@@ -140,7 +148,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         chatThemeRow.detail = state.selectedChatThemeTitle
         chatThemeRow.setOnClickListener { actions.onOpenChatTheme() }
         logoutRow.detail = null
-        logoutRow.setOnClickListener { actions.onLogout() }
+        logoutRow.setOnClickListener { showLogoutConfirmation(actions.onLogout) }
     }
 
     private fun applyPalette() {
@@ -182,6 +190,29 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
 
     private fun updateContentPadding() {
         scrollView.updatePadding(bottom = bottomContentPaddingPx + dp(16))
+    }
+
+    private fun showLogoutConfirmation(onLogout: () -> Unit) {
+        val existingDialog = logoutDialog
+        if (existingDialog?.isShowing == true) {
+            return
+        }
+        logoutDialog = AlertDialog.Builder(context)
+            .setTitle("Log out?")
+            .setMessage("Are you sure you want to log out?")
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Log out") { _, _ ->
+                onLogout()
+            }
+            .create()
+            .also { dialog ->
+                dialog.setOnDismissListener {
+                    if (logoutDialog === dialog) {
+                        logoutDialog = null
+                    }
+                }
+                dialog.show()
+            }
     }
 
     private fun dp(value: Int): Int {

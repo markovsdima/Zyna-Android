@@ -7,6 +7,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 
 data class ZynaAppActions(
@@ -15,6 +16,8 @@ data class ZynaAppActions(
     val voiceRecorderController: VoiceRecorderController?,
     val onLogin: (homeserver: String, username: String, password: String) -> Unit,
     val onSubmitRecoveryKey: (String) -> Unit,
+    val onSelectTab: (AppTab) -> Unit,
+    val onNavigateBack: () -> Boolean,
     val onRefreshRooms: () -> Unit,
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
@@ -52,6 +55,7 @@ data class ZynaAppActions(
     ) -> Unit,
     val onChatJumpTargetConsumed: (String) -> Unit,
     val onChatScrollToLiveEdgeConsumed: () -> Unit,
+    val onOpenChatThemeSettings: () -> Unit,
     val onSelectChatBubbleTheme: (String) -> Unit,
     val onLogout: () -> Unit
 )

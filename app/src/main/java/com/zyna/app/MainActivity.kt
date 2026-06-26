@@ -169,6 +169,8 @@ class MainActivity : ComponentActivity() {
             voiceRecorderController = appContainer.voiceRecorderController,
             onLogin = appViewModel::login,
             onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
+            onSelectTab = appViewModel::selectTab,
+            onNavigateBack = appViewModel::navigateBack,
             onRefreshRooms = appViewModel::refreshRooms,
             onOpenRoom = appViewModel::openRoom,
             onForwardRoomSelected = appViewModel::selectForwardRoom,
@@ -202,6 +204,7 @@ class MainActivity : ComponentActivity() {
             onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
             onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
+            onOpenChatThemeSettings = appViewModel::openChatThemeSettings,
             onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
             onLogout = {
                 dismissNativeMatrixRtcCall()
@@ -268,8 +271,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun cancelVoiceComposerIfRouteChanged(previous: AppUiState, next: AppUiState) {
-        val previousChat = previous.route as? AppRoute.Chat
-        val nextChat = next.route as? AppRoute.Chat
+        val previousChat = previous.activeChatRoute
+        val nextChat = next.activeChatRoute
         if (previousChat?.roomId == nextChat?.roomId) {
             return
         }
@@ -305,7 +308,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startNativeMatrixRtcCallWithPermission(roomId: String, roomName: String) {
-        val chatRoute = latestState.route as? AppRoute.Chat ?: return
+        val chatRoute = latestState.activeChatRoute ?: return
         if (chatRoute.roomId != roomId || nativeMatrixRtcCallController != null) {
             return
         }
@@ -339,7 +342,7 @@ class MainActivity : ComponentActivity() {
         launchContext: NativeMatrixRtcCallLaunchContext,
         startCall: Boolean = true
     ) {
-        val chatRoute = latestState.route as? AppRoute.Chat ?: return
+        val chatRoute = latestState.activeChatRoute ?: return
         if (chatRoute.roomId != launchContext.roomId || nativeMatrixRtcCallController != null) {
             return
         }
@@ -398,7 +401,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         val activeRoomId = appContainer.nativeMatrixRtcCallService.currentRoomId() ?: return
-        val chatRoute = state.route as? AppRoute.Chat ?: return
+        val chatRoute = state.activeChatRoute ?: return
         if (chatRoute.roomId != activeRoomId) {
             return
         }
@@ -862,10 +865,14 @@ private fun MotionEvent.isInsideView(view: View): Boolean {
 
 private fun AppRoute.perfName(): String {
     return when (this) {
+        AppRoute.Calls -> "Calls"
+        AppRoute.ChatThemeSettings -> "ChatThemeSettings"
+        AppRoute.Contacts -> "Contacts"
         AppRoute.ForwardPicker -> "ForwardPicker"
         AppRoute.Login -> "Login"
         is AppRoute.RecoveryKey -> "RecoveryKey"
         AppRoute.Rooms -> "Rooms"
+        AppRoute.Settings -> "Settings"
         is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"
     }
 }

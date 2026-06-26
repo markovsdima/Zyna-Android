@@ -46,19 +46,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-sealed interface AppRoute {
-    data object Login : AppRoute
-    data class RecoveryKey(val userId: String) : AppRoute
-    data object Rooms : AppRoute
-    data object ForwardPicker : AppRoute
-    data class Chat(
-        val roomId: String,
-        val displayName: String
-    ) : AppRoute
-}
-
 data class AppUiState(
-    val route: AppRoute = AppRoute.Login,
+    val navState: AppNavState = AppNavState(),
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
     val rooms: List<MatrixRoomSummary> = emptyList(),
     val isRefreshingRooms: Boolean = false,
@@ -79,11 +68,22 @@ data class AppUiState(
     val chatEditTarget: MatrixEditTarget? = null,
     val chatForwardTarget: MatrixForwardTarget? = null,
     val pendingForwardTarget: MatrixForwardTarget? = null,
-    val forwardReturnRoute: AppRoute? = null,
     val chatJumpTargetEventId: String? = null,
     val chatScrollToLiveEdgeRequested: Boolean = false,
     val chatCallBanner: ChatCallBannerState? = null
 ) {
+    val route: AppRoute
+        get() = navState.top
+
+    val navigationStack: List<AppRoute>
+        get() = navState.visibleStack
+
+    val selectedTab: AppTab
+        get() = navState.selectedTab
+
+    val activeChatRoute: AppRoute.Chat?
+        get() = navState.activeChatRoute
+
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
             matrixState is MatrixClientState.RestoringSession
@@ -186,12 +186,14 @@ class AppViewModel(
                     val shouldClearChat = shouldClearSessionData ||
                         matrixState is MatrixClientState.Error
 
+                    val nextNavState = navStateForState(
+                        matrixState,
+                        if (didChangeUser) AppNavState() else current.navState
+                    )
+
                     current.copy(
                         matrixState = matrixState,
-                        route = routeForState(
-                            matrixState,
-                            if (didChangeUser) AppRoute.Login else current.route
-                        ),
+                        navState = nextNavState,
                         rooms = if (shouldClearSessionData) {
                             emptyList()
                         } else {
@@ -235,11 +237,6 @@ class AppViewModel(
                             null
                         } else {
                             current.pendingForwardTarget
-                        },
-                        forwardReturnRoute = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.forwardReturnRoute
                         },
                         chatJumpTargetEventId = if (shouldClearChat) {
                             null
@@ -330,7 +327,7 @@ class AppViewModel(
                 matrixClientService.recoverWithRecoveryKey(recoveryKey)
                 _uiState.update {
                     it.copy(
-                        route = AppRoute.Rooms,
+                        navState = it.navState.enterMain(),
                         isRecovering = false,
                         recoveryErrorMessage = null
                     )
@@ -465,7 +462,7 @@ class AppViewModel(
         stopChatTimeline()
         _uiState.update {
             it.copy(
-                route = AppRoute.Rooms,
+                navState = it.navState.closeChat(),
                 chatMessages = emptyList(),
                 chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
                 chatTimelineFlushSummary = null,
@@ -481,11 +478,49 @@ class AppViewModel(
                 chatEditTarget = null,
                 chatForwardTarget = null,
                 pendingForwardTarget = null,
-                forwardReturnRoute = null,
                 chatJumpTargetEventId = null,
                 chatScrollToLiveEdgeRequested = false,
                 chatCallBanner = null
             )
+        }
+    }
+
+    fun selectTab(tab: AppTab) {
+        _uiState.update { current ->
+            current.copy(navState = current.navState.selectTab(tab))
+        }
+    }
+
+    fun navigateBack(): Boolean {
+        val route = _uiState.value.route
+        return when (route) {
+            is AppRoute.Chat -> {
+                closeChat()
+                true
+            }
+            AppRoute.ForwardPicker -> {
+                cancelForwardPicker()
+                true
+            }
+            else -> {
+                var didNavigate = false
+                _uiState.update { current ->
+                    val nextNavState = current.navState.popActiveStack()
+                    if (nextNavState == null) {
+                        current
+                    } else {
+                        didNavigate = true
+                        current.copy(navState = nextNavState)
+                    }
+                }
+                didNavigate
+            }
+        }
+    }
+
+    fun openChatThemeSettings() {
+        _uiState.update { current ->
+            current.copy(navState = current.navState.openChatThemeSettings())
         }
     }
 
@@ -503,13 +538,13 @@ class AppViewModel(
     }
 
     fun refreshCurrentChat() {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         startChatTimeline(userId, route.roomId, resetMessages = false)
     }
 
     fun sendChatMessage(body: String): Boolean {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return false
+        val route = _uiState.value.activeChatRoute ?: return false
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
         val state = _uiState.value
         val forwardTarget = state.chatForwardTarget
@@ -637,7 +672,7 @@ class AppViewModel(
     }
 
     fun sendPhotoMessages(draft: OutgoingPhotoDraft): Boolean {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return false
+        val route = _uiState.value.activeChatRoute ?: return false
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
         val items = draft.items.filter { it.localPath.isNotBlank() }
         if (items.isEmpty() || _uiState.value.isSendingChatMessage) {
@@ -728,7 +763,7 @@ class AppViewModel(
         onEnqueued: () -> Unit = {}
     ): Boolean {
         val state = _uiState.value
-        val route = state.route as? AppRoute.Chat ?: return false
+        val route = state.activeChatRoute ?: return false
         val userId = state.matrixState.userIdOrNull() ?: return false
         if (draft.localPath.isBlank() || state.isSendingChatMessage) {
             return false
@@ -794,7 +829,7 @@ class AppViewModel(
     }
 
     fun setChatReplyTarget(replyInfo: MatrixReplyInfo) {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         if (replyInfo.eventId.isBlank()) {
             return
         }
@@ -812,7 +847,7 @@ class AppViewModel(
     }
 
     fun setChatEditTarget(editTarget: MatrixEditTarget) {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         if (editTarget.eventId.isBlank() || editTarget.body.isBlank()) {
             return
         }
@@ -835,9 +870,8 @@ class AppViewModel(
         }
         _uiState.update { current ->
             current.copy(
-                route = AppRoute.ForwardPicker,
+                navState = current.navState.openForwardPicker(),
                 pendingForwardTarget = target,
-                forwardReturnRoute = current.route,
                 chatReplyTarget = null,
                 chatEditTarget = null,
                 chatForwardTarget = null
@@ -848,9 +882,8 @@ class AppViewModel(
     fun cancelForwardPicker() {
         _uiState.update { current ->
             current.copy(
-                route = current.forwardReturnRoute ?: AppRoute.Rooms,
+                navState = current.navState.closeForwardPicker(),
                 pendingForwardTarget = null,
-                forwardReturnRoute = null
             )
         }
     }
@@ -891,7 +924,7 @@ class AppViewModel(
     }
 
     fun retryOutgoingEnvelope(envelopeId: String) {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
 
         viewModelScope.launch {
@@ -926,7 +959,7 @@ class AppViewModel(
     }
 
     fun discardOutgoingEnvelope(envelopeId: String) {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
 
         viewModelScope.launch {
@@ -961,7 +994,7 @@ class AppViewModel(
     }
 
     fun redactMessages(messageIds: List<String>) {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         val distinctMessageIds = messageIds
             .map { it.trim() }
@@ -1028,7 +1061,7 @@ class AppViewModel(
         if (!BuildConfig.DEBUG) {
             return
         }
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
 
         viewModelScope.launch {
@@ -1051,7 +1084,7 @@ class AppViewModel(
     }
 
     fun loadOlderChatMessages() {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         if (
@@ -1115,7 +1148,7 @@ class AppViewModel(
     }
 
     fun loadNewerChatMessages() {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         if (
@@ -1184,7 +1217,7 @@ class AppViewModel(
 
     fun jumpToChatEvent(eventId: String) {
         val normalizedEventId = eventId.takeIf { it.isNotBlank() } ?: return
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         if (chatPaginationJob?.isActive == true) {
@@ -1335,7 +1368,7 @@ class AppViewModel(
     }
 
     fun jumpToChatLiveEdge() {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         if (chatPaginationJob?.isActive == true) {
@@ -1408,7 +1441,7 @@ class AppViewModel(
         eventId: String?,
         canEstablishBaseline: Boolean
     ) {
-        val route = _uiState.value.route as? AppRoute.Chat ?: return
+        val route = _uiState.value.activeChatRoute ?: return
         if (route.roomId != roomId) {
             return
         }
@@ -1468,37 +1501,38 @@ class AppViewModel(
         }
     }
 
-    private fun routeForState(
+    private fun navStateForState(
         state: MatrixClientState,
-        currentRoute: AppRoute
-    ): AppRoute {
+        currentNavState: AppNavState
+    ): AppNavState {
         return when (state) {
             MatrixClientState.LoggedOut,
-            is MatrixClientState.Error -> AppRoute.Login
+            is MatrixClientState.Error -> currentNavState.routeForClientState(
+                shouldShowLogin = true,
+                recoveryUserId = null
+            )
             is MatrixClientState.LoggedIn -> {
                 val userId = state.userId
 
-                if (!matrixClientService.isRecoveryComplete(userId)) {
-                    AppRoute.RecoveryKey(userId)
-                } else if (currentRoute is AppRoute.Login || currentRoute is AppRoute.RecoveryKey) {
-                    AppRoute.Rooms
-                } else {
-                    currentRoute
-                }
+                currentNavState.routeForClientState(
+                    shouldShowLogin = false,
+                    recoveryUserId = userId.takeUnless {
+                        matrixClientService.isRecoveryComplete(it)
+                    }
+                )
             }
             is MatrixClientState.Syncing -> {
                 val userId = state.userId
 
-                if (!matrixClientService.isRecoveryComplete(userId)) {
-                    AppRoute.RecoveryKey(userId)
-                } else if (currentRoute is AppRoute.Login || currentRoute is AppRoute.RecoveryKey) {
-                    AppRoute.Rooms
-                } else {
-                    currentRoute
-                }
+                currentNavState.routeForClientState(
+                    shouldShowLogin = false,
+                    recoveryUserId = userId.takeUnless {
+                        matrixClientService.isRecoveryComplete(it)
+                    }
+                )
             }
             MatrixClientState.LoggingIn,
-            MatrixClientState.RestoringSession -> currentRoute
+            MatrixClientState.RestoringSession -> currentNavState
         }
     }
 
@@ -2227,7 +2261,7 @@ class AppViewModel(
     }
 
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {
-        return (route as? AppRoute.Chat)?.roomId == roomId
+        return activeChatRoute?.roomId == roomId
     }
 
     private fun AppUiState.isRouteForRoom(userId: String, roomId: String): Boolean {
@@ -2243,7 +2277,7 @@ class AppViewModel(
             return this
         }
         return copy(
-            route = AppRoute.Chat(
+            navState = navState.openChat(
                 roomId = room.id,
                 displayName = room.displayName
             ),
@@ -2262,7 +2296,6 @@ class AppViewModel(
             chatEditTarget = null,
             chatForwardTarget = forwardTarget,
             pendingForwardTarget = null,
-            forwardReturnRoute = null,
             chatJumpTargetEventId = null,
             chatScrollToLiveEdgeRequested = false,
             chatCallBanner = null
@@ -2292,10 +2325,14 @@ class AppViewModel(
 
     private fun AppRoute.perfName(): String {
         return when (this) {
+            AppRoute.Calls -> "Calls"
+            AppRoute.ChatThemeSettings -> "ChatThemeSettings"
+            AppRoute.Contacts -> "Contacts"
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             is AppRoute.RecoveryKey -> "RecoveryKey"
             AppRoute.Rooms -> "Rooms"
+            AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"
         }
     }

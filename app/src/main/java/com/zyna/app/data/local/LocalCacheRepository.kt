@@ -7,8 +7,10 @@ import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixImageInfo
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
+import com.zyna.app.data.matrix.MatrixMessageReaction
 import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
+import com.zyna.app.data.matrix.MatrixReactionSender
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.messaging.ZynaHtmlCodec
@@ -18,13 +20,16 @@ import com.zyna.app.data.outgoing.OutgoingEnvelopeKind
 import com.zyna.app.data.outgoing.OutgoingEditEnvelope
 import com.zyna.app.data.outgoing.OutgoingImageEnvelope
 import com.zyna.app.data.outgoing.OutgoingMediaStorage
+import com.zyna.app.data.outgoing.OutgoingReactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingRedactionEnvelope
 import com.zyna.app.data.outgoing.OutgoingTextEnvelope
 import com.zyna.app.data.outgoing.OutgoingTransportState
 import com.zyna.app.data.outgoing.OutgoingVoiceEnvelope
+import com.zyna.app.data.outgoing.PendingReactionState
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -34,6 +39,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
 
 class LocalCacheRepository(
     private val database: ZynaDatabase,
@@ -42,6 +49,7 @@ class LocalCacheRepository(
     private val roomDao = database.cachedRoomDao()
     private val messageDao = database.cachedTimelineMessageDao()
     private val outgoingDao = database.outgoingEnvelopeDao()
+    private val pendingReactionDao = database.pendingReactionDao()
 
     fun observeRooms(userId: String): Flow<List<MatrixRoomSummary>> {
         return roomDao.observeRooms(userId).map { rooms ->
@@ -126,9 +134,11 @@ class LocalCacheRepository(
             }
             combine(
                 messagesFlow,
-                outgoingDao.observeActiveRoomEnvelopes(userId, roomId)
-            ) { messages, outgoingEnvelopes ->
+                outgoingDao.observeActiveRoomEnvelopes(userId, roomId),
+                pendingReactionDao.observeRoomPendingReactions(userId, roomId)
+            ) { messages, outgoingEnvelopes, pendingReactions ->
                 mergeTimelineWithOutgoing(messages, outgoingEnvelopes, bounds)
+                    .applyPendingReactions(pendingReactions, userId)
             }
         }.flowOn(Dispatchers.Default)
     }
@@ -168,6 +178,7 @@ class LocalCacheRepository(
         }
         val outgoingStart = ZynaPerfLog.start()
         val outgoingEnvelopes = outgoingDao.activeRoomEnvelopesSnapshot(userId, roomId)
+        val pendingReactions = pendingReactionDao.roomPendingReactionsSnapshot(userId, roomId)
         ZynaPerfLog.end(
             outgoingStart,
             "cache.latestWindow.outgoingQuery"
@@ -181,7 +192,7 @@ class LocalCacheRepository(
             messages = messages,
             outgoingEnvelopes = outgoingEnvelopes,
             bounds = TimelineWindowBounds(oldestAnchor = oldestAnchor)
-        )
+        ).applyPendingReactions(pendingReactions, userId)
         ZynaPerfLog.end(
             mergeStart,
             "cache.latestWindow.merge"
@@ -272,6 +283,7 @@ class LocalCacheRepository(
             newestAnchor = newestAnchor
         )
         val outgoingEnvelopes = outgoingDao.activeRoomEnvelopesSnapshot(userId, roomId)
+        val pendingReactions = pendingReactionDao.roomPendingReactionsSnapshot(userId, roomId)
 
         TimelineWindowSnapshot(
             anchor = oldestAnchor,
@@ -279,7 +291,7 @@ class LocalCacheRepository(
                 messages = messages,
                 outgoingEnvelopes = outgoingEnvelopes,
                 bounds = bounds
-            ),
+            ).applyPendingReactions(pendingReactions, userId),
             newestAnchor = newestAnchor,
             hasOlderInDb = oldestAnchor?.let { anchor ->
                 hasOlderRoomTimelineMessages(
@@ -1024,6 +1036,397 @@ class LocalCacheRepository(
             .mapNotNull { it.toOutgoingEditEnvelopeOrNull() }
     }
 
+    suspend fun prepareOutgoingReactionAdd(
+        userId: String,
+        roomId: String,
+        targetEventId: String,
+        reactionKey: String,
+        transactionId: String
+    ): String? {
+        val normalizedTarget = targetEventId.takeIf { it.isNotBlank() } ?: return null
+        val normalizedKey = reactionKey.takeIf { it.isNotBlank() } ?: return null
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val existing = latestRetainedReaction(
+                userId = userId,
+                roomId = roomId,
+                targetEventId = normalizedTarget,
+                reactionKey = normalizedKey,
+                nowMillis = now
+            )
+            val next = when (existing?.decodedState()) {
+                PendingReactionState.ADD_QUEUED -> existing.copy(
+                    transactionId = existing.transactionId ?: transactionId,
+                    redactionTransactionId = null,
+                    redactionEventId = null,
+                    failureMessage = null,
+                    updatedAtMillis = now
+                )
+                PendingReactionState.ADD_ACCEPTED -> existing.copy(
+                    failureMessage = null,
+                    updatedAtMillis = now
+                )
+                PendingReactionState.REMOVE_QUEUED -> {
+                    val isRemoveAfterPendingAdd = existing.reactionEventId.isNullOrBlank()
+                    when {
+                        isRemoveAfterPendingAdd -> existing.copy(
+                            state = PendingReactionState.ADD_QUEUED.name,
+                            transactionId = existing.transactionId ?: transactionId,
+                            redactionTransactionId = null,
+                            redactionEventId = null,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                        !existing.hasAttemptStarted() -> existing.copy(
+                            state = PendingReactionState.ADD_ACCEPTED.name,
+                            redactionTransactionId = null,
+                            redactionEventId = null,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                        else -> existing.copy(
+                            state = PendingReactionState.ADD_AFTER_REMOVE_QUEUED.name,
+                            transactionId = transactionId,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                    }
+                }
+                PendingReactionState.ADD_AFTER_REMOVE_QUEUED -> existing.copy(
+                    failureMessage = null,
+                    updatedAtMillis = now
+                )
+                PendingReactionState.REMOVED,
+                PendingReactionState.FAILED,
+                null -> PendingReactionEntity(
+                    userId = userId,
+                    roomId = roomId,
+                    id = existing?.id ?: "reaction:${UUID.randomUUID()}",
+                    targetEventId = normalizedTarget,
+                    reactionKey = normalizedKey,
+                    state = PendingReactionState.ADD_QUEUED.name,
+                    transactionId = transactionId,
+                    reactionEventId = null,
+                    redactionTransactionId = null,
+                    redactionEventId = null,
+                    createdAtMillis = existing?.createdAtMillis ?: now,
+                    updatedAtMillis = now,
+                    failureMessage = null,
+                    lastAttemptAtMillis = null,
+                    attemptCount = 0
+                )
+            }
+            pendingReactionDao.upsertReaction(next)
+            next.id.takeIf { next.decodedState().isReactionOutboxState() }
+        }
+    }
+
+    suspend fun prepareOutgoingReactionRemoval(
+        userId: String,
+        roomId: String,
+        targetEventId: String,
+        reactionKey: String,
+        reactionEventId: String?,
+        transactionId: String
+    ): String? {
+        val normalizedTarget = targetEventId.takeIf { it.isNotBlank() } ?: return null
+        val normalizedKey = reactionKey.takeIf { it.isNotBlank() } ?: return null
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val existing = latestRetainedReaction(
+                userId = userId,
+                roomId = roomId,
+                targetEventId = normalizedTarget,
+                reactionKey = normalizedKey,
+                nowMillis = now
+            )
+
+            val resolvedReactionEventId = existing?.reactionEventId?.takeIf { it.isNotBlank() }
+                ?: reactionEventId?.takeIf { it.isNotBlank() }
+            val next = when (existing?.decodedState()) {
+                PendingReactionState.ADD_QUEUED -> {
+                    if (existing.reactionEventId.isNullOrBlank() && !existing.hasAttemptStarted()) {
+                        existing.copy(
+                            state = PendingReactionState.REMOVED.name,
+                            transactionId = null,
+                            redactionTransactionId = null,
+                            redactionEventId = null,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                    } else {
+                        existing.copy(
+                            state = PendingReactionState.REMOVE_QUEUED.name,
+                            reactionEventId = resolvedReactionEventId,
+                            redactionTransactionId = transactionId,
+                            redactionEventId = null,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                    }
+                }
+                PendingReactionState.ADD_ACCEPTED -> {
+                    resolvedReactionEventId ?: return@withTransaction null
+                    existing.copy(
+                        state = PendingReactionState.REMOVE_QUEUED.name,
+                        transactionId = null,
+                        reactionEventId = resolvedReactionEventId,
+                        redactionTransactionId = transactionId,
+                        redactionEventId = null,
+                        failureMessage = null,
+                        updatedAtMillis = now
+                    )
+                }
+                PendingReactionState.REMOVE_QUEUED -> existing.copy(
+                    state = PendingReactionState.REMOVE_QUEUED.name,
+                    reactionEventId = resolvedReactionEventId,
+                    redactionTransactionId = existing.redactionTransactionId ?: transactionId,
+                    redactionEventId = null,
+                    failureMessage = null,
+                    updatedAtMillis = now
+                )
+                PendingReactionState.ADD_AFTER_REMOVE_QUEUED -> existing.copy(
+                    state = PendingReactionState.REMOVE_QUEUED.name,
+                    transactionId = null,
+                    reactionEventId = resolvedReactionEventId,
+                    redactionEventId = null,
+                    failureMessage = null,
+                    updatedAtMillis = now
+                )
+                PendingReactionState.REMOVED -> return@withTransaction null
+                PendingReactionState.FAILED,
+                null -> {
+                    resolvedReactionEventId ?: return@withTransaction null
+                    PendingReactionEntity(
+                        userId = userId,
+                        roomId = roomId,
+                        id = existing?.id ?: "reaction:${UUID.randomUUID()}",
+                        targetEventId = normalizedTarget,
+                        reactionKey = normalizedKey,
+                        state = PendingReactionState.REMOVE_QUEUED.name,
+                        transactionId = null,
+                        reactionEventId = resolvedReactionEventId,
+                        redactionTransactionId = transactionId,
+                        redactionEventId = null,
+                        createdAtMillis = existing?.createdAtMillis ?: now,
+                        updatedAtMillis = now,
+                        failureMessage = null,
+                        lastAttemptAtMillis = null,
+                        attemptCount = 0
+                    )
+                }
+            }
+            pendingReactionDao.upsertReaction(next)
+            next.id.takeIf { next.decodedState().isReactionOutboxState() }
+        }
+    }
+
+    suspend fun outgoingReactionDispatchCandidates(
+        userId: String,
+        reactionIds: Set<String>? = null
+    ): List<OutgoingReactionEnvelope> {
+        val entities = if (reactionIds == null) {
+            pendingReactionDao.outboxCandidates(userId)
+        } else {
+            reactionIds.mapNotNull { id -> pendingReactionDao.outboxCandidate(userId, id) }
+        }
+        return entities.mapNotNull { it.toOutgoingReactionEnvelopeOrNull() }
+    }
+
+    suspend fun markOutgoingReactionAttemptStarted(candidate: OutgoingReactionEnvelope) {
+        val now = System.currentTimeMillis()
+        pendingReactionDao.markAttemptStarted(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            id = candidate.id,
+            lastAttemptAtMillis = now,
+            updatedAtMillis = now
+        )
+    }
+
+    suspend fun markOutgoingReactionAddAccepted(
+        candidate: OutgoingReactionEnvelope,
+        reactionEventId: String
+    ): OutgoingReactionEnvelope? {
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val current = pendingReactionDao.reactionById(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                id = candidate.id
+            ) ?: return@withTransaction null
+            when {
+                current.decodedState() == PendingReactionState.ADD_QUEUED &&
+                    current.transactionId == candidate.transactionId -> {
+                    pendingReactionDao.upsertReaction(
+                        current.copy(
+                            state = PendingReactionState.ADD_ACCEPTED.name,
+                            reactionEventId = reactionEventId,
+                            redactionTransactionId = null,
+                            redactionEventId = null,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                    )
+                    null
+                }
+                current.decodedState() == PendingReactionState.REMOVE_QUEUED &&
+                    current.transactionId == candidate.transactionId &&
+                    current.reactionEventId.isNullOrBlank() -> {
+                    val next = current.copy(
+                        reactionEventId = reactionEventId,
+                        failureMessage = null,
+                        updatedAtMillis = now
+                    )
+                    pendingReactionDao.upsertReaction(next)
+                    next.toOutgoingReactionEnvelopeOrNull()
+                }
+                else -> null
+            }
+        }
+    }
+
+    suspend fun markOutgoingReactionRemovalAccepted(
+        candidate: OutgoingReactionEnvelope,
+        redactionEventId: String?
+    ): OutgoingReactionEnvelope? {
+        val now = System.currentTimeMillis()
+        return database.withTransaction {
+            val current = pendingReactionDao.reactionById(
+                userId = candidate.userId,
+                roomId = candidate.roomId,
+                id = candidate.id
+            ) ?: return@withTransaction null
+            when {
+                current.decodedState() == PendingReactionState.REMOVE_QUEUED &&
+                    current.redactionTransactionId == candidate.redactionTransactionId -> {
+                    pendingReactionDao.upsertReaction(
+                        current.copy(
+                            state = PendingReactionState.REMOVED.name,
+                            transactionId = null,
+                            redactionEventId = redactionEventId,
+                            failureMessage = null,
+                            updatedAtMillis = now
+                        )
+                    )
+                    null
+                }
+                current.decodedState() == PendingReactionState.ADD_AFTER_REMOVE_QUEUED &&
+                    current.redactionTransactionId == candidate.redactionTransactionId -> {
+                    val next = current.copy(
+                        state = PendingReactionState.ADD_QUEUED.name,
+                        reactionEventId = null,
+                        redactionTransactionId = null,
+                        redactionEventId = redactionEventId,
+                        failureMessage = null,
+                        updatedAtMillis = now
+                    )
+                    pendingReactionDao.upsertReaction(next)
+                    next.toOutgoingReactionEnvelopeOrNull()
+                }
+                else -> null
+            }
+        }
+    }
+
+    suspend fun markOutgoingReactionRetrying(
+        candidate: OutgoingReactionEnvelope,
+        failureMessage: String?
+    ) {
+        val now = System.currentTimeMillis()
+        val current = pendingReactionDao.reactionById(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            id = candidate.id
+        ) ?: return
+        if (!current.matchesReactionCandidate(candidate)) {
+            return
+        }
+        pendingReactionDao.upsertReaction(
+            current.copy(
+                failureMessage = failureMessage,
+                updatedAtMillis = now
+            )
+        )
+    }
+
+    suspend fun markOutgoingReactionTerminalFailure(
+        candidate: OutgoingReactionEnvelope,
+        failureMessage: String?
+    ) {
+        val now = System.currentTimeMillis()
+        val current = pendingReactionDao.reactionById(
+            userId = candidate.userId,
+            roomId = candidate.roomId,
+            id = candidate.id
+        ) ?: return
+        if (!current.matchesReactionCandidate(candidate)) {
+            return
+        }
+        val next = when (candidate.state) {
+            PendingReactionState.ADD_QUEUED -> when (current.decodedState()) {
+                PendingReactionState.REMOVE_QUEUED -> current.copy(
+                    state = PendingReactionState.REMOVED.name,
+                    transactionId = null,
+                    redactionTransactionId = null,
+                    redactionEventId = null,
+                    failureMessage = failureMessage,
+                    updatedAtMillis = now
+                )
+                else -> current.copy(
+                    state = PendingReactionState.FAILED.name,
+                    failureMessage = failureMessage,
+                    updatedAtMillis = now
+                )
+            }
+            PendingReactionState.REMOVE_QUEUED -> {
+                if (candidate.reactionEventId.isNullOrBlank()) {
+                    when (current.decodedState()) {
+                        PendingReactionState.ADD_QUEUED -> current.copy(
+                            state = PendingReactionState.FAILED.name,
+                            redactionTransactionId = null,
+                            redactionEventId = null,
+                            failureMessage = failureMessage,
+                            updatedAtMillis = now
+                        )
+                        else -> current.copy(
+                            state = PendingReactionState.REMOVED.name,
+                            transactionId = null,
+                            redactionTransactionId = null,
+                            redactionEventId = null,
+                            failureMessage = failureMessage,
+                            updatedAtMillis = now
+                        )
+                    }
+                } else {
+                    current.copy(
+                        state = PendingReactionState.ADD_ACCEPTED.name,
+                        transactionId = null,
+                        redactionTransactionId = null,
+                        redactionEventId = null,
+                        failureMessage = failureMessage,
+                        updatedAtMillis = now
+                    )
+                }
+            }
+            PendingReactionState.ADD_AFTER_REMOVE_QUEUED -> current.copy(
+                state = PendingReactionState.ADD_ACCEPTED.name,
+                transactionId = null,
+                redactionTransactionId = null,
+                redactionEventId = null,
+                failureMessage = failureMessage,
+                updatedAtMillis = now
+            )
+            PendingReactionState.ADD_ACCEPTED,
+            PendingReactionState.REMOVED,
+            PendingReactionState.FAILED -> current.copy(
+                failureMessage = failureMessage,
+                updatedAtMillis = now
+            )
+        }
+        pendingReactionDao.upsertReaction(next)
+    }
+
     suspend fun markOutgoingRedactionDispatchAccepted(
         userId: String,
         roomId: String,
@@ -1139,6 +1542,7 @@ class LocalCacheRepository(
             messageDao.clearAllMessages()
             roomDao.clearAllRooms()
             outgoingDao.clearAllEnvelopes()
+            pendingReactionDao.clearAll()
         }
         cleanupOrphanOutgoingMediaFiles()
     }
@@ -1197,7 +1601,8 @@ class LocalCacheRepository(
             isEditFailed = isEditFailed,
             latestEditEventId = latestEditEventId,
             editTransactionId = editTransactionId,
-            pendingEditBody = pendingEditBody
+            pendingEditBody = pendingEditBody,
+            reactions = reactionsJson.decodeReactions()
         )
     }
 
@@ -1258,6 +1663,7 @@ class LocalCacheRepository(
             latestEditEventId = latestEditEventId,
             editTransactionId = editTransactionId,
             pendingEditBody = pendingEditBody,
+            reactionsJson = reactions.encodeReactions(),
             updatedAtMillis = updatedAtMillis
         )
     }
@@ -2008,6 +2414,318 @@ class LocalCacheRepository(
         }
     }
 
+    private fun PendingReactionEntity.toOutgoingReactionEnvelopeOrNull(): OutgoingReactionEnvelope? {
+        val decodedState = decodedState()
+        when (decodedState) {
+            PendingReactionState.ADD_QUEUED -> {
+                if (transactionId.isNullOrBlank()) return null
+            }
+            PendingReactionState.REMOVE_QUEUED -> {
+                if (
+                    redactionTransactionId.isNullOrBlank() ||
+                    (reactionEventId.isNullOrBlank() && transactionId.isNullOrBlank())
+                ) {
+                    return null
+                }
+            }
+            PendingReactionState.ADD_AFTER_REMOVE_QUEUED -> {
+                if (
+                    transactionId.isNullOrBlank() ||
+                    reactionEventId.isNullOrBlank() ||
+                    redactionTransactionId.isNullOrBlank()
+                ) {
+                    return null
+                }
+            }
+            PendingReactionState.ADD_ACCEPTED,
+            PendingReactionState.REMOVED,
+            PendingReactionState.FAILED -> return null
+        }
+
+        return OutgoingReactionEnvelope(
+            userId = userId,
+            roomId = roomId,
+            id = id,
+            state = decodedState,
+            targetEventId = targetEventId,
+            reactionKey = reactionKey,
+            transactionId = transactionId,
+            reactionEventId = reactionEventId,
+            redactionTransactionId = redactionTransactionId,
+            failureMessage = failureMessage
+        )
+    }
+
+    private fun PendingReactionEntity.decodedState(): PendingReactionState {
+        return runCatching { PendingReactionState.valueOf(state) }
+            .getOrDefault(PendingReactionState.FAILED)
+    }
+
+    private suspend fun latestRetainedReaction(
+        userId: String,
+        roomId: String,
+        targetEventId: String,
+        reactionKey: String,
+        nowMillis: Long
+    ): PendingReactionEntity? {
+        val existing = pendingReactionDao.latestReaction(
+            userId = userId,
+            roomId = roomId,
+            targetEventId = targetEventId,
+            reactionKey = reactionKey
+        ) ?: return null
+        if (!existing.isExpiredTerminal(nowMillis)) {
+            return existing
+        }
+        pendingReactionDao.deleteReaction(
+            userId = existing.userId,
+            roomId = existing.roomId,
+            id = existing.id
+        )
+        return null
+    }
+
+    private fun PendingReactionEntity.isExpiredTerminal(nowMillis: Long): Boolean {
+        return when (decodedState()) {
+            PendingReactionState.ADD_ACCEPTED,
+            PendingReactionState.REMOVED -> nowMillis - updatedAtMillis >
+                TERMINAL_REACTION_OVERLAY_TTL_MS
+            PendingReactionState.FAILED -> true
+            PendingReactionState.ADD_QUEUED,
+            PendingReactionState.ADD_AFTER_REMOVE_QUEUED,
+            PendingReactionState.REMOVE_QUEUED -> false
+        }
+    }
+
+    private fun PendingReactionEntity.hasAttemptStarted(): Boolean {
+        return lastAttemptAtMillis != null || attemptCount > 0
+    }
+
+    private fun PendingReactionEntity.matchesReactionCandidate(
+        candidate: OutgoingReactionEnvelope
+    ): Boolean {
+        return when (candidate.state) {
+            PendingReactionState.ADD_QUEUED -> transactionId == candidate.transactionId &&
+                decodedState() in setOf(
+                    PendingReactionState.ADD_QUEUED,
+                    PendingReactionState.REMOVE_QUEUED
+                )
+            PendingReactionState.REMOVE_QUEUED -> {
+                val currentState = decodedState()
+                if (candidate.reactionEventId.isNullOrBlank()) {
+                    transactionId == candidate.transactionId &&
+                        currentState in setOf(
+                            PendingReactionState.ADD_QUEUED,
+                            PendingReactionState.REMOVE_QUEUED
+                        )
+                } else {
+                    redactionTransactionId == candidate.redactionTransactionId &&
+                        currentState in setOf(
+                            PendingReactionState.REMOVE_QUEUED,
+                            PendingReactionState.ADD_AFTER_REMOVE_QUEUED
+                        )
+                }
+            }
+            PendingReactionState.ADD_AFTER_REMOVE_QUEUED ->
+                redactionTransactionId == candidate.redactionTransactionId &&
+                    decodedState() in setOf(
+                        PendingReactionState.ADD_AFTER_REMOVE_QUEUED,
+                        PendingReactionState.REMOVE_QUEUED
+                    )
+            PendingReactionState.ADD_ACCEPTED,
+            PendingReactionState.REMOVED,
+            PendingReactionState.FAILED -> false
+        }
+    }
+
+    private fun PendingReactionState.isReactionOutboxState(): Boolean {
+        return this == PendingReactionState.ADD_QUEUED ||
+            this == PendingReactionState.REMOVE_QUEUED ||
+            this == PendingReactionState.ADD_AFTER_REMOVE_QUEUED
+    }
+
+    private fun List<MatrixChatMessage>.applyPendingReactions(
+        pendingReactions: List<PendingReactionEntity>,
+        currentUserId: String
+    ): List<MatrixChatMessage> {
+        if (isEmpty() || pendingReactions.isEmpty()) {
+            return this
+        }
+        val now = System.currentTimeMillis()
+        val latestByTargetAndKey = pendingReactions
+            .filter { it.targetEventId.isNotBlank() && it.reactionKey.isNotBlank() }
+            .filterNot { it.isExpiredTerminal(now) }
+            .groupBy { "${it.targetEventId}\u001F${it.reactionKey}" }
+            .mapValues { (_, records) -> records.maxBy { it.updatedAtMillis } }
+        if (latestByTargetAndKey.isEmpty()) {
+            return this
+        }
+
+        return map { message ->
+            val eventId = message.eventId ?: return@map message
+            val relevant = latestByTargetAndKey.values.filter { it.targetEventId == eventId }
+            if (relevant.isEmpty()) {
+                return@map message
+            }
+            relevant.fold(message) { current, pending ->
+                current.applyPendingReaction(pending, currentUserId)
+            }
+        }
+    }
+
+    private fun MatrixChatMessage.applyPendingReaction(
+        pendingReaction: PendingReactionEntity,
+        currentUserId: String
+    ): MatrixChatMessage {
+        return when (pendingReaction.decodedState()) {
+            PendingReactionState.ADD_QUEUED,
+            PendingReactionState.ADD_AFTER_REMOVE_QUEUED,
+            PendingReactionState.ADD_ACCEPTED -> copy(
+                reactions = reactions.upsertOwnReaction(
+                    key = pendingReaction.reactionKey,
+                    currentUserId = currentUserId,
+                    timestampMillis = pendingReaction.updatedAtMillis,
+                    isPendingRemoval = false
+                )
+            )
+            PendingReactionState.REMOVE_QUEUED,
+            PendingReactionState.REMOVED -> copy(
+                reactions = reactions.markOwnReactionPendingRemoval(pendingReaction.reactionKey)
+            )
+            PendingReactionState.FAILED -> this
+        }
+    }
+
+    private fun List<MatrixMessageReaction>.upsertOwnReaction(
+        key: String,
+        currentUserId: String,
+        timestampMillis: Long,
+        isPendingRemoval: Boolean
+    ): List<MatrixMessageReaction> {
+        val ownSender = MatrixReactionSender(
+            userId = currentUserId,
+            timestampMillis = timestampMillis
+        )
+        var didUpdate = false
+        val updated = map { reaction ->
+            if (reaction.key != key) {
+                return@map reaction
+            }
+            didUpdate = true
+            reaction.copy(
+                senders = (listOf(ownSender) + reaction.senders.filter { it.userId != currentUserId })
+                    .sortedByDescending { it.timestampMillis },
+                isOwn = true,
+                isPendingRemoval = isPendingRemoval,
+                legacyCount = null
+            )
+        }
+        val result = if (didUpdate) {
+            updated
+        } else {
+            updated + MatrixMessageReaction(
+                key = key,
+                senders = listOf(ownSender),
+                isOwn = true,
+                isPendingRemoval = isPendingRemoval
+            )
+        }
+        return result.sortedReactions()
+    }
+
+    private fun List<MatrixMessageReaction>.markOwnReactionPendingRemoval(
+        key: String
+    ): List<MatrixMessageReaction> {
+        var didUpdate = false
+        val updated = map { reaction ->
+            if (reaction.key == key && reaction.isOwn && !reaction.isPendingRemoval) {
+                didUpdate = true
+                reaction.copy(isPendingRemoval = true)
+            } else {
+                reaction
+            }
+        }
+        return if (didUpdate) updated.sortedReactions() else this
+    }
+
+    private fun List<MatrixMessageReaction>.sortedReactions(): List<MatrixMessageReaction> {
+        return filter { it.key.isNotBlank() && it.count > 0 }
+            .sortedWith(
+                compareByDescending<MatrixMessageReaction> { it.count }
+                    .thenByDescending { it.senders.firstOrNull()?.timestampMillis ?: 0L }
+                    .thenBy { it.key }
+            )
+    }
+
+    private fun List<MatrixMessageReaction>.encodeReactions(): String {
+        if (isEmpty()) {
+            return "[]"
+        }
+        return JSONArray().also { root ->
+            forEach { reaction ->
+                root.put(
+                    JSONObject()
+                        .put("key", reaction.key)
+                        .put("isOwn", reaction.isOwn)
+                        .put("legacyCount", reaction.legacyCount)
+                        .put(
+                            "senders",
+                            JSONArray().also { senders ->
+                                reaction.senders.forEach { sender ->
+                                    senders.put(
+                                        JSONObject()
+                                            .put("userId", sender.userId)
+                                            .put("timestampMillis", sender.timestampMillis)
+                                    )
+                                }
+                            }
+                        )
+                )
+            }
+        }.toString()
+    }
+
+    private fun String?.decodeReactions(): List<MatrixMessageReaction> {
+        if (isNullOrBlank()) {
+            return emptyList()
+        }
+        return runCatching {
+            val root = JSONArray(this)
+            buildList {
+                for (index in 0 until root.length()) {
+                    val item = root.optJSONObject(index) ?: continue
+                    val key = item.optString("key").takeIf { it.isNotBlank() } ?: continue
+                    val sendersJson = item.optJSONArray("senders") ?: JSONArray()
+                    val senders = buildList {
+                        for (senderIndex in 0 until sendersJson.length()) {
+                            val sender = sendersJson.optJSONObject(senderIndex) ?: continue
+                            val userId = sender.optString("userId").takeIf { it.isNotBlank() }
+                                ?: continue
+                            add(
+                                MatrixReactionSender(
+                                    userId = userId,
+                                    timestampMillis = sender.optLong("timestampMillis", 0L)
+                                )
+                            )
+                        }
+                    }
+                    add(
+                        MatrixMessageReaction(
+                            key = key,
+                            senders = senders.sortedByDescending { it.timestampMillis },
+                            isOwn = item.optBoolean("isOwn", false),
+                            legacyCount = item.optNullableInt("legacyCount")
+                        )
+                    )
+                }
+            }.sortedReactions()
+        }.getOrDefault(emptyList())
+    }
+
+    private fun JSONObject.optNullableInt(name: String): Int? {
+        return if (has(name) && !isNull(name)) optInt(name) else null
+    }
+
     private fun List<Float>?.toWaveformCacheString(): String? {
         if (isNullOrEmpty()) {
             return null
@@ -2043,5 +2761,6 @@ class LocalCacheRepository(
         const val REDACTED_MESSAGE_BODY = "Deleted message"
         const val VOICE_MESSAGE_BODY = "Voice message"
         const val WAVEFORM_CACHE_SCALE = 1000
+        const val TERMINAL_REACTION_OVERLAY_TTL_MS = 30 * 1000L
     }
 }

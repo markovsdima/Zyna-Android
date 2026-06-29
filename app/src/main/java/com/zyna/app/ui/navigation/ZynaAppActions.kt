@@ -44,6 +44,7 @@ data class ZynaAppActions(
     val onCancelEdit: () -> Unit,
     val onForwardMessage: (MatrixForwardTarget) -> Unit,
     val onCancelForward: () -> Unit,
+    val onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     val onRetryOutgoingEnvelope: (String) -> Unit,
     val onDiscardOutgoingEnvelope: (String) -> Unit,
     val onRedactMessage: (String) -> Unit,

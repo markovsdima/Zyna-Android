@@ -44,6 +44,7 @@ import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageForwardPreview
+import com.zyna.app.ui.chat.render.MessageReactionRenderModel
 import com.zyna.app.ui.chat.render.PhotoGroupLayout
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
@@ -116,6 +117,7 @@ data class ChatScreenViewActions(
     val onCancelEdit: () -> Unit,
     val onForwardMessage: (MatrixForwardTarget) -> Unit,
     val onCancelForward: () -> Unit,
+    val onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     val onRetryOutgoingEnvelope: (String) -> Unit,
     val onDiscardOutgoingEnvelope: (String) -> Unit,
     val onRedactMessage: (String) -> Unit,
@@ -363,6 +365,7 @@ internal class ChatScreenView(
             onContextMenuRequested = chatLayout::showMessageContextMenu,
             onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
             onReplyHeaderClicked = {},
+            onToggleReaction = { _, _ -> },
             onPhotoViewerRequested = {},
             onVoicePlaybackRequested = { _, _ -> }
         )
@@ -506,6 +509,7 @@ internal class ChatScreenView(
         chatLayout.onDiscardOutgoingEnvelope = actions.onDiscardOutgoingEnvelope
         chatLayout.onRedactMessage = actions.onRedactMessage
         chatLayout.onRedactMessages = actions.onRedactMessages
+        chatLayout.onToggleReaction = actions.onToggleReaction
         chatLayout.onDebugMarkOutgoingEnvelopeFailed = actions.onDebugMarkOutgoingEnvelopeFailed
         chatLayout.onEvaluateVisibleReadReceiptCandidate = {
             chatLayout.evaluateVisibleReadReceiptCandidate(state.isAtLiveEdge) { eventId, canEstablishBaseline ->
@@ -562,6 +566,7 @@ internal class ChatScreenView(
         adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
         adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
         adapter.onReplyHeaderClicked = actions.onReplyHeaderClicked
+        adapter.onToggleReaction = actions.onToggleReaction
         adapter.onPhotoViewerRequested = { request ->
             openPhotoViewer(request, state.matrixMediaLoader)
         }
@@ -1238,6 +1243,7 @@ private class ChatMessageAdapter(
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
     var onReplyHeaderClicked: (String) -> Unit,
+    var onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
     var onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit
 ) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
@@ -1280,6 +1286,7 @@ private class ChatMessageAdapter(
             onContextMenuRequested = onContextMenuRequested,
             onContextMenuGestureEvent = onContextMenuGestureEvent,
             onReplyHeaderClicked = onReplyHeaderClicked,
+            onToggleReaction = onToggleReaction,
             onPhotoViewerRequested = onPhotoViewerRequested,
             onVoicePlaybackRequested = onVoicePlaybackRequested,
             audioPlaybackSnapshot = audioPlaybackSnapshot
@@ -1300,6 +1307,10 @@ private class ChatMessageAdapter(
     ) {
         if (payloads.isNotEmpty() && payloads.all { it === AudioPlaybackPayload }) {
             holder.updateAudioPlaybackSnapshot(audioPlaybackSnapshot)
+            return
+        }
+        if (payloads.isNotEmpty() && payloads.all { it === ReactionPayload }) {
+            holder.updateReactions(getItem(position).toReactionRenderModels())
             return
         }
         super.onBindViewHolder(holder, position, payloads)
@@ -1404,6 +1415,7 @@ private class ChatMessageViewHolder(
         onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
         onReplyHeaderClicked: (String) -> Unit,
+        onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
         onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
         onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit,
         audioPlaybackSnapshot: AudioPlaybackSnapshot
@@ -1412,6 +1424,7 @@ private class ChatMessageViewHolder(
         messageView.onContextMenuRequested = onContextMenuRequested
         messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
         messageView.onReplyHeaderClicked = onReplyHeaderClicked
+        messageView.onReactionClicked = { reactionKey -> onToggleReaction(message.id, reactionKey) }
         messageView.onPhotoViewerRequested = onPhotoViewerRequested
         messageView.onVoicePlaybackRequested = onVoicePlaybackRequested
         messageView.setAudioPlaybackSnapshot(audioPlaybackSnapshot)
@@ -1421,9 +1434,14 @@ private class ChatMessageViewHolder(
     fun updateAudioPlaybackSnapshot(snapshot: AudioPlaybackSnapshot) {
         messageView.setAudioPlaybackSnapshot(snapshot)
     }
+
+    fun updateReactions(reactions: List<MessageReactionRenderModel>) {
+        messageView.updateReactions(reactions)
+    }
 }
 
 private object AudioPlaybackPayload
+private object ReactionPayload
 
 private fun VoiceRecorderState.toGlassVoiceState(
     playbackSnapshot: AudioPlaybackSnapshot
@@ -1477,8 +1495,20 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         redactionTargetMessageId = redactionTargetMessageId(),
         canForward = canForwardMessage(),
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
-        canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
+        canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope,
+        reactions = toReactionRenderModels()
     )
+}
+
+private fun MatrixChatMessage.toReactionRenderModels(): List<MessageReactionRenderModel> {
+    return reactions.map { reaction ->
+        MessageReactionRenderModel(
+            key = reaction.key,
+            count = reaction.count,
+            isOwn = reaction.isOwn,
+            isPendingRemoval = reaction.isPendingRemoval
+        )
+    }
 }
 
 private fun MatrixChatMessage.renderContent(): MessageContent {
@@ -1803,5 +1833,16 @@ private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage
 
     override fun areContentsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {
         return oldItem == newItem
+    }
+
+    override fun getChangePayload(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Any? {
+        return if (
+            oldItem.reactions != newItem.reactions &&
+            oldItem.copy(reactions = newItem.reactions) == newItem
+        ) {
+            ReactionPayload
+        } else {
+            null
+        }
     }
 }

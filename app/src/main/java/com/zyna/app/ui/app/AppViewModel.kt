@@ -834,6 +834,93 @@ class AppViewModel(
         return true
     }
 
+    fun toggleReaction(messageId: String, reactionKey: String) {
+        val state = _uiState.value
+        val route = state.activeChatRoute ?: return
+        val userId = state.matrixState.userIdOrNull() ?: return
+        val key = reactionKey.takeIf { it.isNotBlank() } ?: return
+        val message = state.chatMessages.firstOrNull { it.id == messageId } ?: return
+        val targetEventId = message.eventId?.takeIf { it.isNotBlank() } ?: return
+        if (
+            message.contentType == MatrixMessageContentType.REDACTED ||
+            message.outgoingEnvelopeId != null
+        ) {
+            return
+        }
+        val ownReaction = message.reactions.firstOrNull {
+            it.key == key && it.isOwn
+        }
+        val shouldRemove = ownReaction != null && !ownReaction.isPendingRemoval
+
+        viewModelScope.launch {
+            try {
+                if (shouldRemove) {
+                    val transactionId = matrixClientService.prepareTransactionId()
+                    var reactionId = localCacheRepository.prepareOutgoingReactionRemoval(
+                        userId = userId,
+                        roomId = route.roomId,
+                        targetEventId = targetEventId,
+                        reactionKey = key,
+                        reactionEventId = null,
+                        transactionId = transactionId
+                    )
+                    if (reactionId == null) {
+                        val reactionEventId = matrixClientService.findOwnReactionEventId(
+                            roomId = route.roomId,
+                            targetEventId = targetEventId,
+                            reactionKey = key,
+                            userId = userId
+                        )
+                        if (reactionEventId != null) {
+                            reactionId = localCacheRepository.prepareOutgoingReactionRemoval(
+                                userId = userId,
+                                roomId = route.roomId,
+                                targetEventId = targetEventId,
+                                reactionKey = key,
+                                reactionEventId = reactionEventId,
+                                transactionId = transactionId
+                            )
+                        }
+                    }
+                    if (reactionId != null) {
+                        outgoingOutboxService.kick(
+                            reason = "new-reaction-removal",
+                            envelopeId = reactionId
+                        )
+                    }
+                } else {
+                    val transactionId = matrixClientService.prepareTransactionId()
+                    val reactionId = localCacheRepository.prepareOutgoingReactionAdd(
+                        userId = userId,
+                        roomId = route.roomId,
+                        targetEventId = targetEventId,
+                        reactionKey = key,
+                        transactionId = transactionId
+                    )
+                    if (reactionId != null) {
+                        outgoingOutboxService.kick(
+                            reason = "new-reaction",
+                            envelopeId = reactionId
+                        )
+                    }
+                }
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = null)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _uiState.update {
+                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                        it
+                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
+                }
+            }
+        }
+    }
+
     fun setChatReplyTarget(replyInfo: MatrixReplyInfo) {
         val route = _uiState.value.activeChatRoute ?: return
         if (replyInfo.eventId.isBlank()) {

@@ -517,6 +517,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onCancelEdit = actions.onCancelEdit,
                         onForwardMessage = actions.onForwardMessage,
                         onCancelForward = actions.onCancelForward,
+                        onToggleReaction = actions.onToggleReaction,
                         onRetryOutgoingEnvelope = actions.onRetryOutgoingEnvelope,
                         onDiscardOutgoingEnvelope = actions.onDiscardOutgoingEnvelope,
                         onRedactMessage = actions.onRedactMessage,

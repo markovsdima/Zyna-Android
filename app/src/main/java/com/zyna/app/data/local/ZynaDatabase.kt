@@ -14,9 +14,10 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
     entities = [
         CachedRoomEntity::class,
         CachedTimelineMessageEntity::class,
-        OutgoingEnvelopeEntity::class
+        OutgoingEnvelopeEntity::class,
+        PendingReactionEntity::class
     ],
-    version = 18,
+    version = 19,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -25,6 +26,8 @@ abstract class ZynaDatabase : RoomDatabase() {
     abstract fun cachedTimelineMessageDao(): CachedTimelineMessageDao
 
     abstract fun outgoingEnvelopeDao(): OutgoingEnvelopeDao
+
+    abstract fun pendingReactionDao(): PendingReactionDao
 
     companion object {
         fun create(context: Context, passphraseStore: LocalDatabasePassphraseStore): ZynaDatabase {
@@ -63,7 +66,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_14_15,
                     MIGRATION_15_16,
                     MIGRATION_16_17,
-                    MIGRATION_17_18
+                    MIGRATION_17_18,
+                    MIGRATION_18_19
                 )
                 .build()
         }
@@ -322,6 +326,57 @@ abstract class ZynaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceWaveform TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceUploadedJson TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceUploadedAtMillis INTEGER")
+            }
+        }
+
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    ALTER TABLE timeline_messages
+                    ADD COLUMN reactionsJson TEXT NOT NULL DEFAULT '[]'
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_reactions (
+                        userId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        id TEXT NOT NULL,
+                        targetEventId TEXT NOT NULL,
+                        reactionKey TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        transactionId TEXT,
+                        reactionEventId TEXT,
+                        redactionTransactionId TEXT,
+                        redactionEventId TEXT,
+                        createdAtMillis INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        failureMessage TEXT,
+                        lastAttemptAtMillis INTEGER,
+                        attemptCount INTEGER NOT NULL,
+                        PRIMARY KEY(userId, roomId, id)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_roomId_targetEventId_reactionKey
+                    ON pending_reactions(userId, roomId, targetEventId, reactionKey)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_state_updatedAtMillis
+                    ON pending_reactions(userId, state, updatedAtMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_roomId_reactionEventId
+                    ON pending_reactions(userId, roomId, reactionEventId)
+                    """.trimIndent()
+                )
             }
         }
     }

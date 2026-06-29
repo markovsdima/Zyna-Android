@@ -60,5 +60,7 @@ data class CachedTimelineMessageEntity(
     val latestEditEventId: String?,
     val editTransactionId: String?,
     val pendingEditBody: String?,
+    @ColumnInfo(defaultValue = "[]")
+    val reactionsJson: String,
     val updatedAtMillis: Long
 )

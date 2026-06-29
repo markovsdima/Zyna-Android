@@ -30,8 +30,16 @@ internal data class MessageRenderModel(
     val canForward: Boolean = false,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
+    val reactions: List<MessageReactionRenderModel> = emptyList(),
     val attributes: MessageRenderAttributes = MessageRenderAttributes(),
     val cluster: MessageCluster = MessageCluster()
+)
+
+internal data class MessageReactionRenderModel(
+    val key: String,
+    val count: Int,
+    val isOwn: Boolean,
+    val isPendingRemoval: Boolean = false
 )
 
 internal data class MessageEditPreview(
@@ -151,7 +159,11 @@ internal fun MessageRenderModel.accessibilityText(): String {
         RenderDeliveryState.FAILED -> ", failed"
     }
     val sender = senderText.takeIf { it.isNotBlank() } ?: if (isOutgoing) "You" else "Unknown sender"
-    return "$sender$reply$forward, $body, $timestampText$state"
+    val reactionCount = reactions.sumOf { it.count }
+        .takeIf { it > 0 }
+        ?.let { ", $it reactions" }
+        .orEmpty()
+    return "$sender$reply$forward, $body, $timestampText$state$reactionCount"
 }
 
 internal val MessageRenderModel.isRedacted: Boolean

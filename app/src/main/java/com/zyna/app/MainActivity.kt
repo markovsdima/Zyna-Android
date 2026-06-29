@@ -197,6 +197,7 @@ class MainActivity : ComponentActivity() {
             onCancelEdit = appViewModel::clearChatEditTarget,
             onForwardMessage = appViewModel::startForwardMessage,
             onCancelForward = appViewModel::clearChatForwardTarget,
+            onToggleReaction = appViewModel::toggleReaction,
             onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
             onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
             onRedactMessage = appViewModel::redactMessage,

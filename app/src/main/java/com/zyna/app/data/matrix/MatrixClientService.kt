@@ -76,6 +76,8 @@ import org.matrix.rustcomponents.sdk.NotificationItem
 import org.matrix.rustcomponents.sdk.NotificationProcessSetup
 import org.matrix.rustcomponents.sdk.NotificationStatus
 import org.matrix.rustcomponents.sdk.ProfileDetails
+import org.matrix.rustcomponents.sdk.RawRoomRelationsDirection
+import org.matrix.rustcomponents.sdk.RawRoomRelationsOptions
 import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomInfo
@@ -262,6 +264,22 @@ data class MatrixMediaGroupPresentation(
     val hidesStandaloneBubble: Boolean
 )
 
+data class MatrixReactionSender(
+    val userId: String,
+    val timestampMillis: Long
+)
+
+data class MatrixMessageReaction(
+    val key: String,
+    val senders: List<MatrixReactionSender>,
+    val isOwn: Boolean,
+    val isPendingRemoval: Boolean = false,
+    val legacyCount: Int? = null
+) {
+    val count: Int
+        get() = maxOf(senders.size, legacyCount ?: 0)
+}
+
 data class MatrixChatMessage(
     /** Stable UI/cache identity: eventId, transactionId, or local outbox id. */
     val id: String,
@@ -288,6 +306,7 @@ data class MatrixChatMessage(
     val outgoingEnvelopeId: String? = null,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
+    val reactions: List<MatrixMessageReaction> = emptyList(),
     val mediaGroupPresentation: MatrixMediaGroupPresentation? = null
 ) {
     val isRemote: Boolean
@@ -1181,6 +1200,33 @@ class MatrixClientService(
         )
     }
 
+    suspend fun sendReaction(
+        roomId: String,
+        targetEventId: String,
+        reactionKey: String,
+        transactionId: String
+    ): String = withContext(Dispatchers.IO) {
+        require(targetEventId.isNotBlank()) { "Reaction target event id is empty" }
+        require(reactionKey.isNotBlank()) { "Reaction key is empty" }
+        val activeClient = client ?: error("Matrix client is not ready")
+        val room = activeClient.getRoom(roomId) ?: error("Matrix room is not available")
+        val content = JSONObject()
+            .put(
+                "m.relates_to",
+                JSONObject()
+                    .put("rel_type", "m.annotation")
+                    .put("event_id", targetEventId)
+                    .put("key", reactionKey)
+            )
+            .put(TRANSACTION_ID_CONTENT_KEY, transactionId)
+
+        room.sendRawWithTransactionIdReturningEventId(
+            eventType = "m.reaction",
+            content = content.toString(),
+            transactionId = transactionId
+        )
+    }
+
     suspend fun redactMessage(
         roomId: String,
         eventId: String,
@@ -1196,6 +1242,61 @@ class MatrixClientService(
             reason = reason,
             transactionId = transactionId
         )
+    }
+
+    suspend fun findOwnReactionEventId(
+        roomId: String,
+        targetEventId: String,
+        reactionKey: String,
+        userId: String
+    ): String? = withContext(Dispatchers.IO) {
+        if (targetEventId.isBlank() || reactionKey.isBlank() || userId.isBlank()) {
+            return@withContext null
+        }
+        val activeClient = client ?: return@withContext null
+        val room = activeClient.getRoom(roomId) ?: return@withContext null
+        var from: String? = null
+        repeat(MAX_REACTION_RELATION_PAGES) {
+            val relations = runCatching {
+                room.getEventRelations(
+                    eventId = targetEventId,
+                    options = RawRoomRelationsOptions(
+                        relationType = "m.annotation",
+                        eventType = "m.reaction",
+                        from = from,
+                        limit = 100uL,
+                        direction = RawRoomRelationsDirection.BACKWARD,
+                        recurse = false
+                    )
+                )
+            }.getOrElse { error ->
+                Log.w(TAG, "findOwnReactionEventId failed target=$targetEventId", error)
+                return@withContext null
+            }
+
+            relations.chunk
+                .asSequence()
+                .filter { event ->
+                    event.eventType == "m.reaction" &&
+                        event.sender == userId &&
+                        event.eventId?.isNotBlank() == true
+                }
+                .firstOrNull { event ->
+                    event.contentJson.isReactionFor(
+                        targetEventId = targetEventId,
+                        reactionKey = reactionKey
+                    )
+                }
+                ?.eventId
+                ?.let { return@withContext it }
+
+            val nextFrom = relations.nextBatchToken?.takeIf { it.isNotBlank() }
+            if (nextFrom == null || nextFrom == from || relations.chunk.isEmpty()) {
+                return@withContext null
+            }
+            from = nextFrom
+        }
+        null
     }
 
     suspend fun sendReadReceipt(
@@ -1341,6 +1442,7 @@ class MatrixClientService(
         val transactionId = eventOrTransactionId.transactionIdOrNull()
         val messageContent = (msgLike.kind as? MsgLikeKind.Message)?.content
         val isEdited = messageContent?.isEdited ?: false
+        val reactions = msgLike.buildReactions()
         val zynaAttributes = lazyProvider.latestJson()
             ?.zynaAttributesFromRawEvent()
             ?: messageContent?.zynaAttributes()
@@ -1361,8 +1463,38 @@ class MatrixClientService(
             replyInfo = replyInfo,
             forwardedFrom = zynaAttributes.forwardedFrom,
             zynaAttributes = zynaAttributes,
-            isEdited = isEdited
+            isEdited = isEdited,
+            reactions = reactions
         )
+    }
+
+    private fun MsgLikeContent.buildReactions(): List<MatrixMessageReaction> {
+        val currentUserId = (state.value as? MatrixClientState.LoggedIn)?.userId
+            ?: (state.value as? MatrixClientState.Syncing)?.userId
+            ?: runCatching { client?.userId() }.getOrNull()
+            ?: ""
+        return reactions
+            .map { reaction ->
+                val senders = reaction.senders
+                    .map { sender ->
+                        MatrixReactionSender(
+                            userId = sender.senderId,
+                            timestampMillis = sender.timestamp.toLong()
+                        )
+                    }
+                    .sortedByDescending { it.timestampMillis }
+                MatrixMessageReaction(
+                    key = reaction.key,
+                    senders = senders,
+                    isOwn = reaction.senders.any { it.senderId == currentUserId }
+                )
+            }
+            .filter { it.count > 0 && it.key.isNotBlank() }
+            .sortedWith(
+                compareByDescending<MatrixMessageReaction> { it.count }
+                    .thenByDescending { it.senders.firstOrNull()?.timestampMillis ?: 0L }
+                    .thenBy { it.key }
+            )
     }
 
     private fun MsgLikeContent.replyInfoOrNull(): MatrixReplyInfo? {
@@ -1940,6 +2072,17 @@ class MatrixClientService(
         }.getOrNull()
     }
 
+    private fun String.isReactionFor(targetEventId: String, reactionKey: String): Boolean {
+        return runCatching {
+            val relatesTo = JSONObject(this)
+                .optJSONObject("m.relates_to")
+                ?: return@runCatching false
+            relatesTo.optStringOrNull("rel_type") == "m.annotation" &&
+                relatesTo.optStringOrNull("event_id") == targetEventId &&
+                relatesTo.optStringOrNull("key") == reactionKey
+        }.getOrDefault(false)
+    }
+
     private fun String.isMatrixRtcCallNotificationEvent(): Boolean {
         return runCatching {
             when (JSONObject(this).optStringOrNull("type")) {
@@ -2354,6 +2497,7 @@ class MatrixClientService(
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
         const val ROOM_LIST_LIVE_PAGE_SIZE = 512
+        const val MAX_REACTION_RELATION_PAGES = 20
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
         const val DEFAULT_PUSH_NOTIFICATION_TITLE = "Zyna"

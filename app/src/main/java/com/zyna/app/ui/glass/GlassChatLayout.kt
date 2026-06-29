@@ -69,6 +69,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
     internal var onEditMessage: (MessageEditPreview) -> Unit = {}
     internal var onForwardMessage: (MessageForwardPreview) -> Unit = {}
+    var onToggleReaction: (messageId: String, reactionKey: String) -> Unit = { _, _ -> }
     var onRedactMessage: (String) -> Unit = {}
     var onRedactMessages: (List<String>) -> Unit = { messageIds ->
         messageIds.forEach { messageId -> onRedactMessage(messageId) }
@@ -228,6 +229,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
             if (handleMessageContextAction(request, action)) {
                 dismissMessageContextMenu()
             }
+        }
+        onReactionSelected = { request, reactionKey ->
+            onToggleReaction(request.message.id, reactionKey)
+            dismissMessageContextMenu()
         }
         onGlassGeometryChanged = {
             glassController.invalidateRegions()

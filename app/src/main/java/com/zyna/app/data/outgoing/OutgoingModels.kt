@@ -10,6 +10,15 @@ enum class OutgoingEnvelopeKind {
     EDIT
 }
 
+enum class PendingReactionState {
+    ADD_QUEUED,
+    ADD_ACCEPTED,
+    ADD_AFTER_REMOVE_QUEUED,
+    REMOVE_QUEUED,
+    REMOVED,
+    FAILED
+}
+
 enum class OutgoingTransportState {
     QUEUED,
     SENDING,
@@ -104,3 +113,16 @@ data class OutgoingEditEnvelope(
     val id: String
         get() = "edit:$roomId:$eventId"
 }
+
+data class OutgoingReactionEnvelope(
+    val userId: String,
+    val roomId: String,
+    val id: String,
+    val state: PendingReactionState,
+    val targetEventId: String,
+    val reactionKey: String,
+    val transactionId: String?,
+    val reactionEventId: String?,
+    val redactionTransactionId: String?,
+    val failureMessage: String?
+)

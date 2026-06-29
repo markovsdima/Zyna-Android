@@ -110,6 +110,10 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         request: MessageContextMenuRequest,
         action: MessageContextMenuAction
     ) -> Unit)? = null
+    var onReactionSelected: ((
+        request: MessageContextMenuRequest,
+        reactionKey: String
+    ) -> Unit)? = null
     var onGlassGeometryChanged: () -> Unit = {}
     var onDismissFullyHidden: () -> Unit = {}
     val selectedCellLayer: View = SelectedCellLayer(context)
@@ -475,11 +479,64 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             }
         }
 
-        actions.forEachIndexed { index, action ->
-            if (index > 0) {
+        var hasRows = false
+        if (message.canReact()) {
+            menuContainer.addView(createReactionBar(request))
+            hasRows = true
+        }
+
+        actions.forEach { action ->
+            if (hasRows) {
                 menuContainer.addView(MenuDivider(context, palette))
             }
             menuContainer.addView(createActionView(action))
+            hasRows = true
+        }
+    }
+
+    private fun createReactionBar(request: MessageContextMenuRequest): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumHeight = 44.dpToPx(density)
+            setPadding(
+                8.dpToPx(density),
+                4.dpToPx(density),
+                8.dpToPx(density),
+                4.dpToPx(density)
+            )
+            QUICK_REACTION_KEYS.forEach { reactionKey ->
+                addView(createReactionButton(request, reactionKey))
+            }
+        }
+    }
+
+    private fun createReactionButton(
+        request: MessageContextMenuRequest,
+        reactionKey: String
+    ): TextView {
+        val selectableBackground = TypedValue()
+        context.theme.resolveAttribute(
+            android.R.attr.selectableItemBackgroundBorderless,
+            selectableBackground,
+            true
+        )
+        return TextView(context).apply {
+            text = reactionKey
+            textSize = 22f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setTextColor(palette.text)
+            minWidth = 34.dpToPx(density)
+            minHeight = 34.dpToPx(density)
+            setBackgroundResource(selectableBackground.resourceId)
+            isClickable = true
+            isFocusable = true
+            isHapticFeedbackEnabled = true
+            contentDescription = "React $reactionKey"
+            setOnClickListener {
+                onReactionSelected?.invoke(request, reactionKey)
+            }
         }
     }
 
@@ -865,6 +922,14 @@ internal enum class MessageContextMenuAction(
     REMOVE_FAILED_SEND("Remove Failed Send", true),
     DEBUG_MARK_FAILED("Debug Mark Failed")
 }
+
+private fun MessageRenderModel.canReact(): Boolean {
+    return eventId != null &&
+        outgoingEnvelopeId == null &&
+        content !is MessageContent.Redacted
+}
+
+private val QUICK_REACTION_KEYS = listOf("👍", "❤️", "😂", "😮", "😢", "🔥")
 
 private fun MessageContextMenuAction.textColor(palette: GlassPalette): Int {
     return if (isDestructive) DESTRUCTIVE_TEXT_COLOR else palette.text

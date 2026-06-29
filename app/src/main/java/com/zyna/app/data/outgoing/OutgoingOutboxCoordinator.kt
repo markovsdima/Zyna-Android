@@ -168,6 +168,10 @@ class OutgoingOutboxService(
             userId = userId,
             envelopeIds = envelopeIds
         )
+        val reactionCandidates = localCacheRepository.outgoingReactionDispatchCandidates(
+            userId = userId,
+            reactionIds = envelopeIds
+        )
         val editCandidates = localCacheRepository.outgoingEditDispatchCandidates(
             userId = userId
         )
@@ -176,6 +180,7 @@ class OutgoingOutboxService(
             imageCandidates.isEmpty() &&
             voiceCandidates.isEmpty() &&
             redactionCandidates.isEmpty() &&
+            reactionCandidates.isEmpty() &&
             editCandidates.isEmpty()
         ) {
             Log.d(TAG, "outbox scan reason=$reason count=0")
@@ -187,7 +192,8 @@ class OutgoingOutboxService(
             "outbox scan reason=$reason text=${textCandidates.size} " +
                 "images=${imageCandidates.size} " +
                 "voices=${voiceCandidates.size} " +
-                "redactions=${redactionCandidates.size} edits=${editCandidates.size}"
+                "redactions=${redactionCandidates.size} " +
+                "reactions=${reactionCandidates.size} edits=${editCandidates.size}"
         )
         for (candidate in textCandidates) {
             currentCoroutineContext().ensureActive()
@@ -216,6 +222,13 @@ class OutgoingOutboxService(
                 return
             }
             sendRedactionIfEligible(candidate, reason)
+        }
+        for (candidate in reactionCandidates) {
+            currentCoroutineContext().ensureActive()
+            if (!canScan()) {
+                return
+            }
+            sendReactionIfEligible(candidate, reason)
         }
         for (candidate in editCandidates) {
             currentCoroutineContext().ensureActive()
@@ -572,6 +585,114 @@ class OutgoingOutboxService(
         }
     }
 
+    private suspend fun sendReactionIfEligible(
+        candidate: OutgoingReactionEnvelope,
+        reason: String
+    ) {
+        if (!inFlight.begin(candidate.id)) {
+            return
+        }
+
+        try {
+            when (val decision = attemptDecision(OutgoingTransportState.RETRYING, candidate.id)) {
+                AttemptDecision.Send -> Unit
+                is AttemptDecision.Wait -> {
+                    Log.d(
+                        TAG,
+                        "outbox reaction wait reason=$reason id=${candidate.id} " +
+                            "state=${candidate.state} delayMillis=${decision.delayMillis}"
+                    )
+                    scheduleWake(decision.delayMillis, reason = "delayed-$reason")
+                    return
+                }
+                AttemptDecision.Skip -> return
+            }
+
+            localCacheRepository.markOutgoingReactionAttemptStarted(candidate)
+            when (candidate.state) {
+                PendingReactionState.ADD_QUEUED -> sendReactionAdd(candidate)
+                PendingReactionState.REMOVE_QUEUED -> sendReactionRemoval(candidate)
+                PendingReactionState.ADD_AFTER_REMOVE_QUEUED -> sendReactionRemoval(candidate)
+                PendingReactionState.ADD_ACCEPTED,
+                PendingReactionState.REMOVED,
+                PendingReactionState.FAILED -> Unit
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            completeReactionFailure(candidate, error)
+        } finally {
+            inFlight.end(candidate.id)
+        }
+    }
+
+    private suspend fun sendReactionAdd(candidate: OutgoingReactionEnvelope) {
+        val transactionId = candidate.transactionId
+            ?: error("Reaction add transaction id is missing")
+        val reactionEventId = matrixClientService.sendReaction(
+            roomId = candidate.roomId,
+            targetEventId = candidate.targetEventId,
+            reactionKey = candidate.reactionKey,
+            transactionId = transactionId
+        )
+        val nextCandidate = localCacheRepository.markOutgoingReactionAddAccepted(
+            candidate = candidate,
+            reactionEventId = reactionEventId
+        )
+        if (nextCandidate != null) {
+            Log.d(
+                TAG,
+                "outbox reaction added before removal id=${candidate.id} " +
+                    "reaction=$reactionEventId key=${candidate.reactionKey}"
+            )
+            sendReactionRemoval(nextCandidate)
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        Log.d(
+            TAG,
+            "outbox reaction added id=${candidate.id} target=${candidate.targetEventId} " +
+                "reaction=$reactionEventId key=${candidate.reactionKey}"
+        )
+    }
+
+    private suspend fun sendReactionRemoval(candidate: OutgoingReactionEnvelope) {
+        if (candidate.reactionEventId.isNullOrBlank()) {
+            sendReactionAdd(candidate)
+            return
+        }
+        val reactionEventId = candidate.reactionEventId
+        val transactionId = candidate.redactionTransactionId
+            ?: error("Reaction redaction transaction id is missing")
+        val redactionEventId = matrixClientService.redactMessage(
+            roomId = candidate.roomId,
+            eventId = reactionEventId,
+            transactionId = transactionId
+        )
+        val nextCandidate = localCacheRepository.markOutgoingReactionRemovalAccepted(
+            candidate = candidate,
+            redactionEventId = redactionEventId
+        )
+        if (nextCandidate != null) {
+            Log.d(
+                TAG,
+                "outbox reaction removed before re-add id=${candidate.id} " +
+                    "reaction=$reactionEventId redaction=$redactionEventId " +
+                    "key=${candidate.reactionKey}"
+            )
+            sendReactionAdd(nextCandidate)
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        Log.d(
+            TAG,
+            "outbox reaction removed id=${candidate.id} reaction=$reactionEventId " +
+                "redaction=$redactionEventId key=${candidate.reactionKey}"
+        )
+    }
+
     private suspend fun completeFailure(candidate: OutgoingTextEnvelope, error: Throwable) {
         val failureMessage = error.message ?: error.javaClass.simpleName
         if (error.isRetryableTransportError()) {
@@ -736,6 +857,61 @@ class OutgoingOutboxService(
             )
         )
         Log.w(TAG, "outbox edit failed edit=${candidate.id}", error)
+    }
+
+    private suspend fun completeReactionFailure(
+        candidate: OutgoingReactionEnvelope,
+        error: Throwable
+    ) {
+        val failureMessage = error.message ?: error.javaClass.simpleName
+        if (
+            (
+                candidate.state == PendingReactionState.REMOVE_QUEUED ||
+                    candidate.state == PendingReactionState.ADD_AFTER_REMOVE_QUEUED
+                ) &&
+            !candidate.reactionEventId.isNullOrBlank() &&
+            error.isAlreadyRedactedError()
+        ) {
+            val nextCandidate = localCacheRepository.markOutgoingReactionRemovalAccepted(
+                candidate = candidate,
+                redactionEventId = null
+            )
+            if (nextCandidate != null) {
+                Log.d(TAG, "outbox reaction removal already resolved before re-add id=${candidate.id}")
+                sendReactionAdd(nextCandidate)
+                return
+            }
+            retryBackoff.clear(candidate.id)
+            Log.d(TAG, "outbox reaction removal already resolved id=${candidate.id}")
+            return
+        }
+
+        if (error.isRetryableTransportError()) {
+            localCacheRepository.markOutgoingReactionRetrying(
+                candidate = candidate,
+                failureMessage = failureMessage
+            )
+            val delayMillis = retryBackoff.scheduleRetry(candidate.id)
+            scheduleWake(delayMillis, reason = "retryable-reaction-failure")
+            Log.d(
+                TAG,
+                "outbox reaction retrying id=${candidate.id} delayMillis=$delayMillis"
+            )
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        localCacheRepository.markOutgoingReactionTerminalFailure(
+            candidate = candidate,
+            failureMessage = failureMessage
+        )
+        _sendFailures.tryEmit(
+            OutgoingOutboxFailure(
+                roomId = candidate.roomId,
+                message = failureMessage
+            )
+        )
+        Log.w(TAG, "outbox reaction failed id=${candidate.id}", error)
     }
 
     private fun attemptDecision(envelope: OutgoingTextEnvelope): AttemptDecision {

@@ -9,6 +9,7 @@ import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
+import com.zyna.app.ui.theme.AppThemeMode
 
 data class ZynaAppActions(
     val matrixMediaLoader: MatrixMediaLoader?,
@@ -59,9 +60,11 @@ data class ZynaAppActions(
     val onChatScrollToLiveEdgeConsumed: () -> Unit,
     val onOpenChatThemeSettings: () -> Unit,
     val onSelectChatBubbleTheme: (String) -> Unit,
+    val onSelectAppThemeMode: (AppThemeMode) -> Unit,
     val onLogout: () -> Unit
 )
 
 data class ZynaRootPreferences(
-    val chatBubbleTheme: ChatBubbleTheme
+    val chatBubbleTheme: ChatBubbleTheme,
+    val appThemeMode: AppThemeMode
 )

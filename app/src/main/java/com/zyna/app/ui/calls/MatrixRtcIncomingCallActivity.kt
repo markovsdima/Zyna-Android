@@ -12,8 +12,8 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -27,7 +27,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
-class MatrixRtcIncomingCallActivity : ComponentActivity() {
+class MatrixRtcIncomingCallActivity : AppCompatActivity() {
     private var call: MatrixRtcIncomingCall? = null
     private var pendingAnswerCall: MatrixRtcIncomingCall? = null
     private var callController: NativeMatrixRtcCallController? = null

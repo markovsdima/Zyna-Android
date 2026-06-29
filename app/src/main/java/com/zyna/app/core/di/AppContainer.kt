@@ -19,8 +19,12 @@ import com.zyna.app.data.push.MatrixPushRegistrar
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import com.zyna.app.ui.chat.theme.ChatBubbleThemeStore
+import com.zyna.app.ui.theme.AppThemeStore
 
-class AppContainer(context: Context) {
+class AppContainer(
+    context: Context,
+    val appThemeStore: AppThemeStore
+) {
     private val appContext = context.applicationContext
 
     val chatBubbleThemeStore = ChatBubbleThemeStore(appContext)

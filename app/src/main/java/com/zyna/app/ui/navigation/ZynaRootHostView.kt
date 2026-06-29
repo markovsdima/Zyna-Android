@@ -386,10 +386,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 (view as SettingsScreenView).render(
                     state = SettingsScreenViewState(
                         selectedChatThemeTitle = preferences.chatBubbleTheme.title,
+                        selectedAppThemeMode = preferences.appThemeMode,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = SettingsScreenViewActions(
                         onOpenChatTheme = actions.onOpenChatThemeSettings,
+                        onSelectAppThemeMode = actions.onSelectAppThemeMode,
                         onLogout = actions.onLogout
                     )
                 )

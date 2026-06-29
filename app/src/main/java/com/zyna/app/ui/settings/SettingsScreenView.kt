@@ -1,6 +1,5 @@
 package com.zyna.app.ui.settings
 
-import android.app.AlertDialog
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Typeface
@@ -11,18 +10,22 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.ui.theme.AppThemeMode
 import kotlin.math.roundToInt
 
 internal data class SettingsScreenViewState(
     val selectedChatThemeTitle: String,
+    val selectedAppThemeMode: AppThemeMode,
     val bottomContentPaddingPx: Int
 )
 
 internal data class SettingsScreenViewActions(
     val onOpenChatTheme: () -> Unit,
+    val onSelectAppThemeMode: (AppThemeMode) -> Unit,
     val onLogout: () -> Unit
 )
 
@@ -32,6 +35,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     private var statusTopInset = 0
     private var bottomContentPaddingPx = 0
     private var logoutDialog: AlertDialog? = null
+    private var appThemeDialog: AlertDialog? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -57,6 +61,11 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         updatePadding(left = dp(16), right = dp(16), top = dp(18))
     }
     private val appearanceHeader = sectionHeader("Appearance")
+    private val appThemeRow = SettingsRowView(context).apply {
+        title = "App Theme"
+        isClickable = true
+        isFocusable = true
+    }
     private val chatThemeRow = SettingsRowView(context).apply {
         title = "Chat Theme"
         isClickable = true
@@ -110,6 +119,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         content.addView(appearanceHeader)
+        content.addView(appThemeRow, rowLayoutParams())
         content.addView(chatThemeRow, rowLayoutParams())
         content.addView(accountHeader)
         content.addView(logoutRow, rowLayoutParams())
@@ -131,6 +141,8 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     }
 
     override fun onDetachedFromWindow() {
+        appThemeDialog?.dismiss()
+        appThemeDialog = null
         logoutDialog?.dismiss()
         logoutDialog = null
         super.onDetachedFromWindow()
@@ -145,6 +157,13 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     fun render(state: SettingsScreenViewState, actions: SettingsScreenViewActions) {
         bottomContentPaddingPx = state.bottomContentPaddingPx
         updateContentPadding()
+        appThemeRow.detail = state.selectedAppThemeMode.title
+        appThemeRow.setOnClickListener {
+            showAppThemePicker(
+                selectedMode = state.selectedAppThemeMode,
+                onSelectMode = actions.onSelectAppThemeMode
+            )
+        }
         chatThemeRow.detail = state.selectedChatThemeTitle
         chatThemeRow.setOnClickListener { actions.onOpenChatTheme() }
         logoutRow.detail = null
@@ -160,6 +179,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         content.setBackgroundColor(palette.background)
         appearanceHeader.setTextColor(palette.secondaryText)
         accountHeader.setTextColor(palette.secondaryText)
+        appThemeRow.setPalette(palette)
         chatThemeRow.setPalette(palette)
         logoutRow.setPalette(palette)
     }
@@ -190,6 +210,35 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
 
     private fun updateContentPadding() {
         scrollView.updatePadding(bottom = bottomContentPaddingPx + dp(16))
+    }
+
+    private fun showAppThemePicker(
+        selectedMode: AppThemeMode,
+        onSelectMode: (AppThemeMode) -> Unit
+    ) {
+        val existingDialog = appThemeDialog
+        if (existingDialog?.isShowing == true) {
+            return
+        }
+        val modes = AppThemeMode.entries.toTypedArray()
+        val labels = modes.map { it.title }.toTypedArray()
+        val selectedIndex = modes.indexOf(selectedMode).coerceAtLeast(0)
+        appThemeDialog = AlertDialog.Builder(context)
+            .setTitle("App Theme")
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                modes.getOrNull(which)?.let(onSelectMode)
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+            .also { dialog ->
+                dialog.setOnDismissListener {
+                    if (appThemeDialog === dialog) {
+                        appThemeDialog = null
+                    }
+                }
+                dialog.show()
+            }
     }
 
     private fun showLogoutConfirmation(onLogout: () -> Unit) {

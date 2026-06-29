@@ -15,7 +15,6 @@ import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.MimeTypeMap
 import android.widget.EditText
-import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
@@ -24,6 +23,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.content.ContextCompat
+import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
@@ -59,7 +59,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class MainActivity : ComponentActivity() {
+class MainActivity : AppCompatActivity() {
     private enum class RecordAudioPermissionRequest {
         VOICE_RECORDING,
         NATIVE_MATRIX_RTC_CALL
@@ -208,6 +208,7 @@ class MainActivity : ComponentActivity() {
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
             onOpenChatThemeSettings = appViewModel::openChatThemeSettings,
             onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
+            onSelectAppThemeMode = appContainer.appThemeStore::setSelectedMode,
             onLogout = {
                 dismissNativeMatrixRtcCall()
                 pendingNativeMatrixRtcCall = null
@@ -243,9 +244,13 @@ class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(
                     appViewModel.uiState,
-                    appContainer.chatBubbleThemeStore.selectedTheme
-                ) { state, chatBubbleTheme ->
-                    state to ZynaRootPreferences(chatBubbleTheme = chatBubbleTheme)
+                    appContainer.chatBubbleThemeStore.selectedTheme,
+                    appContainer.appThemeStore.selectedMode
+                ) { state, chatBubbleTheme, appThemeMode ->
+                    state to ZynaRootPreferences(
+                        chatBubbleTheme = chatBubbleTheme,
+                        appThemeMode = appThemeMode
+                    )
                 }.collect { (state, preferences) ->
                     val collectStart = ZynaPerfLog.start()
                     ZynaPerfLog.mark {

@@ -22,6 +22,12 @@ import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
+import com.zyna.app.ui.profile.EditProfileScreenView
+import com.zyna.app.ui.profile.EditProfileScreenViewActions
+import com.zyna.app.ui.profile.EditProfileScreenViewState
+import com.zyna.app.ui.profile.ProfileScreenView
+import com.zyna.app.ui.profile.ProfileScreenViewActions
+import com.zyna.app.ui.profile.ProfileScreenViewState
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
@@ -264,6 +270,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     onBack = { actions.onNavigateBack() },
                     withBottomPadding = false
                 )
+                AppRoute.Profile -> profileEntry(state, actions)
+                AppRoute.EditProfile -> editProfileEntry(state, actions)
                 AppRoute.Settings -> settingsEntry(actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
@@ -375,6 +383,56 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
     }
 
+    private fun profileEntry(
+        state: AppUiState,
+        actions: ZynaAppActions
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "profile:root",
+            createView = { context -> ProfileScreenView(context) },
+            updateView = { view ->
+                (view as ProfileScreenView).render(
+                    state = ProfileScreenViewState(
+                        profile = state.ownProfile,
+                        matrixMediaLoader = actions.matrixMediaLoader,
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                    ),
+                    actions = ProfileScreenViewActions(
+                        onEditProfile = actions.onOpenEditProfile,
+                        onOpenSettings = actions.onOpenProfileSettings,
+                        onRefreshProfile = actions.onRefreshOwnProfile
+                    )
+                )
+            }
+        )
+    }
+
+    private fun editProfileEntry(
+        state: AppUiState,
+        actions: ZynaAppActions
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "profile:edit",
+            createView = { context -> EditProfileScreenView(context) },
+            updateView = { view ->
+                (view as EditProfileScreenView).render(
+                    state = EditProfileScreenViewState(
+                        profile = state.ownProfile,
+                        matrixMediaLoader = actions.matrixMediaLoader,
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                    ),
+                    actions = EditProfileScreenViewActions(
+                        onBack = { actions.onNavigateBack() },
+                        onDisplayNameChanged = actions.onOwnProfileDisplayNameChanged,
+                        onPickAvatar = actions.onPickOwnProfileAvatar,
+                        onRemoveAvatar = actions.onRemoveOwnProfileAvatar,
+                        onSave = actions.onSaveOwnProfile
+                    )
+                )
+            }
+        )
+    }
+
     private fun settingsEntry(
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
@@ -390,6 +448,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = SettingsScreenViewActions(
+                        onBack = { actions.onNavigateBack() },
                         onOpenChatTheme = actions.onOpenChatThemeSettings,
                         onSelectAppThemeMode = actions.onSelectAppThemeMode,
                         onLogout = actions.onLogout
@@ -734,6 +793,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             AppRoute.Contacts -> "Contacts"
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
+            AppRoute.EditProfile -> "EditProfile"
+            AppRoute.Profile -> "Profile"
             is AppRoute.RecoveryKey -> "RecoveryKey"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"

@@ -56,7 +56,10 @@ class AppNavStateTest {
 
         assertEquals(state, nextState)
         assertEquals(AppTab.PROFILE, nextState.selectedTab)
-        assertEquals(listOf(AppRoute.Settings, AppRoute.ChatThemeSettings), nextState.visibleStack)
+        assertEquals(
+            listOf(AppRoute.Profile, AppRoute.Settings, AppRoute.ChatThemeSettings),
+            nextState.visibleStack
+        )
     }
 
     @Test
@@ -87,12 +90,18 @@ class AppNavStateTest {
 
         assertEquals(AppTab.CHATS, state.selectedTab)
         assertEquals(listOf(AppRoute.Rooms), state.visibleStack)
-        assertEquals(listOf(AppRoute.Settings, AppRoute.ChatThemeSettings), state.profileStack)
+        assertEquals(
+            listOf(AppRoute.Profile, AppRoute.Settings, AppRoute.ChatThemeSettings),
+            state.profileStack
+        )
 
         val profileState = state.selectTab(AppTab.PROFILE)
 
         assertEquals(AppTab.PROFILE, profileState.selectedTab)
-        assertEquals(listOf(AppRoute.Settings, AppRoute.ChatThemeSettings), profileState.visibleStack)
+        assertEquals(
+            listOf(AppRoute.Profile, AppRoute.Settings, AppRoute.ChatThemeSettings),
+            profileState.visibleStack
+        )
     }
 
     @Test
@@ -104,8 +113,8 @@ class AppNavStateTest {
         val nextState = state.selectTab(AppTab.PROFILE)
 
         assertEquals(AppTab.PROFILE, nextState.selectedTab)
-        assertEquals(listOf(AppRoute.Settings), nextState.profileStack)
-        assertEquals(listOf(AppRoute.Settings), nextState.visibleStack)
+        assertEquals(listOf(AppRoute.Profile), nextState.profileStack)
+        assertEquals(listOf(AppRoute.Profile), nextState.visibleStack)
     }
 
     @Test
@@ -232,14 +241,51 @@ class AppNavStateTest {
             .openChatThemeSettings()
 
         assertEquals(AppTab.PROFILE, state.selectedTab)
-        assertEquals(listOf(AppRoute.Settings, AppRoute.ChatThemeSettings), state.visibleStack)
+        assertEquals(
+            listOf(AppRoute.Profile, AppRoute.Settings, AppRoute.ChatThemeSettings),
+            state.visibleStack
+        )
         assertTrue(state.showsTabs)
 
         val nextState = state.popActiveStack()
 
         requireNotNull(nextState)
         assertEquals(AppTab.PROFILE, nextState.selectedTab)
-        assertEquals(listOf(AppRoute.Settings), nextState.visibleStack)
+        assertEquals(listOf(AppRoute.Profile, AppRoute.Settings), nextState.visibleStack)
+    }
+
+    @Test
+    fun editProfilePushesAndPopsOnProfileStack() {
+        val state = AppNavState()
+            .enterMain()
+            .openEditProfile()
+
+        assertEquals(AppTab.PROFILE, state.selectedTab)
+        assertEquals(listOf(AppRoute.Profile, AppRoute.EditProfile), state.visibleStack)
+        assertTrue(state.showsTabs)
+
+        val nextState = state.popActiveStack()
+
+        requireNotNull(nextState)
+        assertEquals(AppTab.PROFILE, nextState.selectedTab)
+        assertEquals(listOf(AppRoute.Profile), nextState.visibleStack)
+    }
+
+    @Test
+    fun closeEditProfileClosesProfileStackEvenWhenAnotherTabIsSelected() {
+        val state = AppNavState()
+            .enterMain()
+            .openEditProfile()
+            .selectTab(AppTab.CHATS)
+
+        assertEquals(AppTab.CHATS, state.selectedTab)
+        assertEquals(listOf(AppRoute.Profile, AppRoute.EditProfile), state.profileStack)
+
+        val nextState = state.closeEditProfile()
+
+        assertEquals(AppTab.CHATS, nextState.selectedTab)
+        assertEquals(listOf(AppRoute.Profile), nextState.profileStack)
+        assertEquals(listOf(AppRoute.Rooms), nextState.visibleStack)
     }
 
     @Test

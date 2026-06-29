@@ -33,6 +33,7 @@ import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingOutboxDebugHooks
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
+import com.zyna.app.data.profile.ProfileAvatarPreprocessor
 import com.zyna.app.data.media.VoiceRecorderState
 import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.ui.app.AppRoute
@@ -70,10 +71,16 @@ class MainActivity : AppCompatActivity() {
         NATIVE_MATRIX_RTC_CALL
     }
 
+    private data class ProfileAvatarPickRequest(
+        val editSessionId: Long,
+        val generation: Long
+    )
+
     private val appContainer by lazy { (application as ZynaApplication).appContainer }
     private lateinit var appViewModel: AppViewModel
     private lateinit var rootHost: ZynaRootHostView
     private lateinit var photoPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>
+    private lateinit var profileAvatarPickerLauncher: ActivityResultLauncher<PickVisualMediaRequest>
     private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var recordAudioPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
@@ -87,6 +94,8 @@ class MainActivity : AppCompatActivity() {
     private var sendVoiceAfterFinish: Boolean = false
     private var pendingRecordAudioPermissionRequest: RecordAudioPermissionRequest? = null
     private var pendingNativeMatrixRtcCall: NativeMatrixRtcCallLaunchContext? = null
+    private var pendingProfileAvatarPickRequest: ProfileAvatarPickRequest? = null
+    private var profileAvatarPickGeneration: Long = 0L
     private var rootOverlayOwner: RootOverlayOwner? = null
     private var nativeMatrixRtcCallController: NativeMatrixRtcCallController? = null
     private var nativeMatrixRtcCallRenderJob: Job? = null
@@ -110,11 +119,21 @@ class MainActivity : AppCompatActivity() {
                 nativeMatrixRtcCallService = appContainer.nativeMatrixRtcCallService
             )
         )[AppViewModel::class.java]
+        cleanupProfileAvatarTempFiles(
+            excludedPath = appViewModel.uiState.value.ownProfile.editAvatarLocalPath
+        )
 
         photoPickerLauncher = registerForActivityResult(
             ActivityResultContracts.PickMultipleVisualMedia(10)
         ) { uris ->
             handlePickedPhotos(uris)
+        }
+        profileAvatarPickerLauncher = registerForActivityResult(
+            ActivityResultContracts.PickVisualMedia()
+        ) { uri ->
+            val request = pendingProfileAvatarPickRequest
+            pendingProfileAvatarPickRequest = null
+            handlePickedProfileAvatar(uri, request)
         }
         notificationPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
@@ -206,6 +225,13 @@ class MainActivity : AppCompatActivity() {
             onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
             onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
             onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
+            onOpenProfileSettings = appViewModel::openProfileSettings,
+            onOpenEditProfile = appViewModel::openEditProfile,
+            onRefreshOwnProfile = appViewModel::refreshOwnProfile,
+            onOwnProfileDisplayNameChanged = appViewModel::setOwnProfileDisplayNameDraft,
+            onPickOwnProfileAvatar = ::launchProfileAvatarPicker,
+            onRemoveOwnProfileAvatar = ::removeOwnProfileAvatarDraft,
+            onSaveOwnProfile = appViewModel::saveOwnProfile,
             onOpenChatThemeSettings = appViewModel::openChatThemeSettings,
             onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
             onSelectAppThemeMode = appContainer.appThemeStore::setSelectedMode,
@@ -290,6 +316,22 @@ class MainActivity : AppCompatActivity() {
         photoPickerLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
         )
+    }
+
+    private fun launchProfileAvatarPicker(editSessionId: Long) {
+        profileAvatarPickGeneration += 1
+        pendingProfileAvatarPickRequest = ProfileAvatarPickRequest(
+            editSessionId = editSessionId,
+            generation = profileAvatarPickGeneration
+        )
+        profileAvatarPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    private fun removeOwnProfileAvatarDraft() {
+        profileAvatarPickGeneration += 1
+        appViewModel.removeOwnProfileAvatarDraft()
     }
 
     private fun requestNotificationPermissionIfNeeded(state: AppUiState) {
@@ -668,6 +710,55 @@ class MainActivity : AppCompatActivity() {
         rootHost.showOverlay(editorView)
     }
 
+    private fun handlePickedProfileAvatar(uri: Uri?, request: ProfileAvatarPickRequest?) {
+        if (uri == null || request == null) {
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val draft = withContext(Dispatchers.IO) {
+                    ProfileAvatarPreprocessor.process(
+                        contentResolver = contentResolver,
+                        uri = uri,
+                        outputDir = File(filesDir, PROFILE_AVATAR_DIRECTORY)
+                    )
+                }
+                if (request.generation != profileAvatarPickGeneration) {
+                    runCatching { File(draft.localPath).delete() }
+                    return@launch
+                }
+                appViewModel.setOwnProfileAvatarDraft(
+                    draft = draft,
+                    editSessionId = request.editSessionId
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (request.generation != profileAvatarPickGeneration) {
+                    return@launch
+                }
+                appViewModel.setOwnProfileEditError(
+                    message = error.message ?: error.javaClass.simpleName,
+                    editSessionId = request.editSessionId
+                )
+            }
+        }
+    }
+
+    private fun cleanupProfileAvatarTempFiles(excludedPath: String?) {
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                File(filesDir, PROFILE_AVATAR_DIRECTORY)
+                    .listFiles()
+                    ?.forEach { file ->
+                        if (file.absolutePath != excludedPath) {
+                            runCatching { file.delete() }
+                        }
+                    }
+            }
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -864,6 +955,7 @@ class MainActivity : AppCompatActivity() {
 
 private const val NOTIFICATION_PERMISSION_PREFERENCES = "zyna_notification_permission"
 private const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
+private const val PROFILE_AVATAR_DIRECTORY = "profile_avatars"
 
 private fun MotionEvent.isInsideView(view: View): Boolean {
     val bounds = Rect()
@@ -877,6 +969,8 @@ private fun AppRoute.perfName(): String {
         AppRoute.Contacts -> "Contacts"
         AppRoute.ForwardPicker -> "ForwardPicker"
         AppRoute.Login -> "Login"
+        AppRoute.EditProfile -> "EditProfile"
+        AppRoute.Profile -> "Profile"
         is AppRoute.RecoveryKey -> "RecoveryKey"
         is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
         AppRoute.Rooms -> "Rooms"

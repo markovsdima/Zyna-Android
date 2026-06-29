@@ -24,6 +24,7 @@ internal data class SettingsScreenViewState(
 )
 
 internal data class SettingsScreenViewActions(
+    val onBack: () -> Unit,
     val onOpenChatTheme: () -> Unit,
     val onSelectAppThemeMode: (AppThemeMode) -> Unit,
     val onLogout: () -> Unit
@@ -43,6 +44,15 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     private val topBar = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
+    }
+    private val backButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = "Back"
+        textSize = 16f
+        includeFontPadding = true
+        isClickable = true
+        isFocusable = true
+        updatePadding(left = dp(20), right = dp(12))
     }
     private val titleText = TextView(context).apply {
         gravity = Gravity.CENTER_VERTICAL
@@ -93,6 +103,13 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(TOP_BAR_HEIGHT_DP)
+            )
+        )
+        topBar.addView(
+            backButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
         topBar.addView(
@@ -157,6 +174,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     fun render(state: SettingsScreenViewState, actions: SettingsScreenViewActions) {
         bottomContentPaddingPx = state.bottomContentPaddingPx
         updateContentPadding()
+        backButton.setOnClickListener { actions.onBack() }
         appThemeRow.detail = state.selectedAppThemeMode.title
         appThemeRow.setOnClickListener {
             showAppThemePicker(
@@ -174,6 +192,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         setBackgroundColor(palette.background)
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
+        backButton.setTextColor(palette.actionText)
         titleText.setTextColor(palette.titleText)
         scrollView.setBackgroundColor(palette.background)
         content.setBackgroundColor(palette.background)

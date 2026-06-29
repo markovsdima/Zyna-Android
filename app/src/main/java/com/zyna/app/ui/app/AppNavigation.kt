@@ -20,6 +20,8 @@ sealed interface AppRoute {
     data object Calls : AppRoute
     data object Rooms : AppRoute
     data object ForwardPicker : AppRoute
+    data object Profile : AppRoute
+    data object EditProfile : AppRoute
     data object Settings : AppRoute
     data object ChatThemeSettings : AppRoute
     data class RoomDetails(
@@ -37,7 +39,7 @@ data class AppNavState(
     val contactsStack: List<AppRoute> = listOf(AppRoute.Contacts),
     val callsStack: List<AppRoute> = listOf(AppRoute.Calls),
     val chatsStack: List<AppRoute> = listOf(AppRoute.Rooms),
-    val profileStack: List<AppRoute> = listOf(AppRoute.Settings)
+    val profileStack: List<AppRoute> = listOf(AppRoute.Profile)
 ) {
     val visibleStack: List<AppRoute>
         get() = when (val currentMode = mode) {
@@ -150,11 +152,34 @@ data class AppNavState(
         return copy(chatsStack = chatsStack + AppRoute.RoomDetails(chatRoute.roomId))
     }
 
+    fun openProfileSettings(): AppNavState {
+        return copy(
+            mode = AppNavMode.Main,
+            selectedTab = AppTab.PROFILE,
+            profileStack = listOf(AppRoute.Profile, AppRoute.Settings)
+        )
+    }
+
+    fun openEditProfile(): AppNavState {
+        return copy(
+            mode = AppNavMode.Main,
+            selectedTab = AppTab.PROFILE,
+            profileStack = listOf(AppRoute.Profile, AppRoute.EditProfile)
+        )
+    }
+
+    fun closeEditProfile(): AppNavState {
+        if (profileStack.lastOrNull() != AppRoute.EditProfile) {
+            return this
+        }
+        return copy(profileStack = profileStack.dropLast(1).ifEmpty { listOf(AppRoute.Profile) })
+    }
+
     fun openChatThemeSettings(): AppNavState {
         return copy(
             mode = AppNavMode.Main,
             selectedTab = AppTab.PROFILE,
-            profileStack = listOf(AppRoute.Settings, AppRoute.ChatThemeSettings)
+            profileStack = listOf(AppRoute.Profile, AppRoute.Settings, AppRoute.ChatThemeSettings)
         )
     }
 
@@ -183,7 +208,7 @@ data class AppNavState(
             AppTab.CONTACTS -> contactsStack.ifEmpty { listOf(AppRoute.Contacts) }
             AppTab.CALLS -> callsStack.ifEmpty { listOf(AppRoute.Calls) }
             AppTab.CHATS -> chatsStack.ifEmpty { listOf(AppRoute.Rooms) }
-            AppTab.PROFILE -> profileStack.ifEmpty { listOf(AppRoute.Settings) }
+            AppTab.PROFILE -> profileStack.ifEmpty { listOf(AppRoute.Profile) }
         }
     }
 
@@ -192,7 +217,7 @@ data class AppNavState(
             AppTab.CONTACTS -> copy(contactsStack = listOf(AppRoute.Contacts))
             AppTab.CALLS -> copy(callsStack = listOf(AppRoute.Calls))
             AppTab.CHATS -> copy(chatsStack = listOf(AppRoute.Rooms))
-            AppTab.PROFILE -> copy(profileStack = listOf(AppRoute.Settings))
+            AppTab.PROFILE -> copy(profileStack = listOf(AppRoute.Profile))
         }
     }
 

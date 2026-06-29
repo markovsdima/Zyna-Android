@@ -123,6 +123,12 @@ sealed interface MatrixClientState {
     data class Error(val message: String) : MatrixClientState
 }
 
+data class MatrixOwnProfile(
+    val userId: String,
+    val displayName: String?,
+    val avatarUrl: String?
+)
+
 data class MatrixRoomSummary(
     val id: String,
     val displayName: String,
@@ -473,6 +479,38 @@ class MatrixClientService(
 
     fun isRecoveryComplete(userId: String): Boolean {
         return sessionStore.isRecoveryComplete(userId)
+    }
+
+    suspend fun loadOwnProfile(): MatrixOwnProfile = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        MatrixOwnProfile(
+            userId = activeClient.userId(),
+            displayName = activeClient.displayName()?.takeIf { it.isNotBlank() },
+            avatarUrl = activeClient.avatarUrl()?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    suspend fun setOwnDisplayName(displayName: String) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.setDisplayName(displayName)
+    }
+
+    suspend fun uploadOwnAvatar(
+        localPath: String,
+        mimeType: String
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val avatarFile = File(localPath)
+        require(avatarFile.isFile) { "Avatar file is not available" }
+        activeClient.uploadAvatar(
+            mimeType.ifBlank { "image/jpeg" },
+            avatarFile.readBytes()
+        )
+    }
+
+    suspend fun removeOwnAvatar() = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.removeAvatar()
     }
 
     suspend fun registerPushPusherIfAvailable() {

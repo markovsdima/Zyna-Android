@@ -20,6 +20,7 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixIncomingRtcCallNotification
+import com.zyna.app.data.matrix.MatrixOwnProfile
 import com.zyna.app.data.matrix.MatrixRoomCallInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.messaging.CaptionMode
@@ -29,8 +30,10 @@ import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
+import com.zyna.app.data.profile.ProfileAvatarDraft
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.util.ZynaPerfLog
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -46,9 +49,39 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+enum class OwnProfileAvatarChange {
+    KEEP,
+    REPLACE,
+    REMOVE
+}
+
+data class OwnProfileUiState(
+    val userId: String = "",
+    val displayName: String? = null,
+    val avatarUrl: String? = null,
+    val isLoading: Boolean = false,
+    val isSaving: Boolean = false,
+    val errorMessage: String? = null,
+    val editDisplayName: String = "",
+    val editAvatarLocalPath: String? = null,
+    val editAvatarMimeType: String = "image/jpeg",
+    val editAvatarChange: OwnProfileAvatarChange = OwnProfileAvatarChange.KEEP,
+    val editSessionId: Long = 0L
+) {
+    val effectiveDisplayName: String
+        get() = displayName?.takeIf { it.isNotBlank() } ?: userId
+
+    val hasAvatar: Boolean
+        get() = editAvatarChange != OwnProfileAvatarChange.REMOVE &&
+            (avatarUrl?.isNotBlank() == true ||
+            (editAvatarChange == OwnProfileAvatarChange.REPLACE && editAvatarLocalPath != null)
+            )
+}
+
 data class AppUiState(
     val navState: AppNavState = AppNavState(),
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
+    val ownProfile: OwnProfileUiState = OwnProfileUiState(),
     val rooms: List<MatrixRoomSummary> = emptyList(),
     val isRefreshingRooms: Boolean = false,
     val isRecovering: Boolean = false,
@@ -147,6 +180,10 @@ class AppViewModel(
     private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
     private var roomListLiveUserId: String? = null
+    private var ownProfileLoadJob: Job? = null
+    private var ownProfileUserId: String? = null
+    private var ownProfileLoadGeneration = 0L
+    private var ownProfileEditSessionCounter = 0L
     private var readReceiptJob: Job? = null
     private var readReceiptBaselineTarget: VisibleReadReceiptTarget? = null
     private var pendingReadReceiptSend: PendingReadReceiptSend? = null
@@ -179,6 +216,7 @@ class AppViewModel(
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     stopRoomCache()
                     stopRoomListLiveRefresh()
+                    stopOwnProfileLoad(clearState = true)
                 }
 
                 _uiState.update { current ->
@@ -194,6 +232,13 @@ class AppViewModel(
                     current.copy(
                         matrixState = matrixState,
                         navState = nextNavState,
+                        ownProfile = when {
+                            shouldClearSessionData -> OwnProfileUiState()
+                            current.ownProfile.userId.isBlank() -> {
+                                current.ownProfile.copy(userId = nextUserId.orEmpty())
+                            }
+                            else -> current.ownProfile
+                        },
                         rooms = if (shouldClearSessionData) {
                             emptyList()
                         } else {
@@ -254,6 +299,7 @@ class AppViewModel(
 
                 if (nextUserId != null) {
                     startRoomCache(nextUserId)
+                    startOwnProfileLoad(nextUserId)
                 }
 
                 if (matrixState is MatrixClientState.Syncing) {
@@ -486,8 +532,32 @@ class AppViewModel(
     }
 
     fun selectTab(tab: AppTab) {
+        val state = _uiState.value
+        if (state.route == AppRoute.EditProfile && state.ownProfile.isSaving) {
+            return
+        }
+        var draftPathToDelete: String? = null
         _uiState.update { current ->
-            current.copy(navState = current.navState.selectTab(tab))
+            val isClosingEditProfile = current.route == AppRoute.EditProfile
+            val nextProfile = if (isClosingEditProfile) {
+                draftPathToDelete = current.ownProfile.editAvatarLocalPath
+                current.ownProfile.clearedEditState()
+            } else {
+                current.ownProfile
+            }
+            val nextNavState = if (isClosingEditProfile) {
+                current.navState.closeEditProfile()
+            } else {
+                current.navState
+            }
+            current.copy(
+                navState = nextNavState.selectTab(tab),
+                ownProfile = nextProfile
+            )
+        }
+        deleteProfileAvatarDraft(draftPathToDelete)
+        if (tab == AppTab.PROFILE) {
+            _uiState.value.matrixState.userIdOrNull()?.let(::startOwnProfileLoad)
         }
     }
 
@@ -502,18 +572,15 @@ class AppViewModel(
                 cancelForwardPicker()
                 true
             }
-            else -> {
-                var didNavigate = false
-                _uiState.update { current ->
-                    val nextNavState = current.navState.popActiveStack()
-                    if (nextNavState == null) {
-                        current
-                    } else {
-                        didNavigate = true
-                        current.copy(navState = nextNavState)
-                    }
+            AppRoute.EditProfile -> {
+                if (_uiState.value.ownProfile.isSaving) {
+                    return true
                 }
-                didNavigate
+                cancelOwnProfileEdit()
+                popActiveStack()
+            }
+            else -> {
+                popActiveStack()
             }
         }
     }
@@ -524,9 +591,337 @@ class AppViewModel(
         }
     }
 
+    fun openProfileSettings() {
+        _uiState.update { current ->
+            current.copy(navState = current.navState.openProfileSettings())
+        }
+    }
+
+    fun openEditProfile() {
+        ownProfileLoadJob?.cancel()
+        ownProfileLoadJob = null
+        ownProfileLoadGeneration += 1
+        ownProfileUserId = null
+        val previousDraftPath = _uiState.value.ownProfile.editAvatarLocalPath
+        val editSessionId = nextOwnProfileEditSessionId()
+        _uiState.update { current ->
+            val profile = current.ownProfile
+            current.copy(
+                navState = current.navState.openEditProfile(),
+                ownProfile = profile.copy(
+                    editDisplayName = profile.displayName.orEmpty(),
+                    editAvatarLocalPath = null,
+                    editAvatarMimeType = "image/jpeg",
+                    editAvatarChange = OwnProfileAvatarChange.KEEP,
+                    editSessionId = editSessionId,
+                    isLoading = false,
+                    errorMessage = null
+                )
+            )
+        }
+        deleteProfileAvatarDraft(previousDraftPath)
+    }
+
     fun openChatThemeSettings() {
         _uiState.update { current ->
             current.copy(navState = current.navState.openChatThemeSettings())
+        }
+    }
+
+    fun refreshOwnProfile() {
+        _uiState.value.matrixState.userIdOrNull()?.let { userId ->
+            startOwnProfileLoad(userId = userId, force = true)
+        }
+    }
+
+    fun setOwnProfileDisplayNameDraft(displayName: String) {
+        _uiState.update { current ->
+            current.copy(
+                ownProfile = current.ownProfile.copy(
+                    editDisplayName = displayName,
+                    errorMessage = null
+                )
+            )
+        }
+    }
+
+    fun setOwnProfileAvatarDraft(draft: ProfileAvatarDraft, editSessionId: Long) {
+        val state = _uiState.value
+        if (
+            state.route != AppRoute.EditProfile ||
+            state.ownProfile.editSessionId != editSessionId ||
+            state.ownProfile.isSaving
+        ) {
+            deleteProfileAvatarDraft(draft.localPath)
+            return
+        }
+        val previousPath = _uiState.value.ownProfile.editAvatarLocalPath
+        _uiState.update { current ->
+            current.copy(
+                ownProfile = current.ownProfile.copy(
+                    editAvatarLocalPath = draft.localPath,
+                    editAvatarMimeType = draft.mimeType,
+                    editAvatarChange = OwnProfileAvatarChange.REPLACE,
+                    errorMessage = null
+                )
+            )
+        }
+        if (previousPath != draft.localPath) {
+            deleteProfileAvatarDraft(previousPath)
+        }
+    }
+
+    fun setOwnProfileEditError(message: String, editSessionId: Long) {
+        val state = _uiState.value
+        if (
+            state.route != AppRoute.EditProfile ||
+            state.ownProfile.editSessionId != editSessionId ||
+            state.ownProfile.isSaving
+        ) {
+            return
+        }
+        _uiState.update { current ->
+            current.copy(
+                ownProfile = current.ownProfile.copy(
+                    isSaving = false,
+                    errorMessage = message
+                )
+            )
+        }
+    }
+
+    fun removeOwnProfileAvatarDraft() {
+        val previousPath = _uiState.value.ownProfile.editAvatarLocalPath
+        _uiState.update { current ->
+            val nextChange = if (current.ownProfile.avatarUrl.isNullOrBlank()) {
+                OwnProfileAvatarChange.KEEP
+            } else {
+                OwnProfileAvatarChange.REMOVE
+            }
+            current.copy(
+                ownProfile = current.ownProfile.copy(
+                    editAvatarLocalPath = null,
+                    editAvatarMimeType = "image/jpeg",
+                    editAvatarChange = nextChange,
+                    errorMessage = null
+                )
+            )
+        }
+        deleteProfileAvatarDraft(previousPath)
+    }
+
+    fun cancelOwnProfileEdit() {
+        val previousPath = _uiState.value.ownProfile.editAvatarLocalPath
+        _uiState.update { current ->
+            val profile = current.ownProfile
+            current.copy(
+                ownProfile = profile.clearedEditState()
+            )
+        }
+        deleteProfileAvatarDraft(previousPath)
+    }
+
+    fun saveOwnProfile() {
+        val state = _uiState.value
+        state.matrixState.userIdOrNull() ?: return
+        val profile = state.ownProfile
+        if (profile.isSaving) {
+            return
+        }
+        val nextDisplayName = profile.editDisplayName.trim()
+        val currentDisplayName = profile.displayName.orEmpty()
+        val didChangeName = nextDisplayName != currentDisplayName
+        val avatarChange = profile.editAvatarChange
+        val avatarPath = profile.editAvatarLocalPath
+        val avatarMimeType = profile.editAvatarMimeType
+        val didChangeAvatar = avatarChange != OwnProfileAvatarChange.KEEP
+        if (!didChangeName && !didChangeAvatar) {
+            cancelOwnProfileEdit()
+            popActiveStack()
+            return
+        }
+
+        ownProfileLoadJob?.cancel()
+        ownProfileLoadJob = null
+        ownProfileLoadGeneration += 1
+        ownProfileUserId = null
+        _uiState.update { current ->
+            current.copy(
+                ownProfile = current.ownProfile.copy(
+                    isSaving = true,
+                    errorMessage = null
+                )
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                if (didChangeName) {
+                    matrixClientService.setOwnDisplayName(nextDisplayName)
+                }
+                when (avatarChange) {
+                    OwnProfileAvatarChange.KEEP -> Unit
+                    OwnProfileAvatarChange.REPLACE -> {
+                        val localPath = avatarPath
+                            ?: error("Avatar file is not available")
+                        matrixClientService.uploadOwnAvatar(
+                            localPath = localPath,
+                            mimeType = avatarMimeType
+                        )
+                    }
+                    OwnProfileAvatarChange.REMOVE -> {
+                        matrixClientService.removeOwnAvatar()
+                    }
+                }
+                val refreshed = matrixClientService.loadOwnProfile()
+                deleteProfileAvatarDraft(avatarPath)
+                ownProfileUserId = refreshed.userId
+                _uiState.update { current ->
+                    current.copy(
+                        navState = current.navState.closeEditProfile(),
+                        ownProfile = refreshed.toUiState()
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.w(TAG, "Failed to save own profile", error)
+                _uiState.update { current ->
+                    current.copy(
+                        ownProfile = current.ownProfile.copy(
+                            isSaving = false,
+                            errorMessage = error.message ?: error.javaClass.simpleName
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun popActiveStack(): Boolean {
+        var didNavigate = false
+        _uiState.update { current ->
+            val nextNavState = current.navState.popActiveStack()
+            if (nextNavState == null) {
+                current
+            } else {
+                didNavigate = true
+                current.copy(navState = nextNavState)
+            }
+        }
+        return didNavigate
+    }
+
+    private fun startOwnProfileLoad(userId: String, force: Boolean = false) {
+        if (!force && _uiState.value.route == AppRoute.EditProfile) {
+            return
+        }
+        if (!force && ownProfileUserId == userId && _uiState.value.ownProfile.errorMessage == null) {
+            return
+        }
+        if (ownProfileLoadJob?.isActive == true && ownProfileUserId == userId) {
+            return
+        }
+        ownProfileLoadJob?.cancel()
+        ownProfileUserId = userId
+        ownProfileLoadGeneration += 1
+        val loadGeneration = ownProfileLoadGeneration
+        _uiState.update { current ->
+            current.copy(
+                ownProfile = current.ownProfile.copy(
+                    userId = userId,
+                    isLoading = true,
+                    errorMessage = null
+                )
+            )
+        }
+        val loadJob = viewModelScope.launch {
+            try {
+                val profile = matrixClientService.loadOwnProfile()
+                if (ownProfileLoadGeneration != loadGeneration) {
+                    return@launch
+                }
+                _uiState.update { current ->
+                    if (ownProfileLoadGeneration != loadGeneration) {
+                        current
+                    } else {
+                        current.copy(ownProfile = profile.toUiState())
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (ownProfileLoadGeneration != loadGeneration) {
+                    return@launch
+                }
+                Log.w(TAG, "Failed to load own profile", error)
+                _uiState.update { current ->
+                    if (ownProfileLoadGeneration != loadGeneration) {
+                        current
+                    } else {
+                        current.copy(
+                            ownProfile = current.ownProfile.copy(
+                                userId = userId,
+                                isLoading = false,
+                                errorMessage = error.message ?: error.javaClass.simpleName
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        ownProfileLoadJob = loadJob
+        loadJob.invokeOnCompletion {
+            if (ownProfileLoadJob === loadJob) {
+                ownProfileLoadJob = null
+            }
+        }
+    }
+
+    private fun stopOwnProfileLoad(clearState: Boolean) {
+        ownProfileLoadJob?.cancel()
+        ownProfileLoadJob = null
+        ownProfileLoadGeneration += 1
+        ownProfileUserId = null
+        if (clearState) {
+            val draftPath = _uiState.value.ownProfile.editAvatarLocalPath
+            _uiState.update { it.copy(ownProfile = OwnProfileUiState()) }
+            deleteProfileAvatarDraft(draftPath)
+        }
+    }
+
+    private fun MatrixOwnProfile.toUiState(): OwnProfileUiState {
+        return OwnProfileUiState(
+            userId = userId,
+            displayName = displayName?.takeIf { it.isNotBlank() },
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
+            isLoading = false,
+            isSaving = false,
+            errorMessage = null,
+            editDisplayName = displayName.orEmpty()
+        )
+    }
+
+    private fun OwnProfileUiState.clearedEditState(): OwnProfileUiState {
+        return copy(
+            editDisplayName = displayName.orEmpty(),
+            editAvatarLocalPath = null,
+            editAvatarMimeType = "image/jpeg",
+            editAvatarChange = OwnProfileAvatarChange.KEEP,
+            editSessionId = 0L,
+            isSaving = false,
+            errorMessage = null
+        )
+    }
+
+    private fun nextOwnProfileEditSessionId(): Long {
+        ownProfileEditSessionCounter += 1
+        return ownProfileEditSessionCounter
+    }
+
+    private fun deleteProfileAvatarDraft(path: String?) {
+        path?.takeIf { it.isNotBlank() }?.let { localPath ->
+            runCatching { File(localPath).delete() }
         }
     }
 
@@ -2423,6 +2818,8 @@ class AppViewModel(
             AppRoute.Contacts -> "Contacts"
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
+            AppRoute.EditProfile -> "EditProfile"
+            AppRoute.Profile -> "Profile"
             is AppRoute.RecoveryKey -> "RecoveryKey"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             AppRoute.Rooms -> "Rooms"

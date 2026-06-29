@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -160,7 +161,9 @@ internal class GlassChatLayout @JvmOverloads constructor(
         val requiresFreshImage = hardwareBackdropCaptureRequiresFreshImage
         hardwareBackdropCaptureScheduled = false
         hardwareBackdropCaptureRequiresFreshImage = false
-        captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw = requiresFreshImage)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw = requiresFreshImage)
+        }
         lastHardwareBackdropCaptureUptimeMs = SystemClock.uptimeMillis()
     }
     private val vulkanGlassAdaptiveRenderRunnable = Runnable {
@@ -1092,7 +1095,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             textureLeft = textureLeft,
             textureTop = textureTop
         ) ?: run {
-            frame.close()
+            frame.closeCapturedFrame()
             BackdropFrameResult(imported = false)
         }
     }
@@ -1336,6 +1339,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         postOnAnimation(hardwareBackdropCaptureRunnable)
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw: Boolean = false) {
         if (
             !isVulkanGlassBackdropEnabled() ||
@@ -1389,7 +1393,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             rects.isEmpty() ||
             vulkanGlassRects.isEmpty()
         ) {
-            frame.close()
+            frame.closeCapturedFrame()
             return
         }
 

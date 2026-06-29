@@ -227,7 +227,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         val startNanos = SystemClock.elapsedRealtimeNanos()
         val rectValues = rects.toNativeRectValues()
         if (rectValues.isEmpty()) {
-            frame.close()
+            frame.closeCapturedFrame()
             clearBackdropFrame(clearNative = true)
             return BackdropFrameResult(
                 totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
@@ -236,7 +236,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             )
         }
         if (!enabled) {
-            frame.close()
+            frame.closeCapturedFrame()
             return BackdropFrameResult(
                 totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
                 imported = false,
@@ -245,7 +245,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         }
         ensureRenderer()
         if (nativeHandle == 0L) {
-            frame.close()
+            frame.closeCapturedFrame()
             return BackdropFrameResult(
                 totalNanos = SystemClock.elapsedRealtimeNanos() - startNanos,
                 imported = false,
@@ -539,14 +539,14 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     }
 
     private fun clearPendingBackdropFrameLocked() {
-        pendingBackdropFrame?.frame?.close()
+        pendingBackdropFrame?.frame?.closeCapturedFrame()
         pendingBackdropFrame = null
         pendingBackdropRectUpdate = null
     }
 
     private fun clearBackdropFrame(clearNative: Boolean) {
         synchronized(renderStateLock) {
-            activeBackdropFrame?.frame?.close()
+            activeBackdropFrame?.frame?.closeCapturedFrame()
             activeBackdropFrame = null
             pendingBackdropRectUpdate = null
         }
@@ -785,14 +785,14 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
                     }
                 }
             }
-            previousBackdrop?.frame?.close()
+            previousBackdrop?.frame?.closeCapturedFrame()
             if (didImport) {
                 synchronized(renderStateLock) {
                     activeBackdropFrame = ActiveBackdropFrame(backdrop.frame)
                 }
                 didUpdateBackdrop = true
             } else {
-                backdrop.frame.close()
+                backdrop.frame.closeCapturedFrame()
             }
         }
 

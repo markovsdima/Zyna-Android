@@ -4,6 +4,7 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
@@ -131,7 +132,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
     private fun popToSize(targetSize: Int) {
         if (mountedEntries.size <= targetSize) return
 
-        val removed = mountedEntries.removeLast()
+        val removed = mountedEntries.removeAt(mountedEntries.lastIndex)
         val revealed = mountedEntries.lastOrNull()?.view
         rootGlassLayerOwnerDuringTransition = if (removed.entry.rootGlassOwnerKey != null) {
             removed
@@ -232,7 +233,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         isTransitionRunning = true
         ZynaPerfLog.mark {
             "stack.transition.start duration=$TRANSITION_MS " +
-                "durationScale=${ValueAnimator.getDurationScale()} targetX=$targetTranslationX"
+                "durationScale=${animatorDurationScaleForLog()} targetX=$targetTranslationX"
         }
         transitionAnimator?.cancel()
         transitionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -334,6 +335,14 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
             index++
         }
         return index
+    }
+
+    private fun animatorDurationScaleForLog(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ValueAnimator.getDurationScale().toString()
+        } else {
+            "unavailable"
+        }
     }
 
     private companion object {

@@ -1,5 +1,6 @@
 package com.zyna.app.ui.glass
 
+import android.annotation.SuppressLint
 import android.graphics.BlendMode
 import android.graphics.Color
 import android.graphics.HardwareRenderer
@@ -115,7 +116,6 @@ internal class HardwareBufferChatCapture(
         latestRequest = null
         targetGeneration += 1
         renderer?.run {
-            setSurface(null)
             stop()
             destroy()
         }
@@ -124,7 +124,6 @@ internal class HardwareBufferChatCapture(
         contentNode?.discardDisplayList()
         contentNode = null
 
-        surface?.release()
         surface = null
 
         imageReader?.setOnImageAvailableListener(null, null)
@@ -231,7 +230,7 @@ internal class HardwareBufferChatCapture(
                 width = image.width,
                 height = image.height,
                 format = image.format,
-                usage = reader.usage,
+                usage = BUFFER_USAGE,
                 renderResult = request.renderResult,
                 renderNanos = request.ensureTargetNanos +
                     request.recordNanos +
@@ -321,6 +320,11 @@ internal class HardwareBufferChatCapture(
             }
         }
     }
+}
+
+@SuppressLint("NewApi")
+internal fun HardwareBufferChatCapture.CapturedFrame.closeCapturedFrame() {
+    close()
 }
 
 internal fun Long.msString(): String {

@@ -252,7 +252,7 @@ internal class RootGlassLayerCoordinator(
         textureTop: Float
     ): BackdropFrameResult {
         if (!isOwnerActive(ownerKey)) {
-            frame.close()
+            frame.closeCapturedFrame()
             return BackdropFrameResult(imported = false)
         }
         return vulkanOverlay.setBackdropFrame(

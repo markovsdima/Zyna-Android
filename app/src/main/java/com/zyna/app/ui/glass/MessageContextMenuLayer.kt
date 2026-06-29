@@ -29,6 +29,8 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.render.GradientBubbleRecyclerView
+import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
@@ -61,6 +63,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     }
     private val layerLocation = IntArray(2)
     private val cellLocation = IntArray(2)
+    private val viewportLocation = IntArray(2)
     private val bubbleBoundsInScreen = RectF()
     private val bubbleBoundsInLayer = RectF()
     private val drawingBubbleBoundsInLayer = RectF()
@@ -74,8 +77,14 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private var isDismissing = false
     private var isGestureCancelEnabled = false
     private var isMenuOpenRequested = false
+    private var didRestoreSourceDuringDismiss = false
     private var hoveredActionView: TextView? = null
     private var selectedCellTargetOffsetY = 0f
+    private var hasSelectedViewportOverride = false
+    private var selectedViewportWidth = 0
+    private var selectedViewportHeight = 0
+    private var selectedViewportOffsetX = 0f
+    private var selectedViewportOffsetY = 0f
     private var selectedCellAnticipationScale = 1f
         set(value) {
             field = value
@@ -133,6 +142,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         animator = null
         restoreSelectedSource()
         isDismissing = false
+        didRestoreSourceDuringDismiss = false
         isMenuOpenRequested = false
         clearHoveredActionView()
         if (!setSelectedRequest(request)) {
@@ -168,8 +178,10 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             return false
         }
         isDismissing = false
+        didRestoreSourceDuringDismiss = false
         isGestureCancelEnabled = false
         isMenuOpenRequested = true
+        request.cell.setContextMenuSourceHidden(true)
         visibility = VISIBLE
         selectedCellLayer.visibility = VISIBLE
         bringToFront()
@@ -194,6 +206,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         }
         animator?.cancel()
         isDismissing = true
+        didRestoreSourceDuringDismiss = false
         isGestureCancelEnabled = false
         isMenuOpenRequested = false
         clearHoveredActionView()
@@ -548,7 +561,14 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             drawingBubbleBoundsInLayer.centerX() - layerCellX,
             drawingBubbleBoundsInLayer.centerY() - layerCellY
         )
-        cell.drawForContextMenu(canvas)
+        cell.drawForContextMenu(
+            canvas = canvas,
+            hasViewportOverride = hasSelectedViewportOverride,
+            viewportWidth = selectedViewportWidth,
+            viewportHeight = selectedViewportHeight,
+            viewportOffsetX = selectedViewportOffsetX,
+            viewportOffsetY = selectedViewportOffsetY
+        )
         canvas.restoreToCount(save)
     }
 
@@ -705,8 +725,33 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         bubbleBoundsInScreen.set(request.bubbleBoundsInScreen)
         activationRawX = request.touchRawX
         activationRawY = request.touchRawY
+        captureSelectedViewport(request.cell)
         buildMenu(request)
         return menuContainer.childCount > 0
+    }
+
+    private fun captureSelectedViewport(cell: MessageCellView) {
+        val viewport = cell.parent as? GradientBubbleRecyclerView
+        if (viewport == null || viewport.width <= 0 || viewport.height <= 0) {
+            clearSelectedViewport()
+            return
+        }
+
+        viewport.getLocationOnScreen(viewportLocation)
+        cell.getLocationOnScreen(cellLocation)
+        hasSelectedViewportOverride = true
+        selectedViewportWidth = viewport.width
+        selectedViewportHeight = viewport.height
+        selectedViewportOffsetX = (cellLocation[0] - viewportLocation[0]).toFloat()
+        selectedViewportOffsetY = (cellLocation[1] - viewportLocation[1]).toFloat()
+    }
+
+    private fun clearSelectedViewport() {
+        hasSelectedViewportOverride = false
+        selectedViewportWidth = 0
+        selectedViewportHeight = 0
+        selectedViewportOffsetX = 0f
+        selectedViewportOffsetY = 0f
     }
 
     private fun animateState(
@@ -727,6 +772,14 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
                 val animatedProgress = it.animatedValue as Float
                 pressProgress = lerp(startPressProgress, targetPressProgress, animatedProgress)
                 menuProgress = lerp(startMenuProgress, targetMenuProgress, animatedProgress)
+                if (
+                    clearAfterEnd &&
+                    !didRestoreSourceDuringDismiss &&
+                    animatedProgress >= DISMISS_SOURCE_RESTORE_PROGRESS
+                ) {
+                    restoreSelectedSource()
+                    didRestoreSourceDuringDismiss = true
+                }
                 onGlassGeometryChanged()
             }
             if (clearAfterEnd) {
@@ -757,9 +810,13 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         isMenuOpenRequested = false
         clearHoveredActionView()
         menuContainer.removeAllViews()
-        restoreSelectedSource()
+        if (!didRestoreSourceDuringDismiss) {
+            restoreSelectedSource()
+        }
         selectedRequest = null
         selectedMessage = null
+        didRestoreSourceDuringDismiss = false
+        clearSelectedViewport()
         selectedCellTargetOffsetY = 0f
         selectedCellAnticipationScale = 1f
         visibility = GONE
@@ -878,6 +935,7 @@ private const val DELETE_ANTICIPATION_DURATION_MS = 80L
 private const val PREVIEW_SHRINK_DURATION_MS = 170L
 private const val OPEN_ANIMATION_DURATION_MS = 260L
 private const val DISMISS_ANIMATION_DURATION_MS = 170L
+private const val DISMISS_SOURCE_RESTORE_PROGRESS = 0.96f
 private val DESTRUCTIVE_TEXT_COLOR = Color.rgb(211, 47, 47)
 
 private fun defaultMenuPalette(): GlassPalette {

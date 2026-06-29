@@ -67,6 +67,11 @@ internal class MessageCellView(
     private var isContextMenuOpened = false
     private var isContextMenuSourceHidden = false
     private var isDrawingContextMenuCopy = false
+    private var hasContextMenuViewportOverride = false
+    private var contextMenuViewportWidth = 0
+    private var contextMenuViewportHeight = 0
+    private var contextMenuViewportOffsetX = 0f
+    private var contextMenuViewportOffsetY = 0f
     private var drawsContextPhotoSelection = true
     private var isPhotoTapCandidate = false
     private var isVoiceTapCandidate = false
@@ -460,18 +465,43 @@ internal class MessageCellView(
         }
         isContextMenuSourceHidden = hidden
         invalidate()
+        (parent as? GradientBubbleRecyclerView)?.let { recyclerView ->
+            recyclerView.postInvalidateOnAnimation()
+        }
     }
 
-    fun drawForContextMenu(canvas: Canvas) {
+    fun drawForContextMenu(
+        canvas: Canvas,
+        hasViewportOverride: Boolean = false,
+        viewportWidth: Int = 0,
+        viewportHeight: Int = 0,
+        viewportOffsetX: Float = 0f,
+        viewportOffsetY: Float = 0f
+    ) {
         val wasDrawingContextMenuCopy = isDrawingContextMenuCopy
         val wasDrawingContextSelection = drawsContextPhotoSelection
+        val previousHasViewportOverride = hasContextMenuViewportOverride
+        val previousViewportWidth = contextMenuViewportWidth
+        val previousViewportHeight = contextMenuViewportHeight
+        val previousViewportOffsetX = contextMenuViewportOffsetX
+        val previousViewportOffsetY = contextMenuViewportOffsetY
         isDrawingContextMenuCopy = true
         drawsContextPhotoSelection = true
+        hasContextMenuViewportOverride = hasViewportOverride
+        contextMenuViewportWidth = viewportWidth
+        contextMenuViewportHeight = viewportHeight
+        contextMenuViewportOffsetX = viewportOffsetX
+        contextMenuViewportOffsetY = viewportOffsetY
         try {
             draw(canvas)
         } finally {
             isDrawingContextMenuCopy = wasDrawingContextMenuCopy
             drawsContextPhotoSelection = wasDrawingContextSelection
+            hasContextMenuViewportOverride = previousHasViewportOverride
+            contextMenuViewportWidth = previousViewportWidth
+            contextMenuViewportHeight = previousViewportHeight
+            contextMenuViewportOffsetX = previousViewportOffsetX
+            contextMenuViewportOffsetY = previousViewportOffsetY
         }
     }
 
@@ -730,10 +760,30 @@ internal class MessageCellView(
     ): Boolean {
         val gradient = theme.bubbleGradient(model) ?: return false
         val viewport = parent as? GradientBubbleRecyclerView
-        val viewportWidth = viewport?.width ?: width
-        val viewportHeight = viewport?.height ?: height
-        val viewportOffsetX = if (viewport != null) left.toFloat() + translationX else 0f
-        val viewportOffsetY = if (viewport != null) top.toFloat() + translationY else 0f
+        val viewportWidth = if (hasContextMenuViewportOverride) {
+            contextMenuViewportWidth
+        } else {
+            viewport?.width ?: width
+        }
+        val viewportHeight = if (hasContextMenuViewportOverride) {
+            contextMenuViewportHeight
+        } else {
+            viewport?.height ?: height
+        }
+        val viewportOffsetX = if (hasContextMenuViewportOverride) {
+            contextMenuViewportOffsetX
+        } else if (viewport != null) {
+            left.toFloat() + translationX
+        } else {
+            0f
+        }
+        val viewportOffsetY = if (hasContextMenuViewportOverride) {
+            contextMenuViewportOffsetY
+        } else if (viewport != null) {
+            top.toFloat() + translationY
+        } else {
+            0f
+        }
         return localBubbleGradientRenderer().drawBubble(
             canvas = canvas,
             bubbleRenderer = bubbleRenderer,

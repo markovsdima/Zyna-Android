@@ -2,6 +2,7 @@ package com.zyna.app
 
 import android.app.Application
 import com.zyna.app.core.di.AppContainer
+import com.zyna.app.data.push.FirebaseMessagingRegistration
 import com.zyna.app.data.push.ZynaNotificationChannels
 import com.zyna.app.ui.theme.AppThemeStore
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +29,10 @@ class ZynaApplication : Application() {
             context = this,
             appThemeStore = appThemeStore
         )
+        FirebaseMessagingRegistration.requestIfInstallationIdMissing(
+            installationIdStore = appContainer.firebaseInstallationIdStore,
+            reason = REASON_APP_START
+        )
     }
 
     override fun onTerminate() {
@@ -39,5 +44,9 @@ class ZynaApplication : Application() {
         applicationScope.launch {
             appContainer.matrixClientService.registerPushPusherIfAvailable()
         }
+    }
+
+    companion object {
+        private const val REASON_APP_START = "app_start"
     }
 }

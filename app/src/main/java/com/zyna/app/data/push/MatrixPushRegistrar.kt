@@ -22,7 +22,8 @@ class MatrixPushRegistrar(
             val installationId = firebaseInstallationIdStore.load()
                 ?.takeIf { it.isNotBlank() }
             if (installationId == null) {
-                Log.d(TAG, "Matrix push registration skipped: Firebase installation id is not ready")
+                Log.w(TAG, "Matrix push registration skipped: Firebase installation id is not ready")
+                FirebaseMessagingRegistration.request(REASON_MISSING_INSTALLATION_ID)
                 return@withContext
             }
 
@@ -118,6 +119,7 @@ class MatrixPushRegistrar(
         private const val DEFAULT_LANGUAGE = "en"
         private const val DEFAULT_PAYLOAD_CLIENT_SECRET_KEY = "cs"
         private const val INSTALLATION_ID_LOG_PREFIX_LENGTH = 12
+        private const val REASON_MISSING_INSTALLATION_ID = "missing_installation_id"
     }
 }
 

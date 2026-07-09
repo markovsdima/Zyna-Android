@@ -4,6 +4,8 @@
     <string name="notification_channel_messages_description">New message notifications</string>
     <string name="notification_channel_incoming_calls_name">Incoming calls</string>
     <string name="notification_channel_incoming_calls_description">Incoming call alerts</string>
+    <string name="notification_channel_ongoing_calls_name">Active calls</string>
+    <string name="notification_channel_ongoing_calls_description">Ongoing call status</string>
     <string name="push_notification_title">New message</string>
     <string name="push_notification_body">Open Zyna to read it.</string>
     <string name="push_notification_unread_body">%1$d unread messages</string>
@@ -11,4 +13,9 @@
     <string name="incoming_call_audio_body">Incoming audio call</string>
     <string name="incoming_call_decline">Decline</string>
     <string name="incoming_call_answer">Answer</string>
+    <string name="ongoing_call_title">Zyna call</string>
+    <string name="ongoing_call_connecting">Connecting call</string>
+    <string name="ongoing_call_active">Call in progress</string>
+    <string name="ongoing_call_ending">Ending call</string>
+    <string name="ongoing_call_end">End call</string>
 </resources>

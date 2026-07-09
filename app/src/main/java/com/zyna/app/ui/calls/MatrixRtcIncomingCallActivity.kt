@@ -202,6 +202,7 @@ class MatrixRtcIncomingCallActivity : AppCompatActivity() {
         )
         val view = NativeMatrixRtcCallView(this)
         val controller = NativeMatrixRtcCallController(
+            context = this,
             launchContext = launchContext,
             callService = appContainer.nativeMatrixRtcCallService,
             scope = lifecycleScope,

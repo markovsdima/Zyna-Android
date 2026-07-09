@@ -11,6 +11,7 @@ import com.zyna.app.R
 object ZynaNotificationChannels {
     const val MESSAGES_CHANNEL_ID = "messages"
     const val INCOMING_CALLS_CHANNEL_ID = "incoming_calls"
+    const val ONGOING_CALLS_CHANNEL_ID = "ongoing_calls"
 
     fun ensureCreated(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
@@ -46,5 +47,19 @@ object ZynaNotificationChannels {
             enableVibration(true)
         }
         manager.createNotificationChannel(callChannel)
+
+        val ongoingCallChannel = NotificationChannel(
+            ONGOING_CALLS_CHANNEL_ID,
+            context.getString(R.string.notification_channel_ongoing_calls_name),
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = context.getString(
+                R.string.notification_channel_ongoing_calls_description
+            )
+            lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+            setSound(null, null)
+            enableVibration(false)
+        }
+        manager.createNotificationChannel(ongoingCallChannel)
     }
 }

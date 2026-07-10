@@ -199,6 +199,9 @@ class MainActivity : AppCompatActivity() {
             onOpenUserProfileChat = appViewModel::openUserProfileChat,
             onCallUserProfile = appViewModel::callUserProfile,
             onRefreshUserProfile = appViewModel::refreshUserProfile,
+            onOpenCallHistoryRoom = appViewModel::openCallHistoryRoom,
+            onCallHistoryItem = appViewModel::callHistoryItem,
+            onRefreshCallHistory = appViewModel::refreshCallHistory,
             onConsumePendingNativeMatrixRtcCallLaunch =
                 appViewModel::consumePendingNativeMatrixRtcCallLaunch,
             onForwardRoomSelected = appViewModel::selectForwardRoom,

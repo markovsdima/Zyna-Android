@@ -4,11 +4,16 @@ import android.content.Context
 import android.util.Log
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCancellable
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallMembershipParser
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallNotificationContent
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallNotificationType
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallTimelineMembership
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallTimelineNotification
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCustomToDeviceEncrypting
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCall
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcLegacyCallNotifyContent
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcOwnDevice
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcRawMembershipEvent
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcToDeviceClient
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcCallNotificationClient
 import com.zyna.app.data.calls.matrixrtc.MatrixRustSdkRtcLiveKitFocusClient
@@ -112,6 +117,7 @@ import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.UserProfile
 import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
+import org.json.JSONArray
 import org.json.JSONObject
 import uniffi.matrix_sdk_base.EncryptionState
 import uniffi.matrix_sdk.BackupDownloadStrategy
@@ -932,7 +938,7 @@ class MatrixClientService(
         val diffBatcher = MatrixTimelineDiffBatcher(
             scope = this,
             debounceMillis = TIMELINE_EMIT_COALESCE_MS,
-            mapTimelineItem = { item -> item.toChatMessageOrNull() },
+            mapTimelineItem = { item -> item.toTimelineMappedItem(roomId) },
             onFlush = { update ->
                 hasEmittedInitialState.set(true)
                 trySendBlocking(update)
@@ -1540,9 +1546,49 @@ class MatrixClientService(
         }
     }
 
+    private fun TimelineItem.toTimelineMappedItem(roomId: String): MatrixTimelineMappedItem = use { item ->
+        val event = item.asEvent() ?: return@use null
+        event.toTimelineMappedItem(roomId)
+    } ?: MatrixTimelineMappedItem()
+
     private fun TimelineItem.toChatMessageOrNull(): MatrixChatMessage? = use { item ->
         val event = item.asEvent() ?: return@use null
         event.toChatMessageOrNull()
+    }
+
+    private fun EventTimelineItem.toTimelineMappedItem(roomId: String): MatrixTimelineMappedItem {
+        val message = toChatMessageOrNull()
+        if (message != null) {
+            return MatrixTimelineMappedItem(message = message)
+        }
+        val raw = rawJsonObjectOrNull() ?: return MatrixTimelineMappedItem()
+        val eventType = raw.optStringOrNull("type") ?: return MatrixTimelineMappedItem()
+        return MatrixTimelineMappedItem(
+            callNotification = if (
+                eventType == MatrixRtcCallNotificationContent.EVENT_TYPE ||
+                eventType == MatrixRtcLegacyCallNotifyContent.EVENT_TYPE
+            ) {
+                toMatrixRtcCallTimelineNotificationOrNull(
+                    roomId = roomId,
+                    raw = raw,
+                    eventType = eventType
+                )
+            } else {
+                null
+            },
+            callMembership = if (
+                eventType == MatrixRtcRawMembershipEvent.LEGACY_CALL_MEMBER_EVENT_TYPE ||
+                eventType == MatrixRtcRawMembershipEvent.RTC_MEMBER_EVENT_TYPE
+            ) {
+                toMatrixRtcCallTimelineMembershipOrNull(
+                    roomId = roomId,
+                    raw = raw,
+                    eventType = eventType
+                )
+            } else {
+                null
+            }
+        )
     }
 
     private fun EventTimelineItem.toChatMessageOrNull(): MatrixChatMessage? {
@@ -1603,6 +1649,124 @@ class MatrixClientService(
             isEdited = isEdited,
             reactions = reactions
         )
+    }
+
+    private fun EventTimelineItem.toMatrixRtcCallTimelineNotificationOrNull(
+        roomId: String,
+        raw: JSONObject,
+        eventType: String
+    ): MatrixRtcCallTimelineNotification? {
+        val eventId = raw.optStringOrNull("event_id")
+            ?: eventOrTransactionId.eventIdOrNull()
+            ?: return null
+        val contentJson = raw.optJSONObject("content") ?: return null
+        val timestampMillis = raw.optLongOrNull("origin_server_ts") ?: timestamp.toLong()
+        return when (eventType) {
+            MatrixRtcCallNotificationContent.EVENT_TYPE -> {
+                val content = runCatching {
+                    MatrixRtcCallNotificationContent.fromJson(contentJson.toString())
+                }.getOrNull() ?: return null
+                MatrixRtcCallTimelineNotification(
+                    eventId = eventId,
+                    roomId = roomId,
+                    parentEventId = content.relation.eventId,
+                    senderId = sender,
+                    senderDisplayName = senderProfile.displayNameOrNull(),
+                    isOutgoing = isOwn,
+                    timestampMillis = timestampMillis,
+                    notificationType = content.notificationType,
+                    callIntent = content.callIntent,
+                    expiresAtMillis = content.senderTimestamp + content.lifetime,
+                    declinedBy = contentJson.declinedByUserIds()
+                )
+            }
+            MatrixRtcLegacyCallNotifyContent.EVENT_TYPE -> {
+                val content = runCatching {
+                    MatrixRtcLegacyCallNotifyContent.fromJson(contentJson.toString())
+                }.getOrNull() ?: return null
+                MatrixRtcCallTimelineNotification(
+                    eventId = eventId,
+                    roomId = roomId,
+                    parentEventId = content.callId.takeIf { it.isNotBlank() },
+                    senderId = sender,
+                    senderDisplayName = senderProfile.displayNameOrNull(),
+                    isOutgoing = isOwn,
+                    timestampMillis = timestampMillis,
+                    notificationType = when (content.notifyType) {
+                        MatrixRtcCallNotificationType.RING.wireValue ->
+                            MatrixRtcCallNotificationType.RING
+                        else -> MatrixRtcCallNotificationType.NOTIFICATION
+                    },
+                    callIntent = null,
+                    expiresAtMillis = timestampMillis + DEFAULT_LEGACY_CALL_NOTIFICATION_LIFETIME_MS,
+                    declinedBy = contentJson.declinedByUserIds()
+                )
+            }
+            else -> null
+        }
+    }
+
+    private fun EventTimelineItem.toMatrixRtcCallTimelineMembershipOrNull(
+        roomId: String,
+        raw: JSONObject,
+        eventType: String
+    ): MatrixRtcCallTimelineMembership? {
+        val eventId = raw.optStringOrNull("event_id") ?: return null
+        val senderId = raw.optStringOrNull("sender") ?: sender
+        val timestampMillis = raw.optLongOrNull("origin_server_ts") ?: timestamp.toLong()
+        val contentJson = raw.optJSONObject("content") ?: return null
+        val stateKey = raw.optStringOrNull("state_key")
+        val isLeave = contentJson.length() == 0
+        if (isLeave) {
+            return MatrixRtcCallTimelineMembership(
+                eventId = eventId,
+                roomId = roomId,
+                eventType = eventType,
+                stateKey = stateKey,
+                senderId = senderId,
+                timestampMillis = timestampMillis,
+                isLeave = true,
+                memberUserId = senderId,
+                deviceId = null,
+                memberId = null,
+                callIntent = null,
+                expiresAtMillis = null
+            )
+        }
+
+        val membership = runCatching {
+            MatrixRtcCallMembershipParser.parse(
+                MatrixRtcRawMembershipEvent(
+                    eventId = eventId,
+                    eventType = eventType,
+                    stateKey = stateKey,
+                    sender = senderId,
+                    originServerTimestamp = timestampMillis,
+                    contentJson = contentJson.toString()
+                )
+            )
+        }.getOrNull() ?: return null
+
+        return MatrixRtcCallTimelineMembership(
+            eventId = eventId,
+            roomId = roomId,
+            eventType = eventType,
+            stateKey = stateKey,
+            senderId = senderId,
+            timestampMillis = timestampMillis,
+            isLeave = false,
+            memberUserId = membership.userId,
+            deviceId = membership.deviceId,
+            memberId = membership.memberId,
+            callIntent = membership.callIntent,
+            expiresAtMillis = membership.absoluteExpiryTimestamp
+        )
+    }
+
+    private fun EventTimelineItem.rawJsonObjectOrNull(): JSONObject? {
+        return runCatching {
+            lazyProvider.latestJson()?.let(::JSONObject)
+        }.getOrNull()
     }
 
     private fun MsgLikeContent.buildReactions(): List<MatrixMessageReaction> {
@@ -1846,6 +2010,36 @@ class MatrixClientService(
 
     private fun JSONObject.optStringOrNull(key: String): String? {
         return opt(key) as? String
+    }
+
+    private fun JSONObject.optLongOrNull(key: String): Long? {
+        return when (val value = opt(key)) {
+            is Number -> value.toLong()
+            is String -> value.toLongOrNull()
+            else -> null
+        }
+    }
+
+    private fun JSONObject.declinedByUserIds(): List<String> {
+        val keys = listOf(
+            "declined_by",
+            "declinedBy",
+            "m.call.declined_by",
+            "m.call.declinedBy"
+        )
+        return keys.asSequence()
+            .mapNotNull { key -> optJSONArray(key) }
+            .firstOrNull()
+            ?.toStringList()
+            ?: emptyList()
+    }
+
+    private fun JSONArray.toStringList(): List<String> {
+        return buildList {
+            for (index in 0 until length()) {
+                optString(index).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
     }
 
     private fun String.stripMatrixReplyFallback(): String {
@@ -2650,6 +2844,7 @@ class MatrixClientService(
         const val ZERO_WIDTH_SPACE = "\u200B"
         const val DEFAULT_AUDIO_MIME_TYPE = "audio/mpeg"
         const val MATRIX_WAVEFORM_DEFAULT_PEAK = 1024
+        const val DEFAULT_LEGACY_CALL_NOTIFICATION_LIFETIME_MS = 30_000L
     }
 }
 

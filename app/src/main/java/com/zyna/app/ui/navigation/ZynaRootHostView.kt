@@ -18,6 +18,9 @@ import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.app.UserProfileUiState
 import com.zyna.app.ui.auth.LoginScreen
+import com.zyna.app.ui.calls.CallsScreenView
+import com.zyna.app.ui.calls.CallsScreenViewActions
+import com.zyna.app.ui.calls.CallsScreenViewState
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
@@ -263,7 +266,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 is AppRoute.RecoveryKey -> recoveryEntry(state, actions, route)
                 AppRoute.Contacts -> contactsEntry(state, actions)
                 is AppRoute.UserProfile -> userProfileEntry(state, actions, route)
-                AppRoute.Calls -> tabPlaceholderEntry(AppTab.CALLS)
+                AppRoute.Calls -> callsEntry(state, actions)
                 AppRoute.Rooms -> roomsEntry(
                     state = state,
                     actions = actions,
@@ -342,6 +345,32 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenChat = actions.onOpenContactChat,
                         onCall = actions.onCallContact,
                         onRefresh = actions.onRefreshRooms
+                    )
+                )
+            }
+        )
+    }
+
+    private fun callsEntry(
+        state: AppUiState,
+        actions: ZynaAppActions
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "calls:root",
+            createView = { context -> CallsScreenView(context) },
+            updateView = { view ->
+                (view as CallsScreenView).render(
+                    state = CallsScreenViewState(
+                        calls = state.callHistory,
+                        isRefreshing = state.isRefreshingCallHistory,
+                        errorMessage = state.callHistoryErrorMessage,
+                        matrixMediaLoader = actions.matrixMediaLoader,
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                    ),
+                    actions = CallsScreenViewActions(
+                        onOpenRoom = actions.onOpenCallHistoryRoom,
+                        onCall = actions.onCallHistoryItem,
+                        onRefresh = actions.onRefreshCallHistory
                     )
                 )
             }

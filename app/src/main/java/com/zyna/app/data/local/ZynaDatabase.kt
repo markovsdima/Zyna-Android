@@ -15,9 +15,11 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedRoomEntity::class,
         CachedTimelineMessageEntity::class,
         OutgoingEnvelopeEntity::class,
-        PendingReactionEntity::class
+        PendingReactionEntity::class,
+        MatrixRtcCallEntity::class,
+        MatrixRtcCallMembershipEntity::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -28,6 +30,8 @@ abstract class ZynaDatabase : RoomDatabase() {
     abstract fun outgoingEnvelopeDao(): OutgoingEnvelopeDao
 
     abstract fun pendingReactionDao(): PendingReactionDao
+
+    abstract fun matrixRtcCallHistoryDao(): MatrixRtcCallHistoryDao
 
     companion object {
         fun create(context: Context, passphraseStore: LocalDatabasePassphraseStore): ZynaDatabase {
@@ -67,7 +71,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_15_16,
                     MIGRATION_16_17,
                     MIGRATION_17_18,
-                    MIGRATION_18_19
+                    MIGRATION_18_19,
+                    MIGRATION_19_20
                 )
                 .build()
         }
@@ -375,6 +380,97 @@ abstract class ZynaDatabase : RoomDatabase() {
                     """
                     CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_roomId_reactionEventId
                     ON pending_reactions(userId, roomId, reactionEventId)
+                    """.trimIndent()
+                )
+            }
+        }
+
+        private val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS matrix_rtc_calls (
+                        userId TEXT NOT NULL,
+                        eventId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        parentEventId TEXT,
+                        senderId TEXT NOT NULL,
+                        senderDisplayName TEXT,
+                        isOutgoing INTEGER NOT NULL,
+                        timestampMillis INTEGER NOT NULL,
+                        notificationType TEXT NOT NULL,
+                        callIntent TEXT,
+                        expiresAtMillis INTEGER,
+                        declinedByJson TEXT NOT NULL,
+                        isDirect INTEGER NOT NULL,
+                        hasOwnJoin INTEGER NOT NULL,
+                        hasRemoteJoin INTEGER NOT NULL,
+                        hasOwnLeave INTEGER NOT NULL,
+                        hasRemoteLeave INTEGER NOT NULL,
+                        lastMembershipEventTimestampMillis INTEGER,
+                        lastOwnLeaveTimestampMillis INTEGER,
+                        lastRemoteLeaveTimestampMillis INTEGER,
+                        outcome TEXT NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        PRIMARY KEY(userId, eventId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_calls_userId_timestampMillis
+                    ON matrix_rtc_calls(userId, timestampMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_calls_userId_roomId_timestampMillis
+                    ON matrix_rtc_calls(userId, roomId, timestampMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_calls_userId_outcome_expiresAtMillis
+                    ON matrix_rtc_calls(userId, outcome, expiresAtMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS matrix_rtc_call_memberships (
+                        userId TEXT NOT NULL,
+                        eventId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        eventType TEXT NOT NULL,
+                        stateKey TEXT,
+                        senderId TEXT NOT NULL,
+                        timestampMillis INTEGER NOT NULL,
+                        isLeave INTEGER NOT NULL,
+                        memberUserId TEXT,
+                        deviceId TEXT,
+                        memberId TEXT,
+                        callIntent TEXT,
+                        expiresAtMillis INTEGER,
+                        updatedAtMillis INTEGER NOT NULL,
+                        PRIMARY KEY(userId, eventId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_call_memberships_userId_roomId_timestampMillis
+                    ON matrix_rtc_call_memberships(userId, roomId, timestampMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_call_memberships_userId_roomId_stateKey
+                    ON matrix_rtc_call_memberships(userId, roomId, stateKey)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_call_memberships_userId_memberUserId_timestampMillis
+                    ON matrix_rtc_call_memberships(userId, memberUserId, timestampMillis)
                     """.trimIndent()
                 )
             }

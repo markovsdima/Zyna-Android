@@ -1,5 +1,7 @@
 package com.zyna.app.data.matrix
 
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallTimelineMembership
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallTimelineNotification
 import com.zyna.app.data.local.TimelineFlushSummary
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -10,13 +12,21 @@ import org.matrix.rustcomponents.sdk.TimelineItem
 
 data class MatrixTimelineUpdate(
     val messages: List<MatrixChatMessage>,
-    val flushSummary: TimelineFlushSummary
+    val flushSummary: TimelineFlushSummary,
+    val callNotifications: List<MatrixRtcCallTimelineNotification> = emptyList(),
+    val callMemberships: List<MatrixRtcCallTimelineMembership> = emptyList()
+)
+
+data class MatrixTimelineMappedItem(
+    val message: MatrixChatMessage? = null,
+    val callNotification: MatrixRtcCallTimelineNotification? = null,
+    val callMembership: MatrixRtcCallTimelineMembership? = null
 )
 
 internal class MatrixTimelineDiffBatcher(
     private val scope: CoroutineScope,
     private val debounceMillis: Long,
-    private val mapTimelineItem: (TimelineItem) -> MatrixChatMessage?,
+    private val mapTimelineItem: (TimelineItem) -> MatrixTimelineMappedItem,
     private val onFlush: (MatrixTimelineUpdate) -> Unit
 ) {
     private class ShadowPosition
@@ -56,6 +66,8 @@ internal class MatrixTimelineDiffBatcher(
     private val lock = Any()
     private val shadowPositions = mutableListOf<ShadowPosition>()
     private val pendingUpserts = mutableListOf<MatrixChatMessage>()
+    private val pendingCallNotifications = mutableListOf<MatrixRtcCallTimelineNotification>()
+    private val pendingCallMemberships = mutableListOf<MatrixRtcCallTimelineMembership>()
     private var pendingSummary = MutableTimelineFlushSummary()
     private var hasPendingDiffs = false
     private var flushJob: Job? = null
@@ -78,6 +90,8 @@ internal class MatrixTimelineDiffBatcher(
         synchronized(lock) {
             shadowPositions.clear()
             pendingUpserts.clear()
+            pendingCallNotifications.clear()
+            pendingCallMemberships.clear()
             pendingSummary = MutableTimelineFlushSummary()
             hasPendingDiffs = false
         }
@@ -106,10 +120,16 @@ internal class MatrixTimelineDiffBatcher(
                     }
                 )
                 pendingUpserts.clear()
+                val callNotifications = pendingCallNotifications.coalescedCallNotificationsByEventId()
+                val callMemberships = pendingCallMemberships.coalescedCallMembershipsByEventId()
+                pendingCallNotifications.clear()
+                pendingCallMemberships.clear()
                 pendingSummary = MutableTimelineFlushSummary()
                 MatrixTimelineUpdate(
                     messages = upserts,
-                    flushSummary = summary
+                    flushSummary = summary,
+                    callNotifications = callNotifications,
+                    callMemberships = callMemberships
                 )
             }
         } ?: return
@@ -154,11 +174,9 @@ internal class MatrixTimelineDiffBatcher(
     }
 
     private fun appendItem(item: TimelineItem) {
-        val message = mapTimelineItem(item)
+        val mappedItem = mapTimelineItem(item)
         shadowPositions.add(ShadowPosition())
-        if (message != null) {
-            pendingUpserts.add(message)
-        }
+        enqueueMappedItem(mappedItem)
     }
 
     private fun insertItem(index: Int, item: TimelineItem) {
@@ -166,11 +184,9 @@ internal class MatrixTimelineDiffBatcher(
             return
         }
 
-        val message = mapTimelineItem(item)
+        val mappedItem = mapTimelineItem(item)
         shadowPositions.add(index, ShadowPosition())
-        if (message != null) {
-            pendingUpserts.add(message)
-        }
+        enqueueMappedItem(mappedItem)
     }
 
     private fun setItem(index: Int, item: TimelineItem) {
@@ -178,11 +194,15 @@ internal class MatrixTimelineDiffBatcher(
             return
         }
 
-        val message = mapTimelineItem(item)
+        val mappedItem = mapTimelineItem(item)
         shadowPositions[index] = ShadowPosition()
-        if (message != null) {
-            pendingUpserts.add(message)
-        }
+        enqueueMappedItem(mappedItem)
+    }
+
+    private fun enqueueMappedItem(mappedItem: MatrixTimelineMappedItem) {
+        mappedItem.message?.let { pendingUpserts.add(it) }
+        mappedItem.callNotification?.let { pendingCallNotifications.add(it) }
+        mappedItem.callMembership?.let { pendingCallMemberships.add(it) }
     }
 
     private fun removeAt(index: Int) {
@@ -217,6 +237,30 @@ internal class MatrixTimelineDiffBatcher(
         }
         return messagesById.values.sortedWith(
             compareBy<MatrixChatMessage> { it.timestampMillis }.thenBy { it.id }
+        )
+    }
+
+    private fun List<MatrixRtcCallTimelineNotification>.coalescedCallNotificationsByEventId():
+        List<MatrixRtcCallTimelineNotification> {
+        val callsByEventId = LinkedHashMap<String, MatrixRtcCallTimelineNotification>()
+        forEach { notification ->
+            callsByEventId[notification.eventId] = notification
+        }
+        return callsByEventId.values.sortedWith(
+            compareBy<MatrixRtcCallTimelineNotification> { it.timestampMillis }
+                .thenBy { it.eventId }
+        )
+    }
+
+    private fun List<MatrixRtcCallTimelineMembership>.coalescedCallMembershipsByEventId():
+        List<MatrixRtcCallTimelineMembership> {
+        val membershipsByEventId = LinkedHashMap<String, MatrixRtcCallTimelineMembership>()
+        forEach { membership ->
+            membershipsByEventId[membership.eventId] = membership
+        }
+        return membershipsByEventId.values.sortedWith(
+            compareBy<MatrixRtcCallTimelineMembership> { it.timestampMillis }
+                .thenBy { it.eventId }
         )
     }
 }

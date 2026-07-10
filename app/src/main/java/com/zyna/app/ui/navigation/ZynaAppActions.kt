@@ -3,6 +3,7 @@ package com.zyna.app.ui.navigation
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.media.VoiceRecorderController
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryItem
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixContact
@@ -29,6 +30,9 @@ data class ZynaAppActions(
     val onOpenUserProfileChat: () -> Unit,
     val onCallUserProfile: () -> Unit,
     val onRefreshUserProfile: () -> Unit,
+    val onOpenCallHistoryRoom: (MatrixRtcCallHistoryItem) -> Unit,
+    val onCallHistoryItem: (MatrixRtcCallHistoryItem) -> Unit,
+    val onRefreshCallHistory: () -> Unit,
     val onConsumePendingNativeMatrixRtcCallLaunch: (Long) -> Unit,
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
     val onCancelForwardPicker: () -> Unit,

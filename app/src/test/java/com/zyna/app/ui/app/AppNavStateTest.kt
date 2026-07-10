@@ -198,6 +198,64 @@ class AppNavStateTest {
     }
 
     @Test
+    fun userProfilePushesOnContactsStackAndHidesTabs() {
+        val profileRoute = AppRoute.UserProfile(userId = "@alice:example.org")
+        val state = AppNavState()
+            .enterMain()
+            .selectTab(AppTab.CONTACTS)
+            .openUserProfile(profileRoute.userId)
+
+        assertEquals(AppTab.CONTACTS, state.selectedTab)
+        assertEquals(listOf(AppRoute.Contacts, profileRoute), state.visibleStack)
+        assertEquals(profileRoute, state.top)
+        assertFalse(state.showsTabs)
+
+        val closedState = state.popActiveStack()
+
+        requireNotNull(closedState)
+        assertEquals(AppTab.CONTACTS, closedState.selectedTab)
+        assertEquals(listOf(AppRoute.Contacts), closedState.visibleStack)
+        assertTrue(closedState.showsTabs)
+    }
+
+    @Test
+    fun userProfilePushesOverRoomDetailsWithoutLosingActiveChat() {
+        val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
+        val detailsRoute = AppRoute.RoomDetails(roomId = chatRoute.roomId)
+        val profileRoute = AppRoute.UserProfile(userId = "@alice:example.org")
+        val state = AppNavState()
+            .enterMain()
+            .openChat(chatRoute.roomId, chatRoute.displayName)
+            .openRoomDetails()
+            .openUserProfile(profileRoute.userId)
+
+        assertEquals(AppTab.CHATS, state.selectedTab)
+        assertEquals(listOf(AppRoute.Rooms, chatRoute, detailsRoute, profileRoute), state.visibleStack)
+        assertEquals(profileRoute, state.top)
+        assertEquals(chatRoute, state.activeChatRoute)
+        assertFalse(state.showsTabs)
+
+        val closedState = state.popActiveStack()
+
+        requireNotNull(closedState)
+        assertEquals(listOf(AppRoute.Rooms, chatRoute, detailsRoute), closedState.visibleStack)
+        assertEquals(detailsRoute, closedState.top)
+        assertEquals(chatRoute, closedState.activeChatRoute)
+    }
+
+    @Test
+    fun userProfileSelectionIsIgnoredOutsideMainMode() {
+        val loginState = AppNavState()
+        val recoveryState = loginState.routeForClientState(
+            shouldShowLogin = false,
+            recoveryUserId = "@alice:example.org"
+        )
+
+        assertEquals(loginState, loginState.openUserProfile("@bob:example.org"))
+        assertEquals(recoveryState, recoveryState.openUserProfile("@bob:example.org"))
+    }
+
+    @Test
     fun forwardPickerPushesOverCurrentChatAndPopsBackToIt() {
         val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
         val state = AppNavState()

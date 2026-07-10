@@ -18,4 +18,19 @@
     <string name="ongoing_call_active">Call in progress</string>
     <string name="ongoing_call_ending">Ending call</string>
     <string name="ongoing_call_end">End call</string>
+    <string name="contacts_title">Contacts</string>
+    <string name="contacts_refresh">Refresh</string>
+    <string name="contacts_search_hint">Search contacts</string>
+    <string name="contacts_searching">Searching...</string>
+    <string name="contacts_empty">No contacts yet</string>
+    <string name="contacts_no_results">No results</string>
+    <string name="contacts_message">Message</string>
+    <string name="contacts_call">Call</string>
+    <string name="user_profile_title">Contact</string>
+    <string name="user_profile_back">Back</string>
+    <string name="user_profile_new_direct_chat">New direct chat</string>
+    <string name="user_profile_direct_chat">Direct chat</string>
+    <string name="user_profile_loading">Loading profile...</string>
+    <string name="user_profile_opening_chat">Opening chat...</string>
+    <string name="user_profile_retry">Retry</string>
 </resources>

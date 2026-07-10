@@ -17,6 +17,9 @@ sealed interface AppRoute {
     data object Login : AppRoute
     data class RecoveryKey(val userId: String) : AppRoute
     data object Contacts : AppRoute
+    data class UserProfile(
+        val userId: String
+    ) : AppRoute
     data object Calls : AppRoute
     data object Rooms : AppRoute
     data object ForwardPicker : AppRoute
@@ -62,6 +65,12 @@ data class AppNavState(
     val showsTabs: Boolean
         get() {
             if (mode != AppNavMode.Main) {
+                return false
+            }
+            if (top is AppRoute.UserProfile) {
+                return false
+            }
+            if (selectedTab == AppTab.CONTACTS && contactsStack.lastOrNull() != AppRoute.Contacts) {
                 return false
             }
             return selectedTab != AppTab.CHATS || chatsStack.lastOrNull() == AppRoute.Rooms
@@ -142,6 +151,43 @@ data class AppNavState(
             return this
         }
         return copy(chatsStack = chatsStack.dropLast(1).ifEmpty { listOf(AppRoute.Rooms) })
+    }
+
+    fun openUserProfile(userId: String): AppNavState {
+        if (mode != AppNavMode.Main || userId.isBlank()) {
+            return this
+        }
+        val route = AppRoute.UserProfile(userId = userId)
+        return when (selectedTab) {
+            AppTab.CONTACTS -> copy(
+                contactsStack = pushUserProfile(
+                    stack = contactsStack,
+                    root = AppRoute.Contacts,
+                    route = route
+                )
+            )
+            AppTab.CALLS -> copy(
+                callsStack = pushUserProfile(
+                    stack = callsStack,
+                    root = AppRoute.Calls,
+                    route = route
+                )
+            )
+            AppTab.CHATS -> copy(
+                chatsStack = pushUserProfile(
+                    stack = chatsStack,
+                    root = AppRoute.Rooms,
+                    route = route
+                )
+            )
+            AppTab.PROFILE -> copy(
+                profileStack = pushUserProfile(
+                    stack = profileStack,
+                    root = AppRoute.Profile,
+                    route = route
+                )
+            )
+        }
     }
 
     fun openRoomDetails(): AppNavState {
@@ -237,5 +283,23 @@ data class AppNavState(
         } else {
             listOf(AppRoute.Rooms) + stack
         }
+    }
+
+    private fun pushUserProfile(
+        stack: List<AppRoute>,
+        root: AppRoute,
+        route: AppRoute.UserProfile
+    ): List<AppRoute> {
+        val rootedStack = if (stack.firstOrNull() == root) {
+            stack
+        } else {
+            listOf(root) + stack
+        }
+        val baseStack = if (rootedStack.lastOrNull() is AppRoute.UserProfile) {
+            rootedStack.dropLast(1)
+        } else {
+            rootedStack
+        }
+        return baseStack + route
     }
 }

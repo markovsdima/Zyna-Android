@@ -16,10 +16,14 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
+import com.zyna.app.ui.app.UserProfileUiState
 import com.zyna.app.ui.auth.LoginScreen
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
+import com.zyna.app.ui.contacts.ContactsScreenView
+import com.zyna.app.ui.contacts.ContactsScreenViewActions
+import com.zyna.app.ui.contacts.ContactsScreenViewState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
 import com.zyna.app.ui.profile.EditProfileScreenView
@@ -28,6 +32,9 @@ import com.zyna.app.ui.profile.EditProfileScreenViewState
 import com.zyna.app.ui.profile.ProfileScreenView
 import com.zyna.app.ui.profile.ProfileScreenViewActions
 import com.zyna.app.ui.profile.ProfileScreenViewState
+import com.zyna.app.ui.profile.UserProfileScreenView
+import com.zyna.app.ui.profile.UserProfileScreenViewActions
+import com.zyna.app.ui.profile.UserProfileScreenViewState
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
@@ -254,7 +261,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             when (route) {
                 AppRoute.Login -> loginEntry(state, actions)
                 is AppRoute.RecoveryKey -> recoveryEntry(state, actions, route)
-                AppRoute.Contacts -> tabPlaceholderEntry(AppTab.CONTACTS)
+                AppRoute.Contacts -> contactsEntry(state, actions)
+                is AppRoute.UserProfile -> userProfileEntry(state, actions, route)
                 AppRoute.Calls -> tabPlaceholderEntry(AppTab.CALLS)
                 AppRoute.Rooms -> roomsEntry(
                     state = state,
@@ -307,6 +315,66 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 )
             }
         }
+    }
+
+    private fun contactsEntry(
+        state: AppUiState,
+        actions: ZynaAppActions
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "contacts:root",
+            createView = { context -> ContactsScreenView(context) },
+            updateView = { view ->
+                (view as ContactsScreenView).render(
+                    state = ContactsScreenViewState(
+                        contacts = state.contacts,
+                        searchQuery = state.contactsSearchQuery,
+                        isSearching = state.isSearchingContacts,
+                        errorMessage = state.contactActionErrorMessage
+                            ?: state.contactsSearchErrorMessage,
+                        actionUserId = state.contactActionUserId,
+                        matrixMediaLoader = actions.matrixMediaLoader,
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                    ),
+                    actions = ContactsScreenViewActions(
+                        onSearchQueryChanged = actions.onContactsSearchQueryChanged,
+                        onOpenProfile = actions.onOpenUserProfile,
+                        onOpenChat = actions.onOpenContactChat,
+                        onCall = actions.onCallContact,
+                        onRefresh = actions.onRefreshRooms
+                    )
+                )
+            }
+        )
+    }
+
+    private fun userProfileEntry(
+        state: AppUiState,
+        actions: ZynaAppActions,
+        route: AppRoute.UserProfile
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "user:${route.userId}",
+            createView = { context -> UserProfileScreenView(context) },
+            updateView = { view ->
+                (view as UserProfileScreenView).render(
+                    state = UserProfileScreenViewState(
+                        profile = state.userProfile.takeIf { it.userId == route.userId }
+                            ?: UserProfileUiState(userId = route.userId),
+                        roomId = state.roomIdForContact(route.userId),
+                        actionUserId = state.contactActionUserId,
+                        actionErrorMessage = state.contactActionErrorMessage,
+                        matrixMediaLoader = actions.matrixMediaLoader
+                    ),
+                    actions = UserProfileScreenViewActions(
+                        onBack = { actions.onNavigateBack() },
+                        onMessage = actions.onOpenUserProfileChat,
+                        onCall = actions.onCallUserProfile,
+                        onRefresh = actions.onRefreshUserProfile
+                    )
+                )
+            }
+        )
     }
 
     private fun roomsEntry(
@@ -790,6 +858,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         return when (this) {
             AppRoute.Calls -> "Calls"
             AppRoute.ChatThemeSettings -> "ChatThemeSettings"
+            is AppRoute.UserProfile -> "UserProfile(${userId.takeLast(10)})"
             AppRoute.Contacts -> "Contacts"
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"

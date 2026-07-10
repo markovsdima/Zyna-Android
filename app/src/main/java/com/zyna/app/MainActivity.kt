@@ -192,6 +192,15 @@ class MainActivity : AppCompatActivity() {
             onNavigateBack = appViewModel::navigateBack,
             onRefreshRooms = appViewModel::refreshRooms,
             onOpenRoom = appViewModel::openRoom,
+            onContactsSearchQueryChanged = appViewModel::setContactsSearchQuery,
+            onOpenUserProfile = appViewModel::openUserProfile,
+            onOpenContactChat = appViewModel::openContactChat,
+            onCallContact = appViewModel::callContact,
+            onOpenUserProfileChat = appViewModel::openUserProfileChat,
+            onCallUserProfile = appViewModel::callUserProfile,
+            onRefreshUserProfile = appViewModel::refreshUserProfile,
+            onConsumePendingNativeMatrixRtcCallLaunch =
+                appViewModel::consumePendingNativeMatrixRtcCallLaunch,
             onForwardRoomSelected = appViewModel::selectForwardRoom,
             onCancelForwardPicker = appViewModel::cancelForwardPicker,
             onRefreshChat = appViewModel::refreshCurrentChat,
@@ -289,6 +298,7 @@ class MainActivity : AppCompatActivity() {
                     latestState = state
                     hasRenderedState = true
                     rootHost.render(state, actions, preferences)
+                    startPendingNativeMatrixRtcCallIfNeeded(state, actions)
                     requestNotificationPermissionIfNeeded(state)
                     restoreNativeMatrixRtcCallOverlayIfNeeded(state)
                     renderPhotoEditor()
@@ -354,6 +364,23 @@ class MainActivity : AppCompatActivity() {
             .putBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, true)
             .apply()
         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun startPendingNativeMatrixRtcCallIfNeeded(
+        state: AppUiState,
+        actions: ZynaAppActions
+    ) {
+        val pendingLaunch = state.pendingNativeMatrixRtcCallLaunch ?: return
+        val activeChatRoute = state.activeChatRoute ?: return
+        if (activeChatRoute.roomId != pendingLaunch.roomId) {
+            return
+        }
+
+        actions.onConsumePendingNativeMatrixRtcCallLaunch(pendingLaunch.requestId)
+        startNativeMatrixRtcCallWithPermission(
+            roomId = pendingLaunch.roomId,
+            roomName = pendingLaunch.roomName
+        )
     }
 
     private fun startNativeMatrixRtcCallWithPermission(roomId: String, roomName: String) {
@@ -967,6 +994,7 @@ private fun AppRoute.perfName(): String {
     return when (this) {
         AppRoute.Calls -> "Calls"
         AppRoute.ChatThemeSettings -> "ChatThemeSettings"
+        is AppRoute.UserProfile -> "UserProfile(${userId.takeLast(10)})"
         AppRoute.Contacts -> "Contacts"
         AppRoute.ForwardPicker -> "ForwardPicker"
         AppRoute.Login -> "Login"

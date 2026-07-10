@@ -5,6 +5,7 @@ import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.media.VoiceRecorderController
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
+import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.ui.app.AppTab
@@ -21,6 +22,14 @@ data class ZynaAppActions(
     val onNavigateBack: () -> Boolean,
     val onRefreshRooms: () -> Unit,
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
+    val onContactsSearchQueryChanged: (String) -> Unit,
+    val onOpenUserProfile: (MatrixContact) -> Unit,
+    val onOpenContactChat: (MatrixContact) -> Unit,
+    val onCallContact: (MatrixContact) -> Unit,
+    val onOpenUserProfileChat: () -> Unit,
+    val onCallUserProfile: () -> Unit,
+    val onRefreshUserProfile: () -> Unit,
+    val onConsumePendingNativeMatrixRtcCallLaunch: (Long) -> Unit,
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
     val onCancelForwardPicker: () -> Unit,
     val onRefreshChat: () -> Unit,

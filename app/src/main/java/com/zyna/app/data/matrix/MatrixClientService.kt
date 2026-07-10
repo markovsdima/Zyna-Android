@@ -52,6 +52,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.matrix.rustcomponents.sdk.CallDeclineListener
+import org.matrix.rustcomponents.sdk.CreateRoomParameters
 import org.matrix.rustcomponents.sdk.DateDividerMode
 import org.matrix.rustcomponents.sdk.Client
 import org.matrix.rustcomponents.sdk.ClientBuilder
@@ -88,6 +89,8 @@ import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
 import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomListServiceState
 import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
+import org.matrix.rustcomponents.sdk.RoomPreset
+import org.matrix.rustcomponents.sdk.RoomVisibility
 import org.matrix.rustcomponents.sdk.RtcCallIntent
 import org.matrix.rustcomponents.sdk.RtcCallIntentConsensus
 import org.matrix.rustcomponents.sdk.RtcNotificationType
@@ -106,6 +109,7 @@ import org.matrix.rustcomponents.sdk.TimelineFocus
 import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
+import org.matrix.rustcomponents.sdk.UserProfile
 import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
 import org.json.JSONObject
@@ -127,6 +131,22 @@ data class MatrixOwnProfile(
     val userId: String,
     val displayName: String?,
     val avatarUrl: String?
+)
+
+data class MatrixUserProfile(
+    val userId: String,
+    val displayName: String?,
+    val avatarUrl: String?
+) {
+    val effectiveDisplayName: String
+        get() = displayName?.takeIf { it.isNotBlank() } ?: userId
+}
+
+data class MatrixContact(
+    val userId: String,
+    val displayName: String,
+    val avatarUrl: String?,
+    val roomId: String?
 )
 
 data class MatrixRoomSummary(
@@ -487,6 +507,85 @@ class MatrixClientService(
             userId = activeClient.userId(),
             displayName = activeClient.displayName()?.takeIf { it.isNotBlank() },
             avatarUrl = activeClient.avatarUrl()?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    suspend fun loadUserProfile(userId: String): MatrixUserProfile = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val normalizedUserId = userId.trim()
+        require(normalizedUserId.isNotEmpty()) { "User ID is required" }
+
+        activeClient.getProfile(normalizedUserId).toMatrixUserProfile()
+    }
+
+    suspend fun searchUsers(searchTerm: String, limit: Int): List<MatrixUserProfile> =
+        withContext(Dispatchers.IO) {
+            val activeClient = client ?: error("Matrix client is not ready")
+            val normalizedSearchTerm = searchTerm.trim()
+            if (normalizedSearchTerm.isEmpty()) {
+                return@withContext emptyList()
+            }
+
+            val ownUserId = runCatching { activeClient.userId() }.getOrNull()
+            activeClient
+                .searchUsers(
+                    searchTerm = normalizedSearchTerm,
+                    limit = limit.coerceAtLeast(1).toULong()
+                )
+                .results
+                .asSequence()
+                .map { it.toMatrixUserProfile() }
+                .filter { it.userId.isNotBlank() && it.userId != ownUserId }
+                .distinctBy { it.userId }
+                .toList()
+        }
+
+    suspend fun resolveDirectRoom(
+        userId: String,
+        fallbackDisplayName: String?,
+        fallbackAvatarUrl: String?
+    ): MatrixRoomSummary = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val normalizedUserId = userId.trim()
+        require(normalizedUserId.isNotEmpty()) { "User ID is required" }
+
+        val existingDmRoom = activeClient.getDmRoom(normalizedUserId)
+        if (existingDmRoom != null) {
+            return@withContext existingDmRoom.use { room ->
+                room.toRoomSummary().copy(directUserId = normalizedUserId)
+            }
+        }
+
+        val roomId = activeClient.createRoom(
+            request = CreateRoomParameters(
+                name = null,
+                topic = null,
+                isEncrypted = true,
+                isDirect = true,
+                visibility = RoomVisibility.Private,
+                preset = RoomPreset.TRUSTED_PRIVATE_CHAT,
+                invite = listOf(normalizedUserId),
+                avatar = null,
+                powerLevelContentOverride = null,
+                joinRuleOverride = null,
+                historyVisibilityOverride = null,
+                canonicalAlias = null,
+                isSpace = false
+            )
+        )
+
+        val createdRoom = activeClient.getRoom(roomId)
+        if (createdRoom != null) {
+            return@withContext createdRoom.use { room ->
+                room.toRoomSummary().copy(directUserId = normalizedUserId)
+            }
+        }
+
+        MatrixRoomSummary(
+            id = roomId,
+            displayName = fallbackDisplayName?.takeIf { it.isNotBlank() } ?: normalizedUserId,
+            avatarUrl = fallbackAvatarUrl?.takeIf { it.isNotBlank() },
+            directUserId = normalizedUserId
         )
     }
 
@@ -2310,6 +2409,14 @@ class MatrixClientService(
         return (this as? ProfileDetails.Ready)
             ?.displayName
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun UserProfile.toMatrixUserProfile(): MatrixUserProfile {
+        return MatrixUserProfile(
+            userId = userId,
+            displayName = displayName?.takeIf { it.isNotBlank() },
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() }
+        )
     }
 
     private fun ULong.toIntOrNull(): Int? {

@@ -15,6 +15,7 @@ import android.view.View
 import android.view.inputmethod.InputMethodManager
 import android.webkit.MimeTypeMap
 import android.widget.EditText
+import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
@@ -265,9 +266,26 @@ class MainActivity : AppCompatActivity() {
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
+                override fun handleOnBackStarted(backEvent: BackEventCompat) {
+                    if (nativeMatrixRtcCallController == null) {
+                        rootHost.handleSystemBackStarted()
+                    }
+                }
+
+                override fun handleOnBackProgressed(backEvent: BackEventCompat) {
+                    rootHost.handleSystemBackProgressed(backEvent.progress)
+                }
+
+                override fun handleOnBackCancelled() {
+                    rootHost.handleSystemBackCancelled()
+                }
+
                 override fun handleOnBackPressed() {
                     nativeMatrixRtcCallController?.let { controller ->
                         controller.endCall()
+                        return
+                    }
+                    if (rootHost.handleSystemBackPressed()) {
                         return
                     }
                     if (rootHost.handleBack()) {

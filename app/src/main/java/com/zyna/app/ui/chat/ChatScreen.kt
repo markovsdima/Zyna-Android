@@ -424,6 +424,10 @@ internal class ChatScreenView(
         return true
     }
 
+    fun canStartNavigationBackGesture(): Boolean {
+        return photoViewerLayer == null && chatLayout.canStartNavigationBackGesture()
+    }
+
     fun render(state: ChatScreenViewState, actions: ChatScreenViewActions) {
         updateNativeThemeIfNeeded(state.chatBubbleTheme)
         val renderStart = ZynaPerfLog.start()

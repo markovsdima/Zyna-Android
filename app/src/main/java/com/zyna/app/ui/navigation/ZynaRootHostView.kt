@@ -3,9 +3,14 @@ package com.zyna.app.ui.navigation
 import android.content.Context
 import android.graphics.Color
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.VelocityTracker
+import android.view.ViewConfiguration
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.compose.ui.platform.ComposeView
@@ -55,8 +60,16 @@ import com.zyna.app.ui.settings.SettingsScreenViewActions
 import com.zyna.app.ui.settings.SettingsScreenViewState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
+import kotlin.math.abs
+import kotlin.math.max
 
 class ZynaRootHostView(context: Context) : FrameLayout(context) {
+    private enum class FullscreenBackGesturePhase {
+        Idle,
+        Watching,
+        Dragging
+    }
+
     private val navigationStack = ZynaNavigationStackView(context)
     private val vulkanOverlayHost = VulkanChatOverlayView(context).apply {
         setOverlayEnabled(BuildConfig.VULKAN_CHAT_GLASS_ENABLED)
@@ -82,11 +95,27 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var didScheduleChatViewWarmup = false
     private var prewarmedChatView: ChatScreenView? = null
     private val roomsScrollAnchors = mutableMapOf<String, RoomsScrollAnchor>()
+    private val tabBarInterpolator = DecelerateInterpolator()
+    private val fullscreenBackTouchSlop = ViewConfiguration.get(context).scaledTouchSlop
+    private var fullscreenBackGesturePhase = FullscreenBackGesturePhase.Idle
+    private var fullscreenBackPointerId = MotionEvent.INVALID_POINTER_ID
+    private var fullscreenBackStartX = 0f
+    private var fullscreenBackStartY = 0f
+    private var fullscreenBackProgress = 0f
+    private var fullscreenBackVelocityTracker: VelocityTracker? = null
+    private var systemBackInProgress = false
+    private var navigationTouchSuppressionUntilUptimeMs = 0L
+    private var isSuppressingNavigationTouchSequence = false
 
     init {
         setBackgroundColor(Color.BLACK)
         navigationStack.onRootGlassLayerStateChanged = { ownerKey, translationX ->
             rootGlassCoordinator.setPresentedOwner(ownerKey, translationX)
+        }
+        navigationStack.onAppliedEntryKeysChanged = { keys ->
+            lastRouteKey = keys
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString(separator = "/")
         }
         addView(
             navigationStack,
@@ -151,6 +180,30 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
     }
 
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (shouldSuppressNavigationTouch(ev)) {
+            return true
+        }
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        if (handleFullscreenBackGesture(ev, fromIntercept = true)) {
+            return true
+        }
+        return super.onInterceptTouchEvent(ev)
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (
+            fullscreenBackGesturePhase != FullscreenBackGesturePhase.Idle &&
+            handleFullscreenBackGesture(event, fromIntercept = false)
+        ) {
+            return true
+        }
+        return super.onTouchEvent(event)
+    }
+
     fun render(
         state: AppUiState,
         actions: ZynaAppActions,
@@ -208,6 +261,273 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         return actions.onNavigateBack()
     }
 
+    fun handleSystemBackStarted(): Boolean {
+        if (!canStartNavigationBackGesture()) {
+            return false
+        }
+        systemBackInProgress = navigationStack.beginInteractivePop(
+            ZynaNavigationStackView.BackInteractionStyle.PredictiveBack
+        )
+        return systemBackInProgress
+    }
+
+    fun handleSystemBackProgressed(progress: Float) {
+        if (!systemBackInProgress) {
+            return
+        }
+        navigationStack.updateInteractivePop(progress)
+    }
+
+    fun handleSystemBackCancelled() {
+        if (!systemBackInProgress) {
+            return
+        }
+        systemBackInProgress = false
+        suppressNavigationTouches()
+        navigationStack.cancelInteractivePop()
+    }
+
+    fun handleSystemBackPressed(): Boolean {
+        if (!systemBackInProgress) {
+            return false
+        }
+        systemBackInProgress = false
+        suppressNavigationTouches()
+        navigationStack.finishInteractivePop {
+            latestActions?.onNavigateBack() == true
+        }
+        return true
+    }
+
+    private fun handleFullscreenBackGesture(
+        event: MotionEvent,
+        fromIntercept: Boolean
+    ): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                resetFullscreenBackGesture()
+                if (
+                    !canStartNavigationBackGesture() ||
+                    isTouchInsideVisibleTabBar(event.y) ||
+                    hasHorizontalScrollingChildAt(event.x, event.y)
+                ) {
+                    return false
+                }
+                fullscreenBackGesturePhase = FullscreenBackGesturePhase.Watching
+                fullscreenBackPointerId = event.getPointerId(0)
+                fullscreenBackStartX = event.x
+                fullscreenBackStartY = event.y
+                fullscreenBackVelocityTracker = VelocityTracker.obtain().also {
+                    it.addMovement(event)
+                }
+                return false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val pointerIndex = event.findPointerIndex(fullscreenBackPointerId)
+                if (pointerIndex < 0) {
+                    resetFullscreenBackGesture()
+                    return false
+                }
+                val x = event.getX(pointerIndex)
+                val y = event.getY(pointerIndex)
+                return when (fullscreenBackGesturePhase) {
+                    FullscreenBackGesturePhase.Idle -> false
+                    FullscreenBackGesturePhase.Watching ->
+                        maybeStartFullscreenBackDrag(event, x, y, fromIntercept)
+                    FullscreenBackGesturePhase.Dragging -> {
+                        if (!fromIntercept) {
+                            fullscreenBackVelocityTracker?.addMovement(event)
+                            updateFullscreenBackDrag(x)
+                        }
+                        true
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_CANCEL,
+            MotionEvent.ACTION_POINTER_UP -> {
+                if (fullscreenBackGesturePhase == FullscreenBackGesturePhase.Dragging) {
+                    if (!fromIntercept) {
+                        finishFullscreenBackDrag(event)
+                    }
+                    return true
+                }
+                resetFullscreenBackGesture()
+                return false
+            }
+        }
+        return fullscreenBackGesturePhase == FullscreenBackGesturePhase.Dragging
+    }
+
+    private fun maybeStartFullscreenBackDrag(
+        event: MotionEvent,
+        x: Float,
+        y: Float,
+        fromIntercept: Boolean
+    ): Boolean {
+        val dx = x - fullscreenBackStartX
+        val dy = y - fullscreenBackStartY
+        val absDy = abs(dy)
+        val startThreshold = max(
+            fullscreenBackTouchSlop * FULLSCREEN_BACK_TOUCH_SLOP_MULTIPLIER,
+            dp(FULLSCREEN_BACK_MIN_START_DP).toFloat()
+        )
+
+        if (dx < -fullscreenBackTouchSlop || absDy > fullscreenBackTouchSlop && absDy > dx) {
+            resetFullscreenBackGesture()
+            return false
+        }
+
+        val isBackSwipe = dx >= startThreshold && dx > absDy * FULLSCREEN_BACK_DIRECTION_RATIO
+        if (!isBackSwipe) {
+            return false
+        }
+
+        val didBegin = navigationStack.beginInteractivePop(
+            ZynaNavigationStackView.BackInteractionStyle.FullScreenDrag
+        )
+        if (!didBegin) {
+            resetFullscreenBackGesture()
+            return false
+        }
+
+        fullscreenBackGesturePhase = FullscreenBackGesturePhase.Dragging
+        fullscreenBackStartX = x
+        fullscreenBackStartY = y
+        fullscreenBackProgress = 0f
+        parent?.requestDisallowInterceptTouchEvent(true)
+        if (!fromIntercept) {
+            fullscreenBackVelocityTracker?.addMovement(event)
+        }
+        return true
+    }
+
+    private fun updateFullscreenBackDrag(x: Float) {
+        val width = max(width, resources.displayMetrics.widthPixels).toFloat()
+        val dx = max(0f, x - fullscreenBackStartX)
+        fullscreenBackProgress = (dx / width).coerceIn(0f, 1f)
+        navigationStack.updateInteractivePop(fullscreenBackProgress)
+    }
+
+    private fun finishFullscreenBackDrag(event: MotionEvent) {
+        fullscreenBackVelocityTracker?.addMovement(event)
+        fullscreenBackVelocityTracker?.computeCurrentVelocity(1000)
+        val velocityX = fullscreenBackVelocityTracker?.xVelocity ?: 0f
+        val velocityY = fullscreenBackVelocityTracker?.yVelocity ?: 0f
+        val velocityThreshold = dp(FULLSCREEN_BACK_FINISH_VELOCITY_DP).toFloat()
+        val shouldFinish =
+            fullscreenBackProgress >= FULLSCREEN_BACK_FINISH_PROGRESS ||
+                velocityX >= velocityThreshold &&
+                velocityX > abs(velocityY)
+
+        val actions = latestActions
+        resetFullscreenBackGesture(resetStack = false)
+        suppressNavigationTouches()
+        if (shouldFinish && actions != null) {
+            navigationStack.finishInteractivePop {
+                actions.onNavigateBack()
+            }
+        } else {
+            navigationStack.cancelInteractivePop()
+        }
+    }
+
+    private fun resetFullscreenBackGesture(resetStack: Boolean = true) {
+        if (resetStack && fullscreenBackGesturePhase == FullscreenBackGesturePhase.Dragging) {
+            navigationStack.cancelInteractivePop()
+        }
+        fullscreenBackGesturePhase = FullscreenBackGesturePhase.Idle
+        fullscreenBackPointerId = MotionEvent.INVALID_POINTER_ID
+        fullscreenBackStartX = 0f
+        fullscreenBackStartY = 0f
+        fullscreenBackProgress = 0f
+        fullscreenBackVelocityTracker?.recycle()
+        fullscreenBackVelocityTracker = null
+        parent?.requestDisallowInterceptTouchEvent(false)
+    }
+
+    private fun suppressNavigationTouches() {
+        navigationTouchSuppressionUntilUptimeMs =
+            SystemClock.uptimeMillis() + NAVIGATION_TOUCH_SUPPRESSION_MS
+    }
+
+    private fun shouldSuppressNavigationTouch(event: MotionEvent): Boolean {
+        val isWindowActive =
+            SystemClock.uptimeMillis() < navigationTouchSuppressionUntilUptimeMs
+        return when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                isSuppressingNavigationTouchSequence = isWindowActive
+                isSuppressingNavigationTouchSequence
+            }
+            MotionEvent.ACTION_MOVE,
+            MotionEvent.ACTION_POINTER_DOWN,
+            MotionEvent.ACTION_POINTER_UP -> isSuppressingNavigationTouchSequence || isWindowActive
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_CANCEL -> {
+                val shouldSuppress = isSuppressingNavigationTouchSequence || isWindowActive
+                isSuppressingNavigationTouchSequence = false
+                shouldSuppress
+            }
+            else -> false
+        }
+    }
+
+    private fun canStartNavigationBackGesture(): Boolean {
+        val state = latestState ?: return false
+        if (latestActions == null || overlayContainer.childCount > 0) {
+            return false
+        }
+        if (!navigationStack.canStartInteractivePop()) {
+            return false
+        }
+        if (state.route == AppRoute.EditProfile && state.ownProfile.isSaving) {
+            return false
+        }
+        if (
+            state.route is AppRoute.Chat &&
+            (navigationStack.topView() as? ChatScreenView)?.canStartNavigationBackGesture() != true
+        ) {
+            return false
+        }
+        return true
+    }
+
+    private fun isTouchInsideVisibleTabBar(y: Float): Boolean {
+        return tabBar.visibility == View.VISIBLE && y >= tabBar.y
+    }
+
+    private fun hasHorizontalScrollingChildAt(x: Float, y: Float): Boolean {
+        val topView = navigationStack.topView() ?: return false
+        val localX = x - navigationStack.x - topView.x
+        val localY = y - navigationStack.y - topView.y
+        return hasHorizontalScrollingChildAt(topView, localX, localY)
+    }
+
+    private fun hasHorizontalScrollingChildAt(view: View, x: Float, y: Float): Boolean {
+        if (
+            view.visibility != View.VISIBLE ||
+            x < 0f ||
+            y < 0f ||
+            x > view.width ||
+            y > view.height
+        ) {
+            return false
+        }
+        if (view.canScrollHorizontally(-1)) {
+            return true
+        }
+        val group = view as? ViewGroup ?: return false
+        for (index in group.childCount - 1 downTo 0) {
+            val child = group.getChildAt(index)
+            val childX = x + group.scrollX - child.left - child.translationX
+            val childY = y + group.scrollY - child.top - child.translationY
+            if (hasHorizontalScrollingChildAt(child, childX, childY)) {
+                return true
+            }
+        }
+        return false
+    }
+
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val actions = latestActions ?: return
@@ -223,6 +543,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         ) {
             "route=${state.route.perfName()} keys=${entries.map { it.key }}"
         }
+        val hadRenderedRoute = lastRouteKey != null
         val nextRouteKey = entries.joinToString(separator = "/") { it.key }
         val shouldAnimate = animated && lastRouteKey != null && sameRoot(lastRouteKey, nextRouteKey)
         val stackStart = ZynaPerfLog.start()
@@ -240,10 +561,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         ) {
             discardPrewarmedChatView()
         }
-        lastRouteKey = nextRouteKey
-
         val showTabs = state.navState.showsTabs
-        tabBar.visibility = if (showTabs) View.VISIBLE else View.GONE
+        setTabBarPresented(showTabs, animated = animated && hadRenderedRoute)
         tabBar.setSelectedTab(state.selectedTab.toTabBarTab())
         ZynaPerfLog.mark {
             "root.tabs route=${state.route.perfName()} visible=$showTabs selected=${state.selectedTab}"
@@ -252,6 +571,62 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             scheduleVulkanWarmup()
             scheduleChatViewWarmup()
         }
+    }
+
+    private fun setTabBarPresented(presented: Boolean, animated: Boolean) {
+        tabBar.animate().cancel()
+        val hiddenTranslationY = tabBarHiddenTranslationY()
+        tabBar.isEnabled = presented
+
+        if (!animated) {
+            tabBar.visibility = if (presented) View.VISIBLE else View.GONE
+            tabBar.alpha = 1f
+            tabBar.translationY = if (presented) 0f else hiddenTranslationY
+            return
+        }
+
+        if (presented) {
+            if (tabBar.visibility != View.VISIBLE) {
+                tabBar.alpha = 1f
+                tabBar.translationY = hiddenTranslationY
+                tabBar.visibility = View.VISIBLE
+            }
+            tabBar.animate()
+                .translationY(0f)
+                .setDuration(TAB_BAR_ANIMATION_MS)
+                .setInterpolator(tabBarInterpolator)
+                .withEndAction {
+                    if (latestState?.navState?.showsTabs == true) {
+                        tabBar.alpha = 1f
+                        tabBar.translationY = 0f
+                    }
+                }
+                .start()
+        } else {
+            if (tabBar.visibility != View.VISIBLE) {
+                tabBar.alpha = 1f
+                tabBar.translationY = hiddenTranslationY
+                return
+            }
+            tabBar.animate()
+                .translationY(hiddenTranslationY)
+                .setDuration(TAB_BAR_ANIMATION_MS)
+                .setInterpolator(tabBarInterpolator)
+                .withEndAction {
+                    if (latestState?.navState?.showsTabs != true) {
+                        tabBar.visibility = View.GONE
+                        tabBar.alpha = 1f
+                        tabBar.translationY = tabBarHiddenTranslationY()
+                    }
+                }
+                .start()
+        }
+    }
+
+    private fun tabBarHiddenTranslationY(): Float {
+        val measuredHeight = tabBar.height.takeIf { it > 0 }
+            ?: (dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset)
+        return measuredHeight.toFloat()
     }
 
     private fun entriesFor(
@@ -916,5 +1291,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         const val VULKAN_WARMUP_DELAY_MS = 350L
         const val CHAT_VIEW_WARMUP_DELAY_MS = 900L
         const val CHAT_GLASS_OWNER_KEY = "chat"
+        const val TAB_BAR_ANIMATION_MS = 220L
+        const val FULLSCREEN_BACK_MIN_START_DP = 18
+        const val FULLSCREEN_BACK_TOUCH_SLOP_MULTIPLIER = 1.5f
+        const val FULLSCREEN_BACK_DIRECTION_RATIO = 2.0f
+        const val FULLSCREEN_BACK_FINISH_PROGRESS = 0.38f
+        const val FULLSCREEN_BACK_FINISH_VELOCITY_DP = 900
+        const val NAVIGATION_TOUCH_SUPPRESSION_MS = 260L
     }
 }

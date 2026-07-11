@@ -807,6 +807,13 @@ internal class GlassChatLayout @JvmOverloads constructor(
         post { updateVulkanGlassRects() }
     }
 
+    internal fun canStartNavigationBackGesture(): Boolean {
+        return !isContextGestureActive &&
+            !isContextMenuShowing &&
+            teleportSnapshotView == null &&
+            teleportAnimator == null
+    }
+
     private fun redrawGlassBackdropAfterContextMenuDismiss() {
         syncExternalContextMenuLayerLayout()
         glassController.invalidateRegions()

@@ -17,13 +17,16 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.presence.UserPresenceStatus
 import com.zyna.app.ui.app.UserProfileUiState
+import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
 internal data class UserProfileScreenViewState(
     val profile: UserProfileUiState,
     val roomId: String?,
+    val presence: UserPresenceStatus?,
     val actionUserId: String?,
     val actionErrorMessage: String?,
     val matrixMediaLoader: MatrixMediaLoader?
@@ -91,6 +94,13 @@ internal class UserProfileScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER
         includeFontPadding = true
         maxLines = 2
+        ellipsize = TextUtils.TruncateAt.END
+    }
+    private val presenceText = TextView(context).apply {
+        textSize = 14f
+        gravity = Gravity.CENTER
+        includeFontPadding = true
+        maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }
     private val chatStateText = TextView(context).apply {
@@ -169,6 +179,12 @@ internal class UserProfileScreenView(context: Context) : FrameLayout(context) {
             }
         )
         content.addView(
+            presenceText,
+            matchWrapParams().apply {
+                topMargin = dp(6)
+            }
+        )
+        content.addView(
             chatStateText,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -244,6 +260,13 @@ internal class UserProfileScreenView(context: Context) : FrameLayout(context) {
             ?: context.getString(R.string.user_profile_title)
         nameText.text = profile.effectiveDisplayName
         userIdText.text = profile.userId
+        val presenceLabel = PresenceText.label(
+            context = context,
+            status = state.presence,
+            style = PresenceText.LastSeenStyle.EXPANDED
+        )
+        presenceText.text = presenceLabel.orEmpty()
+        presenceText.visibility = if (presenceLabel.isNullOrBlank()) GONE else VISIBLE
         avatarView.render(
             userId = profile.userId,
             displayName = profile.displayName,
@@ -287,6 +310,7 @@ internal class UserProfileScreenView(context: Context) : FrameLayout(context) {
         avatarView.setPalette(palette)
         nameText.setTextColor(palette.titleText)
         userIdText.setTextColor(palette.secondaryText)
+        presenceText.setTextColor(palette.secondaryText)
         chatStateText.setTextColor(palette.secondaryText)
         chatStateText.background = roundedDrawable(palette.surface, dp(12))
         messageButton.setTextColor(palette.actionText)

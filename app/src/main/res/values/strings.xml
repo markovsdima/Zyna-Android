@@ -48,4 +48,22 @@
     <string name="user_profile_loading">Loading profile...</string>
     <string name="user_profile_opening_chat">Opening chat...</string>
     <string name="user_profile_retry">Retry</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="settings_presence">Presence</string>
+    <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
+    <string name="presence_provider_matrix_standard">Matrix Standard</string>
+    <string name="presence_provider_off">Off</string>
+    <string name="presence_online">online</string>
+    <string name="presence_last_seen_just_now">last seen just now</string>
+    <string name="presence_last_seen_today_at">last seen today at %1$s</string>
+    <string name="presence_last_seen_yesterday_at">last seen yesterday at %1$s</string>
+    <string name="presence_last_seen_date">last seen %1$s</string>
+    <plurals name="presence_last_seen_minutes_ago">
+        <item quantity="one">last seen %1$d minute ago</item>
+        <item quantity="other">last seen %1$d minutes ago</item>
+    </plurals>
+    <plurals name="presence_last_seen_hours_ago">
+        <item quantity="one">last seen %1$d hour ago</item>
+        <item quantity="other">last seen %1$d hours ago</item>
+    </plurals>
 </resources>

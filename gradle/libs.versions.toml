@@ -16,6 +16,7 @@ fragment = "1.8.9"
 googleServices = "4.5.0"
 livekit = "2.26.1-zyna.3.1"
 matrixSdk = "26.05.13-latest-own-read-receipts-beta.1"
+okhttp = "4.12.0"
 recyclerview = "1.4.0"
 room = "2.8.4"
 sqlcipher = "4.16.0"
@@ -52,6 +53,7 @@ livekit-android = { group = "io.livekit", name = "livekit-android", version.ref 
 livekit-android-camerax = { group = "io.livekit", name = "livekit-android-camerax", version.ref = "livekit" }
 livekit-android-track-processors = { group = "io.livekit", name = "livekit-android-track-processors", version.ref = "livekit" }
 matrix-sdk = { group = "org.matrix.rustcomponents", name = "sdk-android", version.ref = "matrixSdk" }
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
 
 [plugins]

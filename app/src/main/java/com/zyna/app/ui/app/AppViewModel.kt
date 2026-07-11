@@ -35,6 +35,8 @@ import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
+import com.zyna.app.data.presence.PresenceRepository
+import com.zyna.app.data.presence.UserPresenceStatus
 import com.zyna.app.data.profile.ProfileAvatarDraft
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.util.ZynaPerfLog
@@ -106,6 +108,7 @@ data class AppUiState(
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
     val ownProfile: OwnProfileUiState = OwnProfileUiState(),
     val rooms: List<MatrixRoomSummary> = emptyList(),
+    val presenceByUserId: Map<String, UserPresenceStatus> = emptyMap(),
     val contactsSearchQuery: String = "",
     val contactsSearchResults: List<MatrixUserProfile> = emptyList(),
     val isSearchingContacts: Boolean = false,
@@ -150,6 +153,14 @@ data class AppUiState(
 
     val activeChatRoute: AppRoute.Chat?
         get() = navState.activeChatRoute
+
+    val activeChatDirectUserId: String?
+        get() = activeChatRoute?.let { route ->
+            rooms.firstOrNull { it.id == route.roomId }?.directUserId
+        }
+
+    val activeChatPresence: UserPresenceStatus?
+        get() = activeChatDirectUserId?.let { userId -> presenceByUserId[userId] }
 
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
@@ -265,6 +276,7 @@ class AppViewModel(
     private val localCacheRepository: LocalCacheRepository,
     private val outgoingOutboxService: OutgoingOutboxService,
     private val matrixMediaLoader: MatrixMediaLoader,
+    private val presenceRepository: PresenceRepository,
     private val nativeMatrixRtcCallService: NativeMatrixRtcCallService
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
@@ -303,15 +315,34 @@ class AppViewModel(
 
     init {
         outgoingOutboxService.start(viewModelScope)
+        presenceRepository.start(viewModelScope)
 
         viewModelScope.launch {
             runCatching { localCacheRepository.cleanupOrphanOutgoingMediaFiles() }
         }
 
         viewModelScope.launch {
+            presenceRepository.statuses.collect { statuses ->
+                _uiState.update { current ->
+                    current.copy(presenceByUserId = statuses)
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            observePresenceRegistrationInputs()
+        }
+
+        viewModelScope.launch {
             matrixClientService.state.collect { matrixState ->
                 val previousUserId = _uiState.value.matrixState.userIdOrNull()
                 val nextUserId = matrixState.userIdOrNull()
+                presenceRepository.setSessionContext(
+                    userId = nextUserId,
+                    allowed = nextUserId != null &&
+                        matrixState !is MatrixClientState.Error &&
+                        matrixClientService.isRecoveryComplete(nextUserId)
+                )
                 val didChangeUser = previousUserId != null &&
                     nextUserId != null &&
                     previousUserId != nextUserId
@@ -354,6 +385,11 @@ class AppViewModel(
                             emptyList()
                         } else {
                             current.rooms
+                        },
+                        presenceByUserId = if (shouldClearSessionData) {
+                            emptyMap()
+                        } else {
+                            current.presenceByUserId
                         },
                         contactsSearchQuery = if (shouldClearSessionData) {
                             ""
@@ -518,6 +554,10 @@ class AppViewModel(
                 password = password
             )
         }
+    }
+
+    fun setAppForeground(isForeground: Boolean) {
+        presenceRepository.setForeground(isForeground)
     }
 
     fun refreshRooms() {
@@ -686,6 +726,8 @@ class AppViewModel(
 
             try {
                 matrixClientService.recoverWithRecoveryKey(recoveryKey)
+                val userId = matrixClientService.state.value.userIdOrNull() ?: return@launch
+                presenceRepository.setSessionContext(userId = userId, allowed = true)
                 _uiState.update {
                     it.copy(
                         navState = it.navState.enterMain(),
@@ -693,7 +735,6 @@ class AppViewModel(
                         recoveryErrorMessage = null
                     )
                 }
-                val userId = matrixClientService.state.value.userIdOrNull() ?: return@launch
                 startRoomListLiveRefresh(userId)
                 refreshRoomsNow()
                 outgoingOutboxService.kick(reason = "recovery-complete")
@@ -3469,6 +3510,64 @@ class AppViewModel(
         roomListLiveUserId = null
     }
 
+    private suspend fun observePresenceRegistrationInputs() {
+        var lastRooms: List<MatrixRoomSummary>? = null
+        var lastRoomUserIds: Set<String> = emptySet()
+        var lastChatRoomId: String? = null
+        var lastChatUserIds: Set<String> = emptySet()
+        var lastProfileUserId: String? = null
+        var lastProfileUserIds: Set<String> = emptySet()
+
+        _uiState.collect { state ->
+            val roomsChanged = lastRooms !== state.rooms
+            if (roomsChanged) {
+                lastRooms = state.rooms
+                val nextRoomUserIds = state.rooms.directPresenceUserIds()
+                if (nextRoomUserIds != lastRoomUserIds) {
+                    lastRoomUserIds = nextRoomUserIds
+                    presenceRepository.register(PRESENCE_TAG_ROOMS, nextRoomUserIds)
+                }
+            }
+
+            val activeChatRoomId = state.activeChatRoute?.roomId
+            if (roomsChanged || activeChatRoomId != lastChatRoomId) {
+                lastChatRoomId = activeChatRoomId
+                val nextChatUserIds = activeChatRoomId
+                    ?.let { roomId -> state.rooms.directPresenceUserIdForRoom(roomId) }
+                    ?.let(::setOf)
+                    ?: emptySet()
+                if (nextChatUserIds != lastChatUserIds) {
+                    lastChatUserIds = nextChatUserIds
+                    presenceRepository.register(PRESENCE_TAG_CHAT, nextChatUserIds)
+                }
+            }
+
+            val profileUserId = (state.route as? AppRoute.UserProfile)
+                ?.userId
+                ?.takeIf { it.isNotBlank() }
+            if (profileUserId != lastProfileUserId) {
+                lastProfileUserId = profileUserId
+                val nextProfileUserIds = profileUserId?.let(::setOf) ?: emptySet()
+                if (nextProfileUserIds != lastProfileUserIds) {
+                    lastProfileUserIds = nextProfileUserIds
+                    presenceRepository.register(PRESENCE_TAG_PROFILE, nextProfileUserIds)
+                }
+            }
+        }
+    }
+
+    private fun List<MatrixRoomSummary>.directPresenceUserIds(): Set<String> {
+        return asSequence()
+            .mapNotNull { room -> room.directUserId?.takeIf { it.isNotBlank() } }
+            .toSet()
+    }
+
+    private fun List<MatrixRoomSummary>.directPresenceUserIdForRoom(roomId: String): String? {
+        return firstOrNull { it.id == roomId }
+            ?.directUserId
+            ?.takeIf { it.isNotBlank() }
+    }
+
     private fun AppUiState.isRouteForRoom(roomId: String): Boolean {
         return activeChatRoute?.roomId == roomId
     }
@@ -3585,6 +3684,9 @@ class AppViewModel(
         const val JUMP_PAGINATION_ATTEMPTS = 8
         const val CALL_HISTORY_LIMIT = 100
         const val CALL_HISTORY_EXPIRY_REFRESH_GRACE_MS = 250L
+        const val PRESENCE_TAG_ROOMS = "rooms"
+        const val PRESENCE_TAG_CHAT = "chat"
+        const val PRESENCE_TAG_PROFILE = "profile"
     }
 }
 
@@ -3597,6 +3699,7 @@ class AppViewModelFactory(
     private val localCacheRepository: LocalCacheRepository,
     private val outgoingOutboxService: OutgoingOutboxService,
     private val matrixMediaLoader: MatrixMediaLoader,
+    private val presenceRepository: PresenceRepository,
     private val nativeMatrixRtcCallService: NativeMatrixRtcCallService
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
@@ -3607,6 +3710,7 @@ class AppViewModelFactory(
                 localCacheRepository = localCacheRepository,
                 outgoingOutboxService = outgoingOutboxService,
                 matrixMediaLoader = matrixMediaLoader,
+                presenceRepository = presenceRepository,
                 nativeMatrixRtcCallService = nativeMatrixRtcCallService
             ) as T
         }

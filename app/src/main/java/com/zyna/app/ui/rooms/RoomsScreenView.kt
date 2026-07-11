@@ -32,6 +32,8 @@ import androidx.recyclerview.widget.SimpleItemAnimator
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.presence.UserPresenceStatus
+import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.util.ZynaPerfLog
 import java.time.Instant
 import java.time.LocalDate
@@ -46,6 +48,7 @@ data class RoomsScreenViewState(
     val title: String,
     val showBack: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?,
+    val presenceByUserId: Map<String, UserPresenceStatus>,
     val initialScrollAnchor: RoomsScrollAnchor?,
     val bottomContentPaddingPx: Int
 )
@@ -243,6 +246,7 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             actions.onOpenRoom(room)
         }
         adapter.setMatrixMediaLoader(state.matrixMediaLoader)
+        adapter.setPresenceStatuses(state.presenceByUserId)
         adapter.submitList(state.rooms) {
             if (listMutationScrollAnchor != null) {
                 val didRestore = restoreScrollAnchor(listMutationScrollAnchor, state.rooms)
@@ -341,6 +345,7 @@ private class RoomsAdapter(
 ) : ListAdapter<MatrixRoomSummary, RoomViewHolder>(RoomDiffCallback) {
     var onRoomClicked: (MatrixRoomSummary) -> Unit = {}
     private var matrixMediaLoader: MatrixMediaLoader? = null
+    private var presenceByUserId: Map<String, UserPresenceStatus> = emptyMap()
     private val boundHolders = mutableSetOf<RoomViewHolder>()
 
     init {
@@ -361,6 +366,7 @@ private class RoomsAdapter(
             room = getItem(position),
             palette = palette,
             matrixMediaLoader = matrixMediaLoader,
+            presence = getItem(position).directUserPresence(),
             onClick = onRoomClicked
         )
     }
@@ -382,6 +388,7 @@ private class RoomsAdapter(
             palette = palette,
             matrixMediaLoader = matrixMediaLoader,
             payload = payload,
+            presence = getItem(position).directUserPresence(),
             onClick = onRoomClicked
         )
     }
@@ -422,6 +429,16 @@ private class RoomsAdapter(
         }
     }
 
+    fun setPresenceStatuses(nextStatuses: Map<String, UserPresenceStatus>) {
+        if (presenceByUserId == nextStatuses) {
+            return
+        }
+        presenceByUserId = nextStatuses
+        boundHolders.forEach { holder ->
+            holder.updatePresence(holder.currentRoomDirectUserId()?.let(nextStatuses::get))
+        }
+    }
+
     fun setPalette(nextPalette: RoomsPalette) {
         if (palette == nextPalette) {
             return
@@ -434,6 +451,10 @@ private class RoomsAdapter(
                 RoomRowPayload(reloadAvatar = false)
             )
         }
+    }
+
+    private fun MatrixRoomSummary.directUserPresence(): UserPresenceStatus? {
+        return directUserId?.takeIf { it.isNotBlank() }?.let(presenceByUserId::get)
     }
 }
 
@@ -451,9 +472,10 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
         room: MatrixRoomSummary,
         palette: RoomsPalette,
         matrixMediaLoader: MatrixMediaLoader?,
+        presence: UserPresenceStatus?,
         onClick: (MatrixRoomSummary) -> Unit
     ) {
-        rowView.bind(room, palette, matrixMediaLoader)
+        rowView.bind(room, palette, matrixMediaLoader, presence)
         rowView.setOnClickListener { onClick(room) }
     }
 
@@ -462,10 +484,19 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
         palette: RoomsPalette,
         matrixMediaLoader: MatrixMediaLoader?,
         payload: RoomRowPayload,
+        presence: UserPresenceStatus?,
         onClick: (MatrixRoomSummary) -> Unit
     ) {
-        rowView.update(room, palette, matrixMediaLoader, payload.reloadAvatar)
+        rowView.update(room, palette, matrixMediaLoader, payload.reloadAvatar, presence)
         rowView.setOnClickListener { onClick(room) }
+    }
+
+    fun updatePresence(presence: UserPresenceStatus?) {
+        rowView.updatePresence(presence)
+    }
+
+    fun currentRoomDirectUserId(): String? {
+        return rowView.currentRoomDirectUserId()
     }
 
     fun recycle() {
@@ -487,6 +518,12 @@ private class RoomRowView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
     private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val onlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val onlineBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
     private val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -513,6 +550,7 @@ private class RoomRowView(context: Context) : View(context) {
     private val badgeRect = RectF()
     private val avatarShaderMatrix = Matrix()
     private var room: MatrixRoomSummary? = null
+    private var presence: UserPresenceStatus? = null
     private var palette = RoomsPalette.from(context.resources.configuration.isNightMode())
     private var avatarFillColor = palette.avatarColors.first()
     private var avatarBitmap: Bitmap? = null
@@ -532,13 +570,15 @@ private class RoomRowView(context: Context) : View(context) {
     fun bind(
         room: MatrixRoomSummary,
         palette: RoomsPalette,
-        matrixMediaLoader: MatrixMediaLoader?
+        matrixMediaLoader: MatrixMediaLoader?,
+        presence: UserPresenceStatus?
     ) {
         this.room = room
         this.palette = palette
+        this.presence = presence
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
-        contentDescription = room.accessibilityText()
+        contentDescription = room.accessibilityText(presence)
         bindAvatar(
             avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
             matrixMediaLoader = matrixMediaLoader
@@ -550,13 +590,15 @@ private class RoomRowView(context: Context) : View(context) {
         room: MatrixRoomSummary,
         palette: RoomsPalette,
         matrixMediaLoader: MatrixMediaLoader?,
-        reloadAvatar: Boolean
+        reloadAvatar: Boolean,
+        presence: UserPresenceStatus?
     ) {
         this.room = room
         this.palette = palette
+        this.presence = presence
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
-        contentDescription = room.accessibilityText()
+        contentDescription = room.accessibilityText(presence)
         if (reloadAvatar) {
             bindAvatar(
                 avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
@@ -564,6 +606,20 @@ private class RoomRowView(context: Context) : View(context) {
             )
         }
         invalidate()
+    }
+
+    fun updatePresence(nextPresence: UserPresenceStatus?) {
+        val wasOnline = PresenceText.isOnline(presence)
+        val isOnline = PresenceText.isOnline(nextPresence)
+        presence = nextPresence
+        room?.let { contentDescription = it.accessibilityText(nextPresence) }
+        if (wasOnline != isOnline) {
+            invalidate()
+        }
+    }
+
+    fun currentRoomDirectUserId(): String? {
+        return room?.directUserId?.takeIf { it.isNotBlank() }
     }
 
     fun recycle() {
@@ -631,6 +687,7 @@ private class RoomRowView(context: Context) : View(context) {
                 avatarTextPaint
             )
         }
+        drawOnlineIndicator(canvas, avatarCenterX, avatarCenterY, avatarSize)
 
         val textLeft = left + avatarSize + dp(12)
         val timeText = room.lastMessageAtMillis?.formatRoomTimestamp().orEmpty()
@@ -853,6 +910,25 @@ private class RoomRowView(context: Context) : View(context) {
         )
     }
 
+    private fun drawOnlineIndicator(
+        canvas: Canvas,
+        avatarCenterX: Float,
+        avatarCenterY: Float,
+        avatarSize: Float
+    ) {
+        if (!PresenceText.isOnline(presence)) {
+            return
+        }
+        onlineBorderPaint.color = palette.onlineBorder
+        onlinePaint.color = palette.onlineFill
+        val dotRadius = dp(5).toFloat()
+        val borderRadius = dotRadius + dp(2).toFloat()
+        val centerX = avatarCenterX + avatarSize / 2f - dotRadius
+        val centerY = avatarCenterY + avatarSize / 2f - dotRadius
+        canvas.drawCircle(centerX, centerY, borderRadius, onlineBorderPaint)
+        canvas.drawCircle(centerX, centerY, dotRadius, onlinePaint)
+    }
+
     private fun applySelectableForeground() {
         val outValue = TypedValue()
         if (context.theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)) {
@@ -930,7 +1006,9 @@ private data class RoomsPalette(
     val unreadFill: Int,
     val mentionFill: Int,
     val unreadText: Int,
-    val errorText: Int
+    val errorText: Int,
+    val onlineFill: Int,
+    val onlineBorder: Int
 ) {
     companion object {
         fun from(isDarkTheme: Boolean): RoomsPalette {
@@ -946,7 +1024,9 @@ private data class RoomsPalette(
                     unreadFill = Color.rgb(208, 188, 255),
                     mentionFill = Color.rgb(255, 180, 171),
                     unreadText = Color.rgb(33, 0, 93),
-                    errorText = Color.rgb(255, 180, 171)
+                    errorText = Color.rgb(255, 180, 171),
+                    onlineFill = Color.rgb(52, 199, 89),
+                    onlineBorder = Color.rgb(18, 18, 22)
                 )
             } else {
                 RoomsPalette(
@@ -960,7 +1040,9 @@ private data class RoomsPalette(
                     unreadFill = Color.rgb(103, 80, 164),
                     mentionFill = Color.rgb(186, 26, 26),
                     unreadText = Color.WHITE,
-                    errorText = Color.rgb(186, 26, 26)
+                    errorText = Color.rgb(186, 26, 26),
+                    onlineFill = Color.rgb(52, 199, 89),
+                    onlineBorder = Color.WHITE
                 )
             }
         }
@@ -994,9 +1076,10 @@ private fun MatrixRoomSummary.stableAvatarId(): String {
     return directUserId?.takeIf { it.isNotBlank() } ?: id
 }
 
-private fun MatrixRoomSummary.accessibilityText(): String {
+private fun MatrixRoomSummary.accessibilityText(presence: UserPresenceStatus?): String {
     val unread = unreadBadgeText()?.let { ", $it unread" }.orEmpty()
-    return "$displayName, ${previewText()}$unread"
+    val online = if (PresenceText.isOnline(presence)) ", online" else ""
+    return "$displayName, ${previewText()}$unread$online"
 }
 
 private fun MatrixLastOwnMessageStatus.label(): String {

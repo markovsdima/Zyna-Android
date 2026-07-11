@@ -27,6 +27,7 @@ import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.messaging.normalizedMessageCaption
 import com.zyna.app.data.push.MatrixPushRegistrar
+import com.zyna.app.data.presence.PresenceSession
 import com.zyna.app.data.push.ZynaPushNotificationContent
 import com.zyna.app.data.push.ZynaPushNotificationResolution
 import com.zyna.app.data.session.MatrixSessionStore
@@ -386,6 +387,20 @@ class MatrixClientService(
 
             restoreSessionIfAvailableLocked()
             return client != null
+        }
+    }
+
+    suspend fun currentPresenceSessionOrNull(): PresenceSession? = withContext(Dispatchers.IO) {
+        val activeSession = client?.let { activeClient ->
+            runCatching { activeClient.session() }.getOrNull()
+        } ?: sessionStore.loadLastSession()
+
+        activeSession?.let { session ->
+            PresenceSession(
+                homeserverUrl = session.homeserverUrl,
+                accessToken = session.accessToken,
+                userId = session.userId
+            )
         }
     }
 

@@ -72,6 +72,7 @@ import kotlin.math.roundToInt
 data class ChatScreenViewState(
     val roomName: String,
     val roomId: String,
+    val roomSubtitle: String,
     val messages: List<MatrixChatMessage>,
     val windowChangeOrigin: TimelineWindowChangeOrigin,
     val isLoading: Boolean,
@@ -432,9 +433,9 @@ internal class ChatScreenView(
                 "jump=${state.jumpTargetEventId != null} liveReq=${state.scrollToLiveEdgeRequested}"
         }
         titleText.text = state.roomName
-        subtitleText.text = state.roomId
+        subtitleText.text = state.roomSubtitle
         backButton.setOnClickListener { actions.onBack() }
-        titleColumn.contentDescription = "${state.roomName}. ${state.roomId}"
+        titleColumn.contentDescription = "${state.roomName}. ${state.roomSubtitle}"
         titleColumn.setOnClickListener { actions.onOpenRoomDetails() }
         callButton.setOnClickListener { actions.onStartCall() }
         renderActiveCallBanner(state.callBanner, actions)

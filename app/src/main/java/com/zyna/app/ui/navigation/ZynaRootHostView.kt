@@ -38,6 +38,7 @@ import com.zyna.app.ui.profile.ProfileScreenViewState
 import com.zyna.app.ui.profile.UserProfileScreenView
 import com.zyna.app.ui.profile.UserProfileScreenViewActions
 import com.zyna.app.ui.profile.UserProfileScreenViewState
+import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
@@ -391,6 +392,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         profile = state.userProfile.takeIf { it.userId == route.userId }
                             ?: UserProfileUiState(userId = route.userId),
                         roomId = state.roomIdForContact(route.userId),
+                        presence = state.presenceByUserId[route.userId],
                         actionUserId = state.contactActionUserId,
                         actionErrorMessage = state.contactActionErrorMessage,
                         matrixMediaLoader = actions.matrixMediaLoader
@@ -440,6 +442,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         title = title,
                         showBack = onBack != null,
                         matrixMediaLoader = actions.matrixMediaLoader,
+                        presenceByUserId = state.presenceByUserId,
                         initialScrollAnchor = roomsScrollAnchors[entryKey],
                         bottomContentPaddingPx = if (withBottomPadding) {
                             dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
@@ -542,12 +545,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state = SettingsScreenViewState(
                         selectedChatThemeTitle = preferences.chatBubbleTheme.title,
                         selectedAppThemeMode = preferences.appThemeMode,
+                        selectedPresenceProvider = preferences.presenceProvider,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = SettingsScreenViewActions(
                         onBack = { actions.onNavigateBack() },
                         onOpenChatTheme = actions.onOpenChatThemeSettings,
                         onSelectAppThemeMode = actions.onSelectAppThemeMode,
+                        onSelectPresenceProvider = actions.onSelectPresenceProvider,
                         onLogout = actions.onLogout
                     )
                 )
@@ -629,6 +634,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state = ChatScreenViewState(
                         roomName = route.displayName,
                         roomId = route.roomId,
+                        roomSubtitle = PresenceText.label(
+                            context = context,
+                            status = state.activeChatPresence,
+                            style = PresenceText.LastSeenStyle.CHAT
+                        )
+                            ?: route.roomId,
                         messages = state.chatMessages,
                         windowChangeOrigin = state.chatWindowChangeOrigin,
                         isLoading = state.isLoadingChat,

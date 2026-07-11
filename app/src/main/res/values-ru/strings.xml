@@ -1,0 +1,24 @@
+<resources>
+    <string name="common_cancel">Отмена</string>
+    <string name="settings_presence">Статус онлайн</string>
+    <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
+    <string name="presence_provider_matrix_standard">Matrix Standard</string>
+    <string name="presence_provider_off">Выключено</string>
+    <string name="presence_online">в сети</string>
+    <string name="presence_last_seen_just_now">был(а) только что</string>
+    <string name="presence_last_seen_today_at">был(а) сегодня в %1$s</string>
+    <string name="presence_last_seen_yesterday_at">был(а) вчера в %1$s</string>
+    <string name="presence_last_seen_date">был(а) %1$s</string>
+    <plurals name="presence_last_seen_minutes_ago">
+        <item quantity="one">был(а) %1$d минуту назад</item>
+        <item quantity="few">был(а) %1$d минуты назад</item>
+        <item quantity="many">был(а) %1$d минут назад</item>
+        <item quantity="other">был(а) %1$d минут назад</item>
+    </plurals>
+    <plurals name="presence_last_seen_hours_ago">
+        <item quantity="one">был(а) %1$d час назад</item>
+        <item quantity="few">был(а) %1$d часа назад</item>
+        <item quantity="many">был(а) %1$d часов назад</item>
+        <item quantity="other">был(а) %1$d часов назад</item>
+    </plurals>
+</resources>

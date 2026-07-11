@@ -9,6 +9,7 @@ import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.presence.PresenceProviderMode
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 import com.zyna.app.ui.theme.AppThemeMode
@@ -81,10 +82,12 @@ data class ZynaAppActions(
     val onOpenChatThemeSettings: () -> Unit,
     val onSelectChatBubbleTheme: (String) -> Unit,
     val onSelectAppThemeMode: (AppThemeMode) -> Unit,
+    val onSelectPresenceProvider: (PresenceProviderMode) -> Unit,
     val onLogout: () -> Unit
 )
 
 data class ZynaRootPreferences(
     val chatBubbleTheme: ChatBubbleTheme,
-    val appThemeMode: AppThemeMode
+    val appThemeMode: AppThemeMode,
+    val presenceProvider: PresenceProviderMode
 )

@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
                 localCacheRepository = appContainer.localCacheRepository,
                 outgoingOutboxService = appContainer.outgoingOutboxService,
                 matrixMediaLoader = appContainer.matrixMediaLoader,
+                presenceRepository = appContainer.presenceRepository,
                 nativeMatrixRtcCallService = appContainer.nativeMatrixRtcCallService
             )
         )[AppViewModel::class.java]
@@ -247,6 +248,7 @@ class MainActivity : AppCompatActivity() {
             onOpenChatThemeSettings = appViewModel::openChatThemeSettings,
             onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
             onSelectAppThemeMode = appContainer.appThemeStore::setSelectedMode,
+            onSelectPresenceProvider = appContainer.presenceSettingsStore::setSelectedProvider,
             onLogout = {
                 dismissNativeMatrixRtcCall()
                 pendingNativeMatrixRtcCall = null
@@ -283,11 +285,13 @@ class MainActivity : AppCompatActivity() {
                 combine(
                     appViewModel.uiState,
                     appContainer.chatBubbleThemeStore.selectedTheme,
-                    appContainer.appThemeStore.selectedMode
-                ) { state, chatBubbleTheme, appThemeMode ->
+                    appContainer.appThemeStore.selectedMode,
+                    appContainer.presenceSettingsStore.selectedProvider
+                ) { state, chatBubbleTheme, appThemeMode, presenceProvider ->
                     state to ZynaRootPreferences(
                         chatBubbleTheme = chatBubbleTheme,
-                        appThemeMode = appThemeMode
+                        appThemeMode = appThemeMode,
+                        presenceProvider = presenceProvider
                     )
                 }.collect { (state, preferences) ->
                     val collectStart = ZynaPerfLog.start()
@@ -803,11 +807,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        appViewModel.setAppForeground(true)
         appViewModel.setChatCallInfoObserverEnabled(true)
     }
 
     override fun onStop() {
         appViewModel.setChatCallInfoObserverEnabled(false)
+        appViewModel.setAppForeground(false)
         stopActiveVoiceRecordingToPreviewForBackground()
         super.onStop()
     }

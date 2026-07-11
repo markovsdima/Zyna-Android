@@ -13,6 +13,10 @@ import com.zyna.app.data.media.MatrixAudioMediaLoader
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.media.VoiceRecorderController
 import com.zyna.app.data.outgoing.OutgoingOutboxService
+import com.zyna.app.data.presence.MatrixPresenceBackendStub
+import com.zyna.app.data.presence.PresenceRepository
+import com.zyna.app.data.presence.PresenceSettingsStore
+import com.zyna.app.data.presence.ZynaWebSocketPresenceBackend
 import com.zyna.app.data.push.FirebaseInstallationIdStore
 import com.zyna.app.data.push.MatrixPushRegistrationStore
 import com.zyna.app.data.push.MatrixPushRegistrar
@@ -28,6 +32,7 @@ class AppContainer(
     private val appContext = context.applicationContext
 
     val chatBubbleThemeStore = ChatBubbleThemeStore(appContext)
+    val presenceSettingsStore = PresenceSettingsStore(appContext)
     val sessionStore = MatrixSessionStore(appContext)
     val matrixStorePassphraseStore = MatrixStorePassphraseStore(appContext)
     val firebaseInstallationIdStore = FirebaseInstallationIdStore(appContext)
@@ -51,6 +56,12 @@ class AppContainer(
         sessionStore = sessionStore,
         storePassphraseStore = matrixStorePassphraseStore,
         pushRegistrar = matrixPushRegistrar
+    )
+    val presenceRepository = PresenceRepository(
+        settingsStore = presenceSettingsStore,
+        zynaBackend = ZynaWebSocketPresenceBackend(),
+        matrixBackend = MatrixPresenceBackendStub(),
+        sessionProvider = matrixClientService::currentPresenceSessionOrNull
     )
     val nativeMatrixRtcCallService = NativeMatrixRtcCallService(
         environment = MatrixClientNativeMatrixRtcCallEnvironment(

@@ -14,12 +14,15 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.R
+import com.zyna.app.data.presence.PresenceProviderMode
 import com.zyna.app.ui.theme.AppThemeMode
 import kotlin.math.roundToInt
 
 internal data class SettingsScreenViewState(
     val selectedChatThemeTitle: String,
     val selectedAppThemeMode: AppThemeMode,
+    val selectedPresenceProvider: PresenceProviderMode,
     val bottomContentPaddingPx: Int
 )
 
@@ -27,6 +30,7 @@ internal data class SettingsScreenViewActions(
     val onBack: () -> Unit,
     val onOpenChatTheme: () -> Unit,
     val onSelectAppThemeMode: (AppThemeMode) -> Unit,
+    val onSelectPresenceProvider: (PresenceProviderMode) -> Unit,
     val onLogout: () -> Unit
 )
 
@@ -37,6 +41,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     private var bottomContentPaddingPx = 0
     private var logoutDialog: AlertDialog? = null
     private var appThemeDialog: AlertDialog? = null
+    private var presenceProviderDialog: AlertDialog? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -78,6 +83,11 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     }
     private val chatThemeRow = SettingsRowView(context).apply {
         title = "Chat Theme"
+        isClickable = true
+        isFocusable = true
+    }
+    private val presenceRow = SettingsRowView(context).apply {
+        title = context.getString(R.string.settings_presence)
         isClickable = true
         isFocusable = true
     }
@@ -138,6 +148,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         content.addView(appearanceHeader)
         content.addView(appThemeRow, rowLayoutParams())
         content.addView(chatThemeRow, rowLayoutParams())
+        content.addView(presenceRow, rowLayoutParams())
         content.addView(accountHeader)
         content.addView(logoutRow, rowLayoutParams())
 
@@ -160,6 +171,8 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
     override fun onDetachedFromWindow() {
         appThemeDialog?.dismiss()
         appThemeDialog = null
+        presenceProviderDialog?.dismiss()
+        presenceProviderDialog = null
         logoutDialog?.dismiss()
         logoutDialog = null
         super.onDetachedFromWindow()
@@ -184,6 +197,13 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         }
         chatThemeRow.detail = state.selectedChatThemeTitle
         chatThemeRow.setOnClickListener { actions.onOpenChatTheme() }
+        presenceRow.detail = state.selectedPresenceProvider.title(context)
+        presenceRow.setOnClickListener {
+            showPresenceProviderPicker(
+                selectedProvider = state.selectedPresenceProvider,
+                onSelectProvider = actions.onSelectPresenceProvider
+            )
+        }
         logoutRow.detail = null
         logoutRow.setOnClickListener { showLogoutConfirmation(actions.onLogout) }
     }
@@ -200,6 +220,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         accountHeader.setTextColor(palette.secondaryText)
         appThemeRow.setPalette(palette)
         chatThemeRow.setPalette(palette)
+        presenceRow.setPalette(palette)
         logoutRow.setPalette(palette)
     }
 
@@ -260,6 +281,35 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
             }
     }
 
+    private fun showPresenceProviderPicker(
+        selectedProvider: PresenceProviderMode,
+        onSelectProvider: (PresenceProviderMode) -> Unit
+    ) {
+        val existingDialog = presenceProviderDialog
+        if (existingDialog?.isShowing == true) {
+            return
+        }
+        val providers = PresenceProviderMode.entries.toTypedArray()
+        val labels = providers.map { it.title(context) }.toTypedArray()
+        val selectedIndex = providers.indexOf(selectedProvider).coerceAtLeast(0)
+        presenceProviderDialog = AlertDialog.Builder(context)
+            .setTitle(R.string.settings_presence)
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                providers.getOrNull(which)?.let(onSelectProvider)
+                dialog.dismiss()
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .create()
+            .also { dialog ->
+                dialog.setOnDismissListener {
+                    if (presenceProviderDialog === dialog) {
+                        presenceProviderDialog = null
+                    }
+                }
+                dialog.show()
+            }
+    }
+
     private fun showLogoutConfirmation(onLogout: () -> Unit) {
         val existingDialog = logoutDialog
         if (existingDialog?.isShowing == true) {
@@ -291,6 +341,15 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         const val TOP_BAR_HEIGHT_DP = 64
         const val ROW_HEIGHT_DP = 56
     }
+}
+
+private fun PresenceProviderMode.title(context: Context): String {
+    val resId = when (this) {
+        PresenceProviderMode.ZYNA_REALTIME -> R.string.presence_provider_zyna_realtime
+        PresenceProviderMode.MATRIX_STANDARD -> R.string.presence_provider_matrix_standard
+        PresenceProviderMode.OFF -> R.string.presence_provider_off
+    }
+    return context.getString(resId)
 }
 
 private class SettingsRowView(context: Context) : LinearLayout(context) {

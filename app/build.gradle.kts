@@ -74,6 +74,7 @@ dependencies {
     implementation(libs.livekit.android)
     implementation(libs.livekit.android.camerax)
     implementation(libs.matrix.sdk)
+    implementation(libs.okhttp)
     implementation(libs.sqlcipher.android)
     ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)

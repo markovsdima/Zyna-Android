@@ -50,7 +50,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
@@ -281,6 +280,10 @@ class AppViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+    private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
+        performRoomRefresh(userId)
+    }
+    private var visibleRoomRefreshRequestCount = 0
     private var chatTimelineJob: Job? = null
     private var chatPaginationJob: Job? = null
     private var chatCacheJob: Job? = null
@@ -346,6 +349,16 @@ class AppViewModel(
                 val didChangeUser = previousUserId != null &&
                     nextUserId != null &&
                     previousUserId != nextUserId
+                if (
+                    nextUserId == null ||
+                    didChangeUser ||
+                    matrixState is MatrixClientState.Error
+                ) {
+                    roomRefreshCoordinator.deactivateSession()
+                }
+                if (nextUserId != null && matrixState !is MatrixClientState.Error) {
+                    roomRefreshCoordinator.activateSession(nextUserId)
+                }
                 if (
                     nextUserId == null ||
                     didChangeUser ||
@@ -509,7 +522,7 @@ class AppViewModel(
                     val userId = matrixState.userId
                     if (matrixClientService.isRecoveryComplete(userId)) {
                         startRoomListLiveRefresh(userId)
-                        refreshRooms()
+                        launchRoomRefresh(showRefreshing = true)
                     }
                 }
             }
@@ -561,25 +574,51 @@ class AppViewModel(
     }
 
     fun refreshRooms() {
+        launchRoomRefresh(showRefreshing = true)
+    }
+
+    private fun launchRoomRefresh(showRefreshing: Boolean) {
         viewModelScope.launch {
-            refreshRoomsNow()
+            awaitRoomRefresh(showRefreshing = showRefreshing)
         }
     }
 
-    private suspend fun refreshRoomsNow() {
-        _uiState.update { it.copy(isRefreshingRooms = true) }
+    private suspend fun awaitRoomRefresh(showRefreshing: Boolean) {
+        if (showRefreshing) {
+            beginVisibleRoomRefresh()
+        }
         try {
-            val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-            val rooms = matrixClientService.roomsSnapshot()
-            localCacheRepository.cacheRoomsSnapshot(userId, rooms)
+            roomRefreshCoordinator.refresh()
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
             Log.w(TAG, "Failed to refresh rooms", error)
         } finally {
-            _uiState.update {
-                it.copy(isRefreshingRooms = false)
+            if (showRefreshing) {
+                endVisibleRoomRefresh()
             }
+        }
+    }
+
+    private suspend fun performRoomRefresh(userId: String) {
+        val rooms = matrixClientService.roomsSnapshot()
+        if (_uiState.value.matrixState.userIdOrNull() != userId) {
+            return
+        }
+        localCacheRepository.cacheRoomsSnapshot(userId, rooms)
+    }
+
+    private fun beginVisibleRoomRefresh() {
+        visibleRoomRefreshRequestCount += 1
+        if (visibleRoomRefreshRequestCount == 1) {
+            _uiState.update { it.copy(isRefreshingRooms = true) }
+        }
+    }
+
+    private fun endVisibleRoomRefresh() {
+        visibleRoomRefreshRequestCount = (visibleRoomRefreshRequestCount - 1).coerceAtLeast(0)
+        if (visibleRoomRefreshRequestCount == 0) {
+            _uiState.update { it.copy(isRefreshingRooms = false) }
         }
     }
 
@@ -736,7 +775,7 @@ class AppViewModel(
                     )
                 }
                 startRoomListLiveRefresh(userId)
-                refreshRoomsNow()
+                awaitRoomRefresh(showRefreshing = false)
                 outgoingOutboxService.kick(reason = "recovery-complete")
             } catch (error: Throwable) {
                 _uiState.update {
@@ -1369,9 +1408,7 @@ class AppViewModel(
     }
 
     private suspend fun cacheResolvedDirectRoom(userId: String, room: MatrixRoomSummary) {
-        val mergedRooms = _uiState.value.rooms
-            .filterNot { it.id == room.id } + room
-        localCacheRepository.cacheRoomsSnapshot(userId, mergedRooms)
+        localCacheRepository.cacheRoomSummary(userId, room)
     }
 
     private fun contactFromUserProfile(): MatrixContact? {
@@ -2599,6 +2636,7 @@ class AppViewModel(
         stopRoomCache()
         stopRoomListLiveRefresh()
         viewModelScope.launch {
+            roomRefreshCoordinator.deactivateSession()
             localCacheRepository.clearAll()
             withContext(Dispatchers.IO) {
                 matrixMediaLoader.clear()
@@ -3491,9 +3529,9 @@ class AppViewModel(
         roomListLiveUserId = userId
         roomListLiveJob = viewModelScope.launch {
             try {
-                matrixClientService.roomListChangeSignals().collectLatest {
+                matrixClientService.roomListChangeSignals().collect {
                     if (matrixClientService.isRecoveryComplete(userId)) {
-                        refreshRoomsNow()
+                        awaitRoomRefresh(showRefreshing = false)
                     }
                 }
             } catch (error: CancellationException) {

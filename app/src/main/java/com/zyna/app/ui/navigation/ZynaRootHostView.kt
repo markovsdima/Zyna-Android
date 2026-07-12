@@ -18,6 +18,7 @@ import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.ViewCompat
 import com.zyna.app.BuildConfig
+import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
@@ -1009,6 +1010,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state = ChatScreenViewState(
                         roomName = route.displayName,
                         roomId = route.roomId,
+                        currentUserId = when (val matrixState = state.matrixState) {
+                            is MatrixClientState.LoggedIn -> matrixState.userId
+                            is MatrixClientState.Syncing -> matrixState.userId
+                            MatrixClientState.LoggedOut,
+                            is MatrixClientState.Error,
+                            MatrixClientState.LoggingIn,
+                            MatrixClientState.RestoringSession -> null
+                        },
                         roomSubtitle = PresenceText.label(
                             context = context,
                             status = state.activeChatPresence,

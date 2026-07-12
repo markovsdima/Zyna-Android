@@ -13,6 +13,9 @@ interface CachedRoomDao {
     @Query("SELECT * FROM rooms WHERE userId = :userId")
     suspend fun roomsSnapshot(userId: String): List<CachedRoomEntity>
 
+    @Query("SELECT * FROM rooms WHERE userId = :userId AND id = :roomId LIMIT 1")
+    suspend fun roomSnapshot(userId: String, roomId: String): CachedRoomEntity?
+
     @Upsert
     suspend fun upsertRooms(rooms: List<CachedRoomEntity>)
 

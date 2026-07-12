@@ -104,7 +104,9 @@ internal data class MessageRenderTheme(
     val incomingBubble: Int,
     val incomingText: Int,
     val incomingMetadata: Int,
-    val outgoingBubbleGradient: MessageBubbleGradientSpec? = null
+    val outgoingBubbleGradient: MessageBubbleGradientSpec? = null,
+    val systemEventBackground: Int = incomingBubble,
+    val systemEventText: Int = incomingMetadata
 ) {
     fun bubbleColor(message: MessageRenderModel): Int {
         return message.attributes.bubbleColor

@@ -20,6 +20,8 @@ import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReactionSender
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixRtcCallEventDetails
+import com.zyna.app.data.matrix.toMatrixChatMessage
 import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.messaging.normalizedMessageCaption
@@ -45,9 +47,131 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+
+internal data class CachedRoomPreview(
+    val text: String?,
+    val senderName: String?,
+    val timestampMillis: Long?,
+    val lastOwnMessageStatus: String?
+)
+
+internal fun selectRoomPreviewForCache(
+    incomingRoom: MatrixRoomSummary,
+    existingRoom: CachedRoomEntity?
+): CachedRoomPreview {
+    val incomingPreview = CachedRoomPreview(
+        text = incomingRoom.lastMessageText,
+        senderName = incomingRoom.lastMessageSenderName,
+        timestampMillis = incomingRoom.lastMessageAtMillis,
+        lastOwnMessageStatus = incomingRoom.lastOwnMessageStatus?.name
+    )
+    val existingPreview = CachedRoomPreview(
+        text = existingRoom?.lastMessageText,
+        senderName = existingRoom?.lastMessageSenderName,
+        timestampMillis = existingRoom?.lastMessageAtMillis,
+        lastOwnMessageStatus = existingRoom?.lastOwnMessageStatus
+    )
+    val incomingTimestamp = incomingPreview.timestampMillis ?: return existingPreview
+    val existingTimestamp = existingPreview.timestampMillis ?: return incomingPreview
+
+    return when {
+        incomingTimestamp < existingTimestamp -> existingPreview
+        incomingTimestamp > existingTimestamp -> incomingPreview
+        else -> incomingPreview.copy(
+            lastOwnMessageStatus = selectEqualTimestampOwnMessageStatus(
+                incomingStatus = incomingPreview.lastOwnMessageStatus,
+                existingStatus = existingPreview.lastOwnMessageStatus
+            )
+        )
+    }
+}
+
+private fun selectEqualTimestampOwnMessageStatus(
+    incomingStatus: String?,
+    existingStatus: String?
+): String? {
+    if (incomingStatus == null || existingStatus == null) {
+        return incomingStatus
+    }
+    return if (incomingStatus.deliveryProgressRank() >= existingStatus.deliveryProgressRank()) {
+        incomingStatus
+    } else {
+        existingStatus
+    }
+}
+
+private fun String.deliveryProgressRank(): Int {
+    return when (this) {
+        MatrixLastOwnMessageStatus.PENDING.name -> 0
+        MatrixLastOwnMessageStatus.FAILED.name -> 1
+        MatrixLastOwnMessageStatus.SENT.name -> 2
+        MatrixLastOwnMessageStatus.READ.name -> 3
+        else -> -1
+    }
+}
+
+internal data class PendingResolvedRoomSummary(
+    val room: MatrixRoomSummary,
+    val remainingAbsentSnapshots: Int
+)
+
+internal data class MergedRoomSnapshot(
+    val rooms: List<MatrixRoomSummary>,
+    val remainingPendingRooms: Map<String, PendingResolvedRoomSummary>
+)
+
+internal fun mergeRoomSnapshotWithPendingResolvedRooms(
+    authoritativeRooms: List<MatrixRoomSummary>,
+    pendingRooms: Map<String, PendingResolvedRoomSummary>
+): MergedRoomSnapshot {
+    val authoritativeRoomIds = authoritativeRooms.mapTo(mutableSetOf()) { it.id }
+    val absentPendingRooms = pendingRooms.values.filter { pending ->
+        pending.room.id !in authoritativeRoomIds && pending.remainingAbsentSnapshots > 0
+    }
+    val remainingPendingRooms = absentPendingRooms
+        .mapNotNull { pending ->
+            val remainingSnapshots = pending.remainingAbsentSnapshots - 1
+            if (remainingSnapshots > 0) {
+                pending.room.id to pending.copy(remainingAbsentSnapshots = remainingSnapshots)
+            } else {
+                null
+            }
+        }
+        .toMap()
+
+    return MergedRoomSnapshot(
+        rooms = authoritativeRooms + absentPendingRooms.map { it.room },
+        remainingPendingRooms = remainingPendingRooms
+    )
+}
+
+private fun MatrixRoomSummary.toCachedRoomEntity(
+    userId: String,
+    existingRoom: CachedRoomEntity?,
+    updatedAtMillis: Long
+): CachedRoomEntity {
+    val preview = selectRoomPreviewForCache(this, existingRoom)
+    return CachedRoomEntity(
+        userId = userId,
+        id = id,
+        displayName = displayName,
+        avatarUrl = avatarUrl,
+        directUserId = directUserId ?: existingRoom?.directUserId,
+        lastMessageText = preview.text,
+        lastMessageSenderName = preview.senderName,
+        lastMessageAtMillis = preview.timestampMillis,
+        lastOwnMessageStatus = preview.lastOwnMessageStatus,
+        unreadCount = unreadCount,
+        unreadMentionCount = unreadMentionCount,
+        isMarkedUnread = isMarkedUnread,
+        updatedAtMillis = updatedAtMillis
+    )
+}
 
 class LocalCacheRepository(
     private val database: ZynaDatabase,
@@ -58,6 +182,9 @@ class LocalCacheRepository(
     private val outgoingDao = database.outgoingEnvelopeDao()
     private val pendingReactionDao = database.pendingReactionDao()
     private val matrixRtcCallHistoryDao = database.matrixRtcCallHistoryDao()
+    private val roomCacheWriteMutex = Mutex()
+    private val pendingResolvedRoomsByUserId =
+        mutableMapOf<String, Map<String, PendingResolvedRoomSummary>>()
 
     fun observeRooms(userId: String): Flow<List<MatrixRoomSummary>> {
         return roomDao.observeRooms(userId).map { rooms ->
@@ -79,48 +206,67 @@ class LocalCacheRepository(
         }.flowOn(Dispatchers.Default)
     }
 
+    suspend fun cacheRoomSummary(userId: String, room: MatrixRoomSummary) {
+        val now = System.currentTimeMillis()
+        roomCacheWriteMutex.withLock {
+            database.withTransaction {
+                val existingRoom = roomDao.roomSnapshot(userId = userId, roomId = room.id)
+                roomDao.upsertRooms(
+                    listOf(
+                        room.toCachedRoomEntity(
+                            userId = userId,
+                            existingRoom = existingRoom,
+                            updatedAtMillis = now
+                        )
+                    )
+                )
+            }
+            pendingResolvedRoomsByUserId[userId] =
+                pendingResolvedRoomsByUserId[userId].orEmpty() +
+                (room.id to PendingResolvedRoomSummary(
+                    room = room,
+                    remainingAbsentSnapshots = RESOLVED_ROOM_ABSENT_SNAPSHOT_GRACE_COUNT
+                ))
+        }
+    }
+
     suspend fun cacheRoomsSnapshot(userId: String, rooms: List<MatrixRoomSummary>) {
         val now = System.currentTimeMillis()
-        database.withTransaction {
-            val existingRoomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
-            roomDao.clearRooms(userId)
-            roomDao.upsertRooms(
-                rooms.map { room ->
-                    val existingRoom = existingRoomsById[room.id]
-                    CachedRoomEntity(
-                        userId = userId,
-                        id = room.id,
-                        displayName = room.displayName,
-                        avatarUrl = room.avatarUrl,
-                        directUserId = room.directUserId ?: existingRoom?.directUserId,
-                        lastMessageText = room.lastMessageText ?: existingRoom?.lastMessageText,
-                        lastMessageSenderName = room.lastMessageSenderName
-                            ?: existingRoom?.lastMessageSenderName,
-                        lastMessageAtMillis = room.lastMessageAtMillis
-                            ?: existingRoom?.lastMessageAtMillis,
-                        lastOwnMessageStatus = if (room.lastMessageAtMillis == null) {
-                            existingRoom?.lastOwnMessageStatus
-                        } else {
-                            room.lastOwnMessageStatus?.name
-                        },
-                        unreadCount = room.unreadCount,
-                        unreadMentionCount = room.unreadMentionCount,
-                        isMarkedUnread = room.isMarkedUnread,
-                        updatedAtMillis = now
-                    )
-                }
+        roomCacheWriteMutex.withLock {
+            val mergedSnapshot = mergeRoomSnapshotWithPendingResolvedRooms(
+                authoritativeRooms = rooms,
+                pendingRooms = pendingResolvedRoomsByUserId[userId].orEmpty()
             )
-            val roomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
-            matrixRtcCallHistoryDao.recentCallsSnapshot(
-                userId = userId,
-                limit = CALL_HISTORY_ROOM_REFRESH_LIMIT
-            ).forEach { call ->
-                refreshMatrixRtcCallProjection(
-                    userId = userId,
-                    call = call,
-                    roomsById = roomsById,
-                    now = now
+            database.withTransaction {
+                val existingRoomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
+                roomDao.clearRooms(userId)
+                roomDao.upsertRooms(
+                    mergedSnapshot.rooms.map { room ->
+                        room.toCachedRoomEntity(
+                            userId = userId,
+                            existingRoom = existingRoomsById[room.id],
+                            updatedAtMillis = now
+                        )
+                    }
                 )
+                val roomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
+                materializeMissingMatrixRtcTimelineRows(
+                    userId = userId,
+                    roomsById = roomsById,
+                    now = now,
+                    limit = CALL_TIMELINE_BACKFILL_BATCH_LIMIT
+                )
+                refreshMatrixRtcCallProjectionsForRoomState(
+                    userId = userId,
+                    roomsById = roomsById,
+                    now = now,
+                    limit = CALL_HISTORY_ROOM_REFRESH_LIMIT
+                )
+            }
+            if (mergedSnapshot.remainingPendingRooms.isEmpty()) {
+                pendingResolvedRoomsByUserId.remove(userId)
+            } else {
+                pendingResolvedRoomsByUserId[userId] = mergedSnapshot.remainingPendingRooms
             }
         }
     }
@@ -480,10 +626,29 @@ class LocalCacheRepository(
         }
     }
 
+    private enum class MatrixRtcNotificationSource {
+        TIMELINE,
+        SPARSE_INCOMING_PUSH
+    }
+
     suspend fun cacheMatrixRtcCallTimelineEvents(
         userId: String,
         notifications: List<MatrixRtcCallTimelineNotification>,
         memberships: List<MatrixRtcCallTimelineMembership>
+    ) {
+        cacheMatrixRtcCallTimelineEvents(
+            userId = userId,
+            notifications = notifications,
+            memberships = memberships,
+            notificationSource = MatrixRtcNotificationSource.TIMELINE
+        )
+    }
+
+    private suspend fun cacheMatrixRtcCallTimelineEvents(
+        userId: String,
+        notifications: List<MatrixRtcCallTimelineNotification>,
+        memberships: List<MatrixRtcCallTimelineMembership>,
+        notificationSource: MatrixRtcNotificationSource
     ) {
         if (notifications.isEmpty() && memberships.isEmpty()) {
             return
@@ -503,15 +668,52 @@ class LocalCacheRepository(
                 membership.toEntity(userId = userId, now = now)
             }
 
-            if (callEntities.isNotEmpty()) {
-                matrixRtcCallHistoryDao.upsertCalls(callEntities)
+            val persistedCallEntities = when (notificationSource) {
+                MatrixRtcNotificationSource.TIMELINE -> {
+                    if (callEntities.isNotEmpty()) {
+                        matrixRtcCallHistoryDao.upsertCalls(callEntities)
+                    }
+                    callEntities
+                }
+
+                MatrixRtcNotificationSource.SPARSE_INCOMING_PUSH -> callEntities.map { call ->
+                    val insertedRowId = matrixRtcCallHistoryDao.insertCallIfAbsent(call)
+                    if (insertedRowId != -1L) {
+                        call
+                    } else {
+                        requireNotNull(
+                            matrixRtcCallHistoryDao.callSnapshot(
+                                userId = userId,
+                                eventId = call.eventId
+                            )
+                        )
+                    }
+                }
+            }
+
+            if (
+                persistedCallEntities.isNotEmpty() &&
+                notificationSource == MatrixRtcNotificationSource.TIMELINE
+            ) {
+                val timelineCallEntities = notifications.map { notification ->
+                    notification.toMatrixChatMessage(
+                        outcome = MatrixRtcCallHistoryOutcome.STARTED
+                    ).toEntity(
+                        userId = userId,
+                        roomId = notification.roomId,
+                        timelineIndex = 0,
+                        updatedAtMillis = now
+                    )
+                }
+                messageDao.upsertMessages(timelineCallEntities)
+                deleteSafeEventDuplicates(timelineCallEntities)
             }
             if (membershipEntities.isNotEmpty()) {
                 matrixRtcCallHistoryDao.upsertMemberships(membershipEntities)
             }
 
             val affectedCallsByEventId = LinkedHashMap<String, MatrixRtcCallEntity>()
-            callEntities.forEach { call ->
+            persistedCallEntities.forEach { call ->
                 affectedCallsByEventId[call.eventId] = call
             }
             membershipEntities.forEach { membership ->
@@ -538,12 +740,20 @@ class LocalCacheRepository(
                 affectedCallsByEventId[call.eventId] = call
             }
 
+            val timelineNotificationEventIds = if (
+                notificationSource == MatrixRtcNotificationSource.TIMELINE
+            ) {
+                persistedCallEntities.mapTo(mutableSetOf()) { it.eventId }
+            } else {
+                emptySet()
+            }
             affectedCallsByEventId.values.forEach { call ->
                 refreshMatrixRtcCallProjection(
                     userId = userId,
                     call = call,
                     roomsById = roomsById,
-                    now = now
+                    now = now,
+                    ensureTimelineRow = call.eventId !in timelineNotificationEventIds
                 )
             }
         }
@@ -556,7 +766,8 @@ class LocalCacheRepository(
         cacheMatrixRtcCallTimelineEvents(
             userId = userId,
             notifications = listOf(notification.toTimelineNotification()),
-            memberships = emptyList()
+            memberships = emptyList(),
+            notificationSource = MatrixRtcNotificationSource.SPARSE_INCOMING_PUSH
         )
     }
 
@@ -564,22 +775,18 @@ class LocalCacheRepository(
         val now = System.currentTimeMillis()
         database.withTransaction {
             val roomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
-            val calls = (
-                matrixRtcCallHistoryDao.recentCallsSnapshot(userId, limit) +
-                    matrixRtcCallHistoryDao.expiredStartedRingCalls(
-                        userId = userId,
-                        nowMillis = now,
-                        limit = CALL_HISTORY_EXPIRED_REFRESH_LIMIT
-                    )
-                ).distinctBy { it.eventId }
-            calls.forEach { call ->
-                refreshMatrixRtcCallProjection(
-                    userId = userId,
-                    call = call,
-                    roomsById = roomsById,
-                    now = now
-                )
-            }
+            materializeMissingMatrixRtcTimelineRows(
+                userId = userId,
+                roomsById = roomsById,
+                now = now,
+                limit = limit
+            )
+            refreshMatrixRtcCallProjectionsForRoomState(
+                userId = userId,
+                roomsById = roomsById,
+                now = now,
+                limit = limit
+            )
         }
     }
 
@@ -1674,22 +1881,77 @@ class LocalCacheRepository(
     }
 
     suspend fun clearAll() {
-        database.withTransaction {
-            messageDao.clearAllMessages()
-            roomDao.clearAllRooms()
-            outgoingDao.clearAllEnvelopes()
-            pendingReactionDao.clearAll()
-            matrixRtcCallHistoryDao.clearAllMemberships()
-            matrixRtcCallHistoryDao.clearAllCalls()
+        roomCacheWriteMutex.withLock {
+            database.withTransaction {
+                messageDao.clearAllMessages()
+                roomDao.clearAllRooms()
+                outgoingDao.clearAllEnvelopes()
+                pendingReactionDao.clearAll()
+                matrixRtcCallHistoryDao.clearAllMemberships()
+                matrixRtcCallHistoryDao.clearAllCalls()
+            }
+            pendingResolvedRoomsByUserId.clear()
         }
         cleanupOrphanOutgoingMediaFiles()
+    }
+
+    private suspend fun materializeMissingMatrixRtcTimelineRows(
+        userId: String,
+        roomsById: Map<String, CachedRoomEntity>,
+        now: Long,
+        limit: Int
+    ) {
+        matrixRtcCallHistoryDao.callsMissingTimelineRows(
+            userId = userId,
+            limit = limit.coerceAtLeast(1)
+        ).forEach { call ->
+            refreshMatrixRtcCallProjection(
+                userId = userId,
+                call = call,
+                roomsById = roomsById,
+                now = now,
+                ensureTimelineRow = true
+            )
+        }
+    }
+
+    private suspend fun refreshMatrixRtcCallProjectionsForRoomState(
+        userId: String,
+        roomsById: Map<String, CachedRoomEntity>,
+        now: Long,
+        limit: Int
+    ) {
+        val callsByEventId = LinkedHashMap<String, MatrixRtcCallEntity>()
+        matrixRtcCallHistoryDao.callsWithRoomDirectnessMismatch(
+            userId = userId,
+            limit = limit.coerceAtLeast(1)
+        ).forEach { call ->
+            callsByEventId[call.eventId] = call
+        }
+        matrixRtcCallHistoryDao.expiredStartedRingCalls(
+            userId = userId,
+            nowMillis = now,
+            limit = CALL_HISTORY_EXPIRED_REFRESH_LIMIT
+        ).forEach { call ->
+            callsByEventId[call.eventId] = call
+        }
+        callsByEventId.values.forEach { call ->
+            refreshMatrixRtcCallProjection(
+                userId = userId,
+                call = call,
+                roomsById = roomsById,
+                now = now,
+                ensureTimelineRow = true
+            )
+        }
     }
 
     private suspend fun refreshMatrixRtcCallProjection(
         userId: String,
         call: MatrixRtcCallEntity,
         roomsById: Map<String, CachedRoomEntity>,
-        now: Long
+        now: Long,
+        ensureTimelineRow: Boolean
     ) {
         val memberships = matrixRtcCallHistoryDao.membershipsInRoomWindow(
             userId = userId,
@@ -1705,7 +1967,22 @@ class LocalCacheRepository(
             memberships = memberships,
             nowMillis = now
         )
-        matrixRtcCallHistoryDao.updateCallProjection(
+        val projectedTimelineEntity = if (ensureTimelineRow) {
+            call.toTimelineNotification()
+                .toMatrixChatMessage(outcome = projection.outcome)
+                .toEntity(
+                    userId = userId,
+                    roomId = call.roomId,
+                    timelineIndex = 0,
+                    updatedAtMillis = now
+                )
+        } else {
+            null
+        }
+        val insertedTimelineRowId = projectedTimelineEntity?.let { entity ->
+            messageDao.insertMessageIfAbsent(entity)
+        }
+        val projectionChanged = matrixRtcCallHistoryDao.updateCallProjection(
             userId = userId,
             eventId = call.eventId,
             isDirect = projection.isDirect,
@@ -1720,6 +1997,30 @@ class LocalCacheRepository(
             outcome = projection.outcome.name,
             updatedAtMillis = now
         )
+        if (ensureTimelineRow || projectionChanged > 0) {
+            messageDao.updateMatrixRtcCallTimelineProjection(
+                userId = userId,
+                roomId = call.roomId,
+                eventId = call.eventId,
+                timelineDetailsJson = MatrixTimelineDetailsCodec.encodeMatrixRtcCall(
+                    MatrixRtcCallEventDetails(
+                        parentEventId = call.parentEventId,
+                        callIntent = call.callIntent,
+                        notificationType = call.notificationType
+                            .toMatrixRtcCallNotificationType(),
+                        expiresAtMillis = call.expiresAtMillis,
+                        declinedBy = MatrixRtcCallHistoryProjection.decodeDeclinedBy(
+                            call.declinedByJson
+                        ),
+                        outcome = projection.outcome
+                    )
+                ),
+                updatedAtMillis = now
+            )
+        }
+        if (insertedTimelineRowId != null && insertedTimelineRowId != -1L) {
+            deleteSafeEventDuplicates(listOf(requireNotNull(projectedTimelineEntity)))
+        }
     }
 
     suspend fun cleanupOrphanOutgoingMediaFiles() = withContext(Dispatchers.IO) {
@@ -1826,6 +2127,22 @@ class LocalCacheRepository(
         )
     }
 
+    private fun MatrixRtcCallEntity.toTimelineNotification(): MatrixRtcCallTimelineNotification {
+        return MatrixRtcCallTimelineNotification(
+            eventId = eventId,
+            roomId = roomId,
+            parentEventId = parentEventId,
+            senderId = senderId,
+            senderDisplayName = senderDisplayName,
+            isOutgoing = isOutgoing,
+            timestampMillis = timestampMillis,
+            notificationType = notificationType.toMatrixRtcCallNotificationType(),
+            callIntent = callIntent,
+            expiresAtMillis = expiresAtMillis,
+            declinedBy = MatrixRtcCallHistoryProjection.decodeDeclinedBy(declinedByJson)
+        )
+    }
+
     private fun MatrixRtcCallEntity.toHistoryItem(room: CachedRoomEntity?): MatrixRtcCallHistoryItem {
         return MatrixRtcCallHistoryItem(
             eventId = eventId,
@@ -1863,6 +2180,7 @@ class LocalCacheRepository(
         val displayBody = pendingEditBody
             ?.takeIf { isEditPending && it.isNotBlank() }
             ?: body
+        val decodedContentType = contentType.toMatrixContentType()
         return MatrixChatMessage(
             id = id,
             eventId = eventId,
@@ -1872,7 +2190,7 @@ class LocalCacheRepository(
             body = displayBody,
             timestampMillis = timestampMillis,
             isOwn = isOwn,
-            contentType = contentType.toMatrixContentType(),
+            contentType = decodedContentType,
             imageInfo = imageInfoOrNull(),
             audioInfo = audioInfoOrNull(),
             deliveryState = deliveryState.toMatrixDeliveryState(),
@@ -1885,7 +2203,19 @@ class LocalCacheRepository(
             latestEditEventId = latestEditEventId,
             editTransactionId = editTransactionId,
             pendingEditBody = pendingEditBody,
-            reactions = reactionsJson.decodeReactions()
+            reactions = reactionsJson.decodeReactions(),
+            systemEventDetails = if (decodedContentType == MatrixMessageContentType.SYSTEM_EVENT) {
+                MatrixTimelineDetailsCodec.decodeSystemEvent(timelineDetailsJson)
+            } else {
+                null
+            },
+            matrixRtcCallDetails = if (
+                decodedContentType == MatrixMessageContentType.MATRIX_RTC_CALL
+            ) {
+                MatrixTimelineDetailsCodec.decodeMatrixRtcCall(timelineDetailsJson)
+            } else {
+                null
+            }
         )
     }
 
@@ -1940,6 +2270,15 @@ class LocalCacheRepository(
             replyBody = replyInfo?.body,
             forwardedFrom = forwardedFrom,
             zynaAttributesJson = ZynaHtmlCodec.encodeAttributesJson(zynaAttributes),
+            timelineDetailsJson = when (contentType) {
+                MatrixMessageContentType.SYSTEM_EVENT -> systemEventDetails
+                    ?.let(MatrixTimelineDetailsCodec::encodeSystemEvent)
+
+                MatrixMessageContentType.MATRIX_RTC_CALL -> matrixRtcCallDetails
+                    ?.let(MatrixTimelineDetailsCodec::encodeMatrixRtcCall)
+
+                else -> null
+            },
             isEdited = isEdited,
             isEditPending = isEditPending,
             isEditFailed = isEditFailed,
@@ -2004,7 +2343,7 @@ class LocalCacheRepository(
         val hiddenTimelineIds = outgoingEnvelopes
             .flatMap { envelope -> listOfNotNull(envelope.transactionId, envelope.eventId) }
             .toSet()
-        val latestTimelineMessages = messageDao.latestRoomMessages(
+        val latestTimelineMessages = messageDao.latestRoomPreviewMessages(
             userId = userId,
             roomId = roomId,
             localIdPattern = LOCAL_MESSAGE_ID_PATTERN,
@@ -2575,6 +2914,8 @@ class LocalCacheRepository(
                 replyBody = incoming.replyBody ?: existing.replyBody,
                 forwardedFrom = incoming.forwardedFrom ?: existing.forwardedFrom,
                 zynaAttributesJson = incoming.zynaAttributesJson ?: existing.zynaAttributesJson,
+                timelineDetailsJson = incoming.timelineDetailsJson
+                    ?: existing.timelineDetailsJson,
                 isEdited = incoming.isEdited || existing.isEdited,
                 isEditPending = if (incoming.isEdited) false else existing.isEditPending,
                 isEditFailed = if (incoming.isEdited) false else existing.isEditFailed,
@@ -3039,6 +3380,7 @@ class LocalCacheRepository(
         const val LOCAL_MESSAGE_ID_PATTERN = "$LOCAL_MESSAGE_ID_PREFIX%"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
         const val ROOM_PREVIEW_CANDIDATE_LIMIT = 64
+        const val RESOLVED_ROOM_ABSENT_SNAPSHOT_GRACE_COUNT = 1
         const val REDACTION_ID_QUERY_CHUNK_SIZE = 250
         const val DEDUPE_TIMESTAMP_TOLERANCE_MS = 50L
         const val REDACTED_MESSAGE_BODY = "Deleted message"
@@ -3047,6 +3389,7 @@ class LocalCacheRepository(
         const val TERMINAL_REACTION_OVERLAY_TTL_MS = 30 * 1000L
         const val CALL_HISTORY_EXPIRED_REFRESH_LIMIT = 100
         const val CALL_HISTORY_ROOM_REFRESH_LIMIT = 100
+        const val CALL_TIMELINE_BACKFILL_BATCH_LIMIT = 100
         const val DEFAULT_CALL_NOTIFICATION_LIFETIME_MS = 30_000L
     }
 }

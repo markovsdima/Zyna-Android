@@ -19,7 +19,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         MatrixRtcCallEntity::class,
         MatrixRtcCallMembershipEntity::class
     ],
-    version = 20,
+    version = 21,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -72,7 +72,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_16_17,
                     MIGRATION_17_18,
                     MIGRATION_18_19,
-                    MIGRATION_19_20
+                    MIGRATION_19_20,
+                    MIGRATION_20_21
                 )
                 .build()
         }
@@ -473,6 +474,12 @@ abstract class ZynaDatabase : RoomDatabase() {
                     ON matrix_rtc_call_memberships(userId, memberUserId, timestampMillis)
                     """.trimIndent()
                 )
+            }
+        }
+
+        private val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN timelineDetailsJson TEXT")
             }
         }
     }

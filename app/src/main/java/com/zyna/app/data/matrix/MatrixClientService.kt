@@ -170,6 +170,37 @@ data class MatrixRoomSummary(
     val isMarkedUnread: Boolean = false
 )
 
+internal data class MatrixRoomPreview(
+    val body: String? = null,
+    val senderName: String? = null,
+    val timestampMillis: Long? = null,
+    val localOwnMessageStatus: MatrixLastOwnMessageStatus? = null,
+    val needsReadReceiptSummary: Boolean = false
+)
+
+internal fun matrixRoomPreviewForTimelineEvent(
+    body: String?,
+    senderName: String?,
+    timestampMillis: Long,
+    localOwnMessageStatus: MatrixLastOwnMessageStatus?,
+    needsReadReceiptSummary: Boolean = false
+): MatrixRoomPreview {
+    if (body == null) {
+        return MatrixRoomPreview()
+    }
+    return MatrixRoomPreview(
+        body = body,
+        senderName = senderName,
+        timestampMillis = timestampMillis,
+        localOwnMessageStatus = localOwnMessageStatus,
+        needsReadReceiptSummary = needsReadReceiptSummary
+    )
+}
+
+internal fun matrixRoomPreviewForInvite(timestampMillis: Long): MatrixRoomPreview {
+    return MatrixRoomPreview(timestampMillis = timestampMillis)
+}
+
 data class MatrixRoomCallInfo(
     val roomId: String,
     val hasRoomCall: Boolean,
@@ -219,6 +250,8 @@ enum class MatrixMessageContentType {
     LOCATION,
     UNABLE_TO_DECRYPT,
     REDACTED,
+    SYSTEM_EVENT,
+    MATRIX_RTC_CALL,
     UNSUPPORTED
 }
 
@@ -340,7 +373,9 @@ data class MatrixChatMessage(
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
     val reactions: List<MatrixMessageReaction> = emptyList(),
-    val mediaGroupPresentation: MatrixMediaGroupPresentation? = null
+    val mediaGroupPresentation: MatrixMediaGroupPresentation? = null,
+    val systemEventDetails: MatrixSystemEventDetails? = null,
+    val matrixRtcCallDetails: MatrixRtcCallEventDetails? = null
 ) {
     val isRemote: Boolean
         get() = eventId != null
@@ -1607,8 +1642,29 @@ class MatrixClientService(
     }
 
     private fun EventTimelineItem.toChatMessageOrNull(): MatrixChatMessage? {
-        val msgLike = (content as? TimelineItemContent.MsgLike)?.content
-            ?: return null
+        return when (val timelineContent = content) {
+            is TimelineItemContent.MsgLike -> toMessageLikeChatMessageOrNull(timelineContent.content)
+            is TimelineItemContent.RoomMembership -> matrixMembershipEventDetailsOrNull(
+                userId = timelineContent.userId,
+                userDisplayName = timelineContent.userDisplayName,
+                change = timelineContent.change,
+                reason = timelineContent.reason
+            )?.let { details -> toSystemEventChatMessage(details) }
+            is TimelineItemContent.ProfileChange -> matrixProfileChangeEventDetailsOrNull(
+                displayName = timelineContent.displayName,
+                previousDisplayName = timelineContent.prevDisplayName
+            )?.let { details -> toSystemEventChatMessage(details) }
+            is TimelineItemContent.State -> matrixRoomStateEventDetailsOrNull(
+                stateKey = timelineContent.stateKey,
+                state = timelineContent.content
+            )?.let { details -> toSystemEventChatMessage(details) }
+            else -> null
+        }
+    }
+
+    private fun EventTimelineItem.toMessageLikeChatMessageOrNull(
+        msgLike: MsgLikeContent
+    ): MatrixChatMessage? {
         val replyInfo = msgLike.replyInfoOrNull()
         val messageBody = when (val kind = msgLike.kind) {
             is MsgLikeKind.Message -> MatrixMessageBody(
@@ -1663,6 +1719,23 @@ class MatrixClientService(
             zynaAttributes = zynaAttributes,
             isEdited = isEdited,
             reactions = reactions
+        )
+    }
+
+    private fun EventTimelineItem.toSystemEventChatMessage(
+        details: MatrixSystemEventDetails
+    ): MatrixChatMessage {
+        return MatrixChatMessage(
+            id = eventOrTransactionId.stableId(),
+            eventId = eventOrTransactionId.eventIdOrNull(),
+            transactionId = eventOrTransactionId.transactionIdOrNull(),
+            sender = sender,
+            senderDisplayName = senderProfile.displayNameOrNull(),
+            body = "",
+            timestampMillis = timestamp.toLong(),
+            isOwn = isOwn,
+            contentType = MatrixMessageContentType.SYSTEM_EVENT,
+            systemEventDetails = details
         )
     }
 
@@ -2549,8 +2622,8 @@ class MatrixClientService(
     private fun LatestEventValue.toRoomPreview(): MatrixRoomPreview = use { latestEvent ->
         when (latestEvent) {
             LatestEventValue.None -> MatrixRoomPreview()
-            is LatestEventValue.Remote -> MatrixRoomPreview(
-                body = latestEvent.content.roomPreviewBody() ?: "",
+            is LatestEventValue.Remote -> matrixRoomPreviewForTimelineEvent(
+                body = latestEvent.content.roomPreviewBody(),
                 senderName = latestEvent.sender.previewSenderName(
                     isOwn = latestEvent.isOwn,
                     profile = latestEvent.profile
@@ -2563,8 +2636,8 @@ class MatrixClientService(
                 },
                 needsReadReceiptSummary = latestEvent.isOwn
             )
-            is LatestEventValue.Local -> MatrixRoomPreview(
-                body = latestEvent.content.roomPreviewBody() ?: "",
+            is LatestEventValue.Local -> matrixRoomPreviewForTimelineEvent(
+                body = latestEvent.content.roomPreviewBody(),
                 senderName = latestEvent.sender.previewSenderName(
                     isOwn = true,
                     profile = latestEvent.profile
@@ -2572,9 +2645,8 @@ class MatrixClientService(
                 timestampMillis = latestEvent.timestamp.toLong(),
                 localOwnMessageStatus = latestEvent.state.toLastOwnMessageStatus()
             )
-            is LatestEventValue.RemoteInvite -> MatrixRoomPreview(
-                timestampMillis = latestEvent.timestamp.toLong()
-            )
+            is LatestEventValue.RemoteInvite ->
+                matrixRoomPreviewForInvite(latestEvent.timestamp.toLong())
         }
     }
 
@@ -2826,14 +2898,6 @@ class MatrixClientService(
     private data class MatrixStorePaths(
         val dataPath: String,
         val cachePath: String
-    )
-
-    private data class MatrixRoomPreview(
-        val body: String? = null,
-        val senderName: String? = null,
-        val timestampMillis: Long? = null,
-        val localOwnMessageStatus: MatrixLastOwnMessageStatus? = null,
-        val needsReadReceiptSummary: Boolean = false
     )
 
     private data class MatrixMessageBody(

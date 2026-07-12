@@ -1,6 +1,8 @@
 package com.zyna.app.data.local
 
 import androidx.room.Dao
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
@@ -327,6 +329,31 @@ interface CachedTimelineMessageDao {
     @Query(
         """
         UPDATE timeline_messages
+        SET body = '',
+            contentType = 'MATRIX_RTC_CALL',
+            timelineDetailsJson = :timelineDetailsJson,
+            updatedAtMillis = :updatedAtMillis
+        WHERE userId = :userId
+            AND roomId = :roomId
+            AND (eventId = :eventId OR id = :eventId)
+            AND (
+                body != ''
+                OR contentType != 'MATRIX_RTC_CALL'
+                OR timelineDetailsJson IS NOT :timelineDetailsJson
+            )
+        """
+    )
+    suspend fun updateMatrixRtcCallTimelineProjection(
+        userId: String,
+        roomId: String,
+        eventId: String,
+        timelineDetailsJson: String,
+        updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE timeline_messages
         SET isEditPending = 1,
             isEditFailed = 0,
             editTransactionId = :editTransactionId,
@@ -453,11 +480,12 @@ interface CachedTimelineMessageDao {
         WHERE userId = :userId
             AND roomId = :roomId
             AND id NOT LIKE :localIdPattern
+            AND contentType NOT IN ('SYSTEM_EVENT', 'MATRIX_RTC_CALL')
         ORDER BY timestampMillis DESC, id DESC
         LIMIT :limit
         """
     )
-    suspend fun latestRoomMessages(
+    suspend fun latestRoomPreviewMessages(
         userId: String,
         roomId: String,
         localIdPattern: String,
@@ -469,6 +497,9 @@ interface CachedTimelineMessageDao {
 
     @Query("DELETE FROM timeline_messages")
     suspend fun clearAllMessages()
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertMessageIfAbsent(message: CachedTimelineMessageEntity): Long
 
     @Upsert
     suspend fun upsertMessages(messages: List<CachedTimelineMessageEntity>)

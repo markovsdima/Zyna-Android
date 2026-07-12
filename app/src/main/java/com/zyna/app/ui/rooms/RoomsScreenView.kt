@@ -34,6 +34,8 @@ import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.presence.UserPresenceStatus
 import com.zyna.app.ui.presence.PresenceText
+import com.zyna.app.ui.time.AndroidTimeTextFormatter
+import com.zyna.app.ui.time.TimeTextFormatter
 import com.zyna.app.util.ZynaPerfLog
 import java.time.Instant
 import java.time.LocalDate
@@ -514,6 +516,7 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
 
 private class RoomRowView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
+    private val timeTextFormatter = AndroidTimeTextFormatter(context)
     private val avatarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
@@ -690,7 +693,9 @@ private class RoomRowView(context: Context) : View(context) {
         drawOnlineIndicator(canvas, avatarCenterX, avatarCenterY, avatarSize)
 
         val textLeft = left + avatarSize + dp(12)
-        val timeText = room.lastMessageAtMillis?.formatRoomTimestamp().orEmpty()
+        val timeText = room.lastMessageAtMillis
+            ?.formatRoomTimestamp(timeTextFormatter)
+            .orEmpty()
         val statusText = room.lastOwnMessageStatus?.label().orEmpty()
         val badgeText = room.unreadBadgeText()
         val rawTrailingWidth = max(
@@ -1091,12 +1096,12 @@ private fun MatrixLastOwnMessageStatus.label(): String {
     }
 }
 
-private fun Long.formatRoomTimestamp(): String {
+private fun Long.formatRoomTimestamp(timeTextFormatter: TimeTextFormatter): String {
     val zone = ZoneId.systemDefault()
     val dateTime = Instant.ofEpochMilli(this).atZone(zone)
     val today = LocalDate.now(zone)
     return when (dateTime.toLocalDate()) {
-        today -> ROOM_TIME_FORMATTER.format(dateTime)
+        today -> timeTextFormatter.format(this)
         today.minusDays(1) -> "Yesterday"
         else -> ROOM_DATE_FORMATTER.format(dateTime)
     }
@@ -1133,7 +1138,6 @@ private fun String.djb2StableHash(): Long {
     return java.lang.Long.remainderUnsigned(hash, Long.MAX_VALUE)
 }
 
-private val ROOM_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val ROOM_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d")
 private val LIGHT_IOS_SYSTEM_AVATAR_COLORS = listOf(
     Color.rgb(0, 122, 255),

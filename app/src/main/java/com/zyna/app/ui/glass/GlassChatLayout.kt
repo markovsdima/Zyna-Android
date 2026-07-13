@@ -43,6 +43,7 @@ import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.PaintSplashTarget
+import com.zyna.app.util.ChatScrollPerfProbe
 import com.zyna.app.util.ZynaPerfLog
 import kotlin.math.abs
 import kotlin.math.exp
@@ -97,6 +98,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private var isLoadingOlderMessages = false
     private var canLoadOlderMessages = false
     private var canLoadNewerMessages = false
+    private var timelineCommitPending = false
     private var isAtLiveEdge = true
     private var isScrollToLiveButtonVisible = false
     private var isScrollToLiveButtonActionPending = false
@@ -283,14 +285,19 @@ internal class GlassChatLayout @JvmOverloads constructor(
             layoutManager = chatLayoutManager
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    ChatScrollPerfProbe.noteScroll(recyclerView, dx, dy)
+                    val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
                     glassController.invalidateBackdrop()
                     scheduleVulkanGlassBackdropCapture(VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS)
                     maybeLoadOlderMessages()
                     updateScrollToLiveButtonVisibility()
                     scheduleVisibleReadReceiptCandidateEvaluation()
+                    ChatScrollPerfProbe.recordGlassScroll(scrollPerfStart)
                 }
 
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    ChatScrollPerfProbe.noteScrollState(recyclerView, newState)
+                    val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
                     glassController.invalidateBackdrop()
                     if (
                         newState == RecyclerView.SCROLL_STATE_DRAGGING ||
@@ -305,6 +312,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
                     }
                     updateScrollToLiveButtonVisibility()
                     scheduleVisibleReadReceiptCandidateEvaluation()
+                    ChatScrollPerfProbe.recordGlassScroll(scrollPerfStart)
                 }
             })
         }
@@ -379,6 +387,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        timelineCommitPending = false
         cancelSnapshotTeleport()
         scrollToLiveButtonAnimator?.cancel()
         scrollToLiveButtonAnimator = null
@@ -566,6 +575,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
         canLoadOlderMessages = canLoadOlder
         canLoadNewerMessages = canLoadNewer
         updateScrollToLiveButtonVisibility()
+    }
+
+    fun setTimelineCommitPending(isPending: Boolean) {
+        timelineCommitPending = isPending
     }
 
     fun setLiveEdgeState(isLiveEdge: Boolean) {
@@ -846,7 +859,12 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     private fun maybeLoadOlderMessages() {
-        if (isLoadingOlderMessages || teleportSnapshotView != null || teleportAnimator != null) {
+        if (
+            isLoadingOlderMessages ||
+            timelineCommitPending ||
+            teleportSnapshotView != null ||
+            teleportAnimator != null
+        ) {
             return
         }
 
@@ -1390,7 +1408,11 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
         if (!didRequest) {
             if (ENABLE_VULKAN_CHAT_PERF_LOGGING) {
-                recordVulkanGlassPerfDrop()
+                if (ChatScrollPerfProbe.isRecording(recyclerView)) {
+                    recordVulkanGlassPerfDrop()
+                } else {
+                    resetVulkanGlassPerfWindow(0L)
+                }
             }
             if (ENABLE_VULKAN_CHAT_VERBOSE_TIMING) {
                 Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "AHB glass backdrop request failed")
@@ -1469,13 +1491,17 @@ internal class GlassChatLayout @JvmOverloads constructor(
             )
         }
         if (ENABLE_VULKAN_CHAT_PERF_LOGGING) {
-            recordVulkanGlassPerfSample(
-                tickTotalNanos = tickTotalNanos,
-                captureCallNanos = frame.renderNanos,
-                frame = frame,
-                overlayCallNanos = overlayCallNanos,
-                overlayResult = overlayResult
-            )
+            if (ChatScrollPerfProbe.isRecording(recyclerView)) {
+                recordVulkanGlassPerfSample(
+                    tickTotalNanos = tickTotalNanos,
+                    captureCallNanos = frame.renderNanos,
+                    frame = frame,
+                    overlayCallNanos = overlayCallNanos,
+                    overlayResult = overlayResult
+                )
+            } else {
+                resetVulkanGlassPerfWindow(0L)
+            }
         }
     }
 
@@ -2234,7 +2260,8 @@ private const val ENABLE_VULKAN_CHAT_GLASS_BACKDROP = true
 private const val ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT = false
 private const val ENABLE_VULKAN_CHAT_INPUT_GLASS = true
 private const val ENABLE_VULKAN_CHAT_VERBOSE_TIMING = false
-private const val ENABLE_VULKAN_CHAT_PERF_LOGGING = false
+private val ENABLE_VULKAN_CHAT_PERF_LOGGING =
+    BuildConfig.DEBUG && ChatScrollPerfProbe.ENABLED
 private const val FIRST_LAYOUT_LOG_LIMIT = 5
 private const val CHAT_TELEPORT_TAG = "ZynaChatTeleport"
 private const val CHAT_TELEPORT_DURATION_MS = 340L

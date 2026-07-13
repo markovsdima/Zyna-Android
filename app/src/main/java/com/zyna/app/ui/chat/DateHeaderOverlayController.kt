@@ -9,6 +9,7 @@ import com.zyna.app.ui.chat.render.SystemEventCellView
 import com.zyna.app.ui.chat.render.SystemEventRenderKind
 import com.zyna.app.ui.chat.render.SystemEventRenderModel
 import com.zyna.app.ui.chat.render.SystemEventRenderTheme
+import com.zyna.app.util.ChatScrollPerfProbe
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -140,7 +141,9 @@ internal class DateHeaderOverlayController(
 
     /** Two small child passes, primitive state only: this method allocates nothing per frame. */
     private fun update(allowReveal: Boolean) {
+        val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
         updateMeasured(allowReveal)
+        ChatScrollPerfProbe.recordDateOverlay(scrollPerfStart)
     }
 
     private fun updateMeasured(allowReveal: Boolean) {

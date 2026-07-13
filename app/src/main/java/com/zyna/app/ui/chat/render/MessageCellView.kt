@@ -9,13 +9,16 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Bundle
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.DecelerateInterpolator
 import android.util.Log
 import com.zyna.app.BuildConfig
+import com.zyna.app.R
 import com.zyna.app.data.media.AudioPlaybackSnapshot
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixAudioInfo
@@ -110,6 +113,7 @@ internal class MessageCellView(
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuGestureEvent: ((action: Int, rawX: Float, rawY: Float) -> Unit)? = null
     var onReplyHeaderClicked: ((eventId: String) -> Unit)? = null
+    var onReplyRequested: ((MessageReplyPreview) -> Unit)? = null
     var onReactionClicked: ((reactionKey: String) -> Unit)? = null
     var onPhotoViewerRequested: ((request: PhotoViewerOpenRequest) -> Unit)? = null
     var onVoicePlaybackRequested: ((messageId: String, audioInfo: MatrixAudioInfo) -> Unit)? = null
@@ -147,6 +151,10 @@ internal class MessageCellView(
     }
 
     fun bind(model: MessageRenderModel, theme: MessageRenderTheme) {
+        if (renderModel?.id != model.id) {
+            animate().cancel()
+            translationX = 0f
+        }
         val needsLayout = renderModel != model || renderTheme != theme
         closeImageLoadHandles()
         renderModel = model
@@ -406,6 +414,29 @@ internal class MessageCellView(
         return true
     }
 
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        if (currentReplySwipeTarget() != null && onReplyRequested != null) {
+            info.addAction(
+                AccessibilityNodeInfo.AccessibilityAction(
+                    R.id.accessibility_action_reply,
+                    context.getString(R.string.chat_action_reply)
+                )
+            )
+        }
+    }
+
+    override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+        if (action == R.id.accessibility_action_reply) {
+            val target = currentReplySwipeTarget() ?: return false
+            val callback = onReplyRequested ?: return false
+            callback(target)
+            performClick()
+            return true
+        }
+        return super.performAccessibilityAction(action, arguments)
+    }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         renderModel?.let { model ->
@@ -420,6 +451,8 @@ internal class MessageCellView(
         removeCallbacks(openContextMenuRunnable)
         bubbleHighlightAnimator?.cancel()
         bubbleHighlightAnimator = null
+        animate().cancel()
+        translationX = 0f
         closeImageLoadHandles()
         resetContextMenuTouchState()
         isContextMenuSourceHidden = false
@@ -432,6 +465,28 @@ internal class MessageCellView(
         } else {
             MessageHitTarget.OUTSIDE
         }
+    }
+
+    internal fun replySwipeTargetAt(
+        localY: Float,
+        verticalPadding: Float
+    ): MessageReplyPreview? {
+        val bubble = layout?.bubbleRect ?: return null
+        if (localY < bubble.top - verticalPadding || localY > bubble.bottom + verticalPadding) {
+            return null
+        }
+        return currentReplySwipeTarget()
+    }
+
+    internal fun currentReplySwipeTarget(): MessageReplyPreview? {
+        return renderModel?.toReplyPreviewOrNull()
+    }
+
+    internal fun isBoundToReplySwipeEvent(eventId: String): Boolean {
+        val model = renderModel ?: return false
+        return model.eventId == eventId &&
+            model.content !is MessageContent.Redacted &&
+            model.outgoingEnvelopeId == null
     }
 
     private fun replyHeaderEventIdAt(x: Float, y: Float): String? {

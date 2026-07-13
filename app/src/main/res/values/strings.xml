@@ -1,4 +1,5 @@
 <resources>
+    <string name="chat_action_reply">Reply</string>
     <string name="app_name">Zyna</string>
     <string name="notification_channel_messages_name">Messages</string>
     <string name="notification_channel_messages_description">New message notifications</string>

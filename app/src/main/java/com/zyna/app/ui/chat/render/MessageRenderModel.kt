@@ -55,6 +55,26 @@ internal data class MessageReplyPreview(
     val body: String
 )
 
+internal fun MessageRenderModel.toReplyPreviewOrNull(): MessageReplyPreview? {
+    val replyEventId = eventId?.takeIf { it.isNotBlank() } ?: return null
+    if (content is MessageContent.Redacted || outgoingEnvelopeId != null) {
+        return null
+    }
+    val replyBody = when (val currentContent = content) {
+        is MessageContent.Text -> currentContent.body
+        is MessageContent.Image -> currentContent.caption.normalizedMessageCaption() ?: "Photo"
+        is MessageContent.PhotoGroup -> currentContent.caption.normalizedMessageCaption() ?: "Photo group"
+        is MessageContent.Voice -> "Voice message"
+        MessageContent.Redacted -> return null
+    }.takeIf { it.isNotBlank() } ?: return null
+    return MessageReplyPreview(
+        eventId = replyEventId,
+        senderId = senderId,
+        senderText = senderText,
+        body = replyBody
+    )
+}
+
 internal data class MessageForwardPreview(
     val body: String,
     val forwardedFrom: String?,

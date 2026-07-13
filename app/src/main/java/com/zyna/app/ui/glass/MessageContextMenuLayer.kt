@@ -37,6 +37,7 @@ import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.PaintSplashTarget
 import com.zyna.app.ui.chat.render.PhotoGroupContextSelection
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.chat.render.toReplyPreviewOrNull
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -440,11 +441,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             emptyList()
         }
         val actions = buildList {
-            if (
-                message.eventId != null &&
-                message.content !is MessageContent.Redacted &&
-                message.outgoingEnvelopeId == null
-            ) {
+            if (message.toReplyPreviewOrNull() != null) {
                 add(MessageContextMenuAction.REPLY)
             }
             if (message.canShowForwardAction()) {

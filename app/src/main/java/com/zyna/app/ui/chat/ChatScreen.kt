@@ -389,6 +389,7 @@ internal class ChatScreenView(
             onContextMenuRequested = chatLayout::showMessageContextMenu,
             onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
             onReplyHeaderClicked = {},
+            onReplyRequested = chatLayout::requestReplyToMessage,
             onToggleReaction = { _, _ -> },
             onPhotoViewerRequested = {},
             onVoicePlaybackRequested = { _, _ -> }
@@ -992,6 +993,7 @@ internal class ChatScreenView(
         )
         errorView.setTextColor(sendErrorColor)
         chatLayout.setPalette(palette)
+        chatLayout.setReplySwipeIndicatorColor(nativeColors.actionText)
         if (::dateHeaderOverlayController.isInitialized) {
             dateHeaderOverlayController.setTheme(messageTheme.toSystemEventRenderTheme())
         }
@@ -1329,6 +1331,7 @@ private class ChatMessageAdapter(
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
     var onReplyHeaderClicked: (String) -> Unit,
+    var onReplyRequested: (MessageReplyPreview) -> Unit,
     var onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
     var onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit
@@ -1398,6 +1401,7 @@ private class ChatMessageAdapter(
                     onContextMenuRequested = onContextMenuRequested,
                     onContextMenuGestureEvent = onContextMenuGestureEvent,
                     onReplyHeaderClicked = onReplyHeaderClicked,
+                    onReplyRequested = onReplyRequested,
                     onToggleReaction = onToggleReaction,
                     onPhotoViewerRequested = onPhotoViewerRequested,
                     onVoicePlaybackRequested = onVoicePlaybackRequested,
@@ -1595,6 +1599,7 @@ private class ChatMessageViewHolder(
         onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
         onReplyHeaderClicked: (String) -> Unit,
+        onReplyRequested: (MessageReplyPreview) -> Unit,
         onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
         onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
         onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit,
@@ -1604,6 +1609,7 @@ private class ChatMessageViewHolder(
         messageView.onContextMenuRequested = onContextMenuRequested
         messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
         messageView.onReplyHeaderClicked = onReplyHeaderClicked
+        messageView.onReplyRequested = onReplyRequested
         messageView.onReactionClicked = { reactionKey -> onToggleReaction(message.id, reactionKey) }
         messageView.onPhotoViewerRequested = onPhotoViewerRequested
         messageView.onVoicePlaybackRequested = onVoicePlaybackRequested

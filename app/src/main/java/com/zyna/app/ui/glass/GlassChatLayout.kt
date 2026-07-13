@@ -34,6 +34,8 @@ import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.ReplySwipeController
+import com.zyna.app.ui.chat.ReplySwipeIndicatorView
 import com.zyna.app.ui.chat.render.GradientBubbleRecyclerView
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
@@ -43,6 +45,7 @@ import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.PaintSplashTarget
+import com.zyna.app.ui.chat.render.toReplyPreviewOrNull
 import com.zyna.app.util.ChatScrollPerfProbe
 import com.zyna.app.util.ZynaPerfLog
 import kotlin.math.abs
@@ -58,6 +61,12 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private val rootGlassOwnerKey: String? = null,
     private val rootGlassCoordinator: RootGlassLayerCoordinator? = null
 ) : FrameLayout(context, attrs) {
+    private enum class ScrollLockOwner {
+        CONTEXT_MENU,
+        REPLY_SWIPE,
+        TELEPORT
+    }
+
     private val density = resources.displayMetrics.density
     val glassController = GlassBackdropController(this)
     val recyclerView = GradientBubbleRecyclerView(context)
@@ -106,6 +115,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private var prefetchCheckPosted = false
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
+    private val scrollLockOwners = mutableSetOf<ScrollLockOwner>()
     private var recyclerAccessibilityBeforeMenu = IMPORTANT_FOR_ACCESSIBILITY_AUTO
     private var teleportSnapshotView: ImageView? = null
     private var teleportSnapshotBitmap: Bitmap? = null
@@ -249,6 +259,9 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
     }
     private val contextCellLayer = contextMenuLayer.selectedCellLayer
+    private val replySwipeIndicator = ReplySwipeIndicatorView(context).apply {
+        setColor(palette.text)
+    }
     private val backdropContentLayer = FrameLayout(context).apply {
         clipChildren = false
         clipToPadding = false
@@ -271,6 +284,26 @@ internal class GlassChatLayout @JvmOverloads constructor(
         recyclerView = recyclerView,
         fallbackColor = palette.background,
         overlayViews = listOf(contextCellLayer)
+    )
+    private val replySwipeController = ReplySwipeController(
+        recyclerView = recyclerView,
+        indicatorView = replySwipeIndicator,
+        canStart = {
+            scrollLockOwners.isEmpty() &&
+                !isContextGestureActive &&
+                !isContextMenuShowing &&
+                teleportSnapshotView == null &&
+                teleportAnimator == null
+        },
+        indicatorTop = { REPLY_SWIPE_VERTICAL_MARGIN_DP * density },
+        indicatorBottom = {
+            val contentBottom = inputBarLocalTop.takeIf { it > 0 } ?: height
+            contentBottom - REPLY_SWIPE_VERTICAL_MARGIN_DP * density
+        },
+        onInteractionActiveChanged = { active ->
+            setScrollLocked(ScrollLockOwner.REPLY_SWIPE, active)
+        },
+        onReply = { target -> requestReplyToMessage(target) }
     )
 
     init {
@@ -322,6 +355,13 @@ internal class GlassChatLayout @JvmOverloads constructor(
         localVulkanOverlay?.let { overlay ->
             addView(overlay)
         }
+        addView(
+            replySwipeIndicator,
+            LayoutParams(
+                REPLY_SWIPE_INDICATOR_SIZE_DP.dpToPx(density),
+                REPLY_SWIPE_INDICATOR_SIZE_DP.dpToPx(density)
+            )
+        )
         addView(emptyView)
         addView(composerErrorView)
         if (!usesExternalInputBar) {
@@ -388,6 +428,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         timelineCommitPending = false
+        replySwipeController.cancel(immediate = true)
         cancelSnapshotTeleport()
         scrollToLiveButtonAnimator?.cancel()
         scrollToLiveButtonAnimator = null
@@ -406,6 +447,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
             hardwareBackdropCapture?.close()
         }
         hardwareBackdropCapture = null
+        scrollLockOwners.clear()
+        chatLayoutManager.isScrollLocked = false
         super.onDetachedFromWindow()
     }
 
@@ -552,8 +595,13 @@ internal class GlassChatLayout @JvmOverloads constructor(
         inputBar.setPalette(newPalette)
         contextMenuLayer.setPalette(newPalette)
         scrollToLiveButton.setPalette(newPalette)
+        replySwipeIndicator.setColor(newPalette.text)
         glassController.invalidateBackdrop()
         scheduleVulkanGlassBackdropCapture()
+    }
+
+    fun setReplySwipeIndicatorColor(color: Int) {
+        replySwipeIndicator.setColor(color)
     }
 
     private fun updateInputBarVulkanGlassEnabled() {
@@ -615,6 +663,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     fun beginSnapshotTeleport(direction: ChatTeleportDirection): Boolean {
+        replySwipeController.cancel(immediate = true)
         val blockedReason = when {
             isContextGestureActive -> "contextGestureActive"
             isContextMenuShowing -> "contextMenuShowing"
@@ -666,7 +715,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             LayoutParams(recyclerView.width, recyclerView.height)
         )
         layoutTeleportSnapshot()
-        setContextScrollLocked(true)
+        setScrollLocked(ScrollLockOwner.TELEPORT, true)
         removeCallbacks(teleportTimeoutRunnable)
         postDelayed(teleportTimeoutRunnable, CHAT_TELEPORT_TIMEOUT_MS)
         return true
@@ -754,13 +803,14 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     internal fun beginMessageContextMenuGesture(request: MessageContextMenuRequest): Boolean {
+        replySwipeController.cancel(immediate = true)
         isContextGestureActive = true
-        setContextScrollLocked(true)
+        setScrollLocked(ScrollLockOwner.CONTEXT_MENU, true)
         syncExternalContextMenuLayerLayout()
         val didBegin = contextMenuLayer.beginPreview(request)
         if (!didBegin) {
             isContextGestureActive = false
-            setContextScrollLocked(false)
+            setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
             updateScrollToLiveButtonVisibility()
             return false
         }
@@ -770,10 +820,15 @@ internal class GlassChatLayout @JvmOverloads constructor(
         return true
     }
 
+    internal fun requestReplyToMessage(target: MessageReplyPreview) {
+        onReplyToMessage(target)
+    }
+
     internal fun showMessageContextMenu(request: MessageContextMenuRequest): Boolean {
+        replySwipeController.cancel(immediate = true)
         if (!isContextGestureActive) {
             isContextGestureActive = true
-            setContextScrollLocked(true)
+            setScrollLocked(ScrollLockOwner.CONTEXT_MENU, true)
         }
         syncExternalContextMenuLayerLayout()
         val didShow = contextMenuLayer.show(request)
@@ -798,7 +853,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             isContextGestureActive = false
             if (!isContextMenuShowing) {
                 contextMenuLayer.dismiss(animated = true)
-                setContextScrollLocked(false)
+                setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
                 updateScrollToLiveButtonVisibility()
             }
         }
@@ -808,7 +863,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         if (!isContextMenuShowing) {
             contextMenuLayer.dismiss(animated = animated)
             if (!isContextGestureActive) {
-                setContextScrollLocked(false)
+                setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
             }
             updateScrollToLiveButtonVisibility()
             post { updateVulkanGlassRects() }
@@ -817,7 +872,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         isContextMenuShowing = false
         recyclerView.importantForAccessibility = recyclerAccessibilityBeforeMenu
         if (!isContextGestureActive) {
-            setContextScrollLocked(false)
+            setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
         }
         contextMenuLayer.dismiss(animated)
         updateScrollToLiveButtonVisibility()
@@ -827,6 +882,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     internal fun canStartNavigationBackGesture(): Boolean {
         return !isContextGestureActive &&
             !isContextMenuShowing &&
+            !replySwipeController.isActive &&
             teleportSnapshotView == null &&
             teleportAnimator == null
     }
@@ -1830,26 +1886,6 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
     }
 
-    private fun MessageRenderModel.toReplyPreviewOrNull(): MessageReplyPreview? {
-        val eventId = eventId?.takeIf { it.isNotBlank() } ?: return null
-        if (content is MessageContent.Redacted || outgoingEnvelopeId != null) {
-            return null
-        }
-        val body = when (val currentContent = content) {
-            is MessageContent.Text -> currentContent.body
-            is MessageContent.Image -> currentContent.caption.normalizedMessageCaption() ?: "Photo"
-            is MessageContent.PhotoGroup -> currentContent.caption.normalizedMessageCaption() ?: "Photo group"
-            is MessageContent.Voice -> "Voice message"
-            MessageContent.Redacted -> return null
-        }.takeIf { it.isNotBlank() } ?: return null
-        return MessageReplyPreview(
-            eventId = eventId,
-            senderId = senderId,
-            senderText = senderText,
-            body = body
-        )
-    }
-
     private fun MessageRenderModel.toForwardPreviewOrNull(): MessageForwardPreview? {
         eventId?.takeIf { it.isNotBlank() } ?: return null
         if (!canForward || content is MessageContent.Redacted || outgoingEnvelopeId != null) {
@@ -1903,12 +1939,18 @@ internal class GlassChatLayout @JvmOverloads constructor(
         )
     }
 
-    private fun setContextScrollLocked(locked: Boolean) {
-        if (chatLayoutManager.isScrollLocked == locked) {
-            return
+    private fun setScrollLocked(owner: ScrollLockOwner, locked: Boolean) {
+        val changed = if (locked) {
+            scrollLockOwners.add(owner)
+        } else {
+            scrollLockOwners.remove(owner)
         }
-        chatLayoutManager.isScrollLocked = locked
-        if (locked) {
+        if (!changed) return
+
+        val shouldLock = scrollLockOwners.isNotEmpty()
+        if (chatLayoutManager.isScrollLocked == shouldLock) return
+        chatLayoutManager.isScrollLocked = shouldLock
+        if (shouldLock) {
             recyclerView.stopScroll()
         }
     }
@@ -1924,9 +1966,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         teleportSnapshotView = null
         teleportSnapshotBitmap?.recycle()
         teleportSnapshotBitmap = null
-        if (!isContextGestureActive && !isContextMenuShowing) {
-            setContextScrollLocked(false)
-        }
+        setScrollLocked(ScrollLockOwner.TELEPORT, false)
         updateScrollToLiveButtonVisibility()
         invalidateGlassContent()
     }
@@ -2281,6 +2321,8 @@ private const val SCROLL_TO_LIVE_BUTTON_SIZE_DP = 44
 private const val SCROLL_TO_LIVE_BUTTON_BOTTOM_GAP_DP = 12
 private const val SCROLL_TO_LIVE_BUTTON_FADE_MS = 160L
 private const val SCROLL_TO_LIVE_BUTTON_PENDING_TIMEOUT_MS = 4_000L
+private const val REPLY_SWIPE_INDICATOR_SIZE_DP = 30
+private const val REPLY_SWIPE_VERTICAL_MARGIN_DP = 14f
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
 

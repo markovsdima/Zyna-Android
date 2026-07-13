@@ -43,6 +43,8 @@
     <string name="calls_outcome_unanswered">No answer</string>
     <string name="system_event_generic">Room event</string>
     <string name="system_event_call_with_time">%1$s · %2$s</string>
+    <string name="timeline_date_today">Today</string>
+    <string name="timeline_date_yesterday">Yesterday</string>
     <string name="system_event_you_joined_room">You joined the room</string>
     <string name="system_event_member_joined_room">%1$s joined the room</string>
     <string name="system_event_you_left_room">You left the room</string>

@@ -52,6 +52,7 @@ import com.zyna.app.ui.chat.render.MessageRenderTheme
 import com.zyna.app.ui.chat.render.MatrixTimelineEventPresenter
 import com.zyna.app.ui.chat.render.RenderDeliveryState
 import com.zyna.app.ui.chat.render.SystemEventCellView
+import com.zyna.app.ui.chat.render.SystemEventRenderKind
 import com.zyna.app.ui.chat.render.SystemEventRenderModel
 import com.zyna.app.ui.chat.render.SystemEventRenderTheme
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
@@ -64,6 +65,7 @@ import com.zyna.app.ui.glass.GlassVoiceComposerState
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
+import com.zyna.app.ui.time.AndroidTimelineDateTextFormatter
 import com.zyna.app.ui.time.AndroidTimeTextFormatter
 import com.zyna.app.ui.time.TimeTextFormatter
 import com.zyna.app.util.ZynaPerfLog
@@ -144,6 +146,7 @@ internal class ChatScreenView(
     private val rootOverlayHost: FrameLayout?
 ) : FrameLayout(context) {
     private val timeTextFormatter = AndroidTimeTextFormatter(context)
+    private val timelineDateTextFormatter = AndroidTimelineDateTextFormatter(context)
     private val timelineEventPresenter = MatrixTimelineEventPresenter(context, timeTextFormatter)
     private val initStart = ZynaPerfLog.start()
     private val density = resources.displayMetrics.density
@@ -162,6 +165,7 @@ internal class ChatScreenView(
     private var voiceRecorderListenerHandle: AutoCloseable? = null
     private var latestAudioPlaybackSnapshot = AudioPlaybackSnapshot()
     private var latestVoiceRecorderState: VoiceRecorderState = VoiceRecorderState.Idle
+    private lateinit var dateHeaderOverlayController: DateHeaderOverlayController
 
     fun canReuseForRoom(roomId: String): Boolean {
         return currentRoomId == null || currentRoomId == roomId
@@ -258,6 +262,11 @@ internal class ChatScreenView(
         includeFontPadding = true
         setTextColor(sendErrorColor)
         visibility = View.GONE
+    }
+    private val floatingDateView = SystemEventCellView(context).apply {
+        alpha = 0f
+        visibility = View.INVISIBLE
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
     }
 
     init {
@@ -387,6 +396,23 @@ internal class ChatScreenView(
             )
         )
         contentFrame.addView(
+            floatingDateView,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            ).apply {
+                topMargin = dp(FLOATING_DATE_VIEW_TOP_MARGIN_DP)
+            }
+        )
+        dateHeaderOverlayController = DateHeaderOverlayController(
+            recyclerView = chatLayout.recyclerView,
+            overlayView = floatingDateView,
+            initialTheme = messageTheme.toSystemEventRenderTheme(),
+            canReveal = { !chatLayout.isSnapshotTeleportActive() }
+        )
+        chatLayout.recyclerView.addOnScrollListener(dateHeaderOverlayController)
+        contentFrame.addView(
             errorView,
             LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -412,9 +438,12 @@ internal class ChatScreenView(
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         ViewCompat.requestApplyInsets(this)
+        dateHeaderOverlayController.onTimelineChanged()
     }
 
     override fun onDetachedFromWindow() {
+        dateHeaderOverlayController.hideImmediately()
+        dateHeaderOverlayController.dispose()
         removePhotoViewer()
         audioPlaybackListenerHandle?.close()
         audioPlaybackListenerHandle = null
@@ -601,6 +630,7 @@ internal class ChatScreenView(
                     currentUserId = state.currentUserId
                 )
             }
+            .withDateDividers(timelineDateTextFormatter.snapshot())
         ZynaPerfLog.end(
             presentationStart,
             "chatView.mediaPresentation"
@@ -669,6 +699,9 @@ internal class ChatScreenView(
         } else {
             false
         }
+        if (didBeginTeleport || didBeginLiveEdgeTeleport) {
+            dateHeaderOverlayController.hideImmediately()
+        }
         if (state.jumpTargetEventId != null) {
             logChatTeleport(
                 "native ui update origin=${state.windowChangeOrigin} " +
@@ -704,8 +737,10 @@ internal class ChatScreenView(
             return
         }
         adapter.messageTheme = messageTheme
+        dateHeaderOverlayController.setTheme(messageTheme.toSystemEventRenderTheme())
         val submitStart = ZynaPerfLog.start()
         adapter.submitList(displayedTimeline) {
+            dateHeaderOverlayController.onTimelineChanged()
             ZynaPerfLog.end(
                 submitStart,
                 "chatView.submitList.commit"
@@ -939,6 +974,9 @@ internal class ChatScreenView(
         )
         errorView.setTextColor(sendErrorColor)
         chatLayout.setPalette(palette)
+        if (::dateHeaderOverlayController.isInitialized) {
+            dateHeaderOverlayController.setTheme(messageTheme.toSystemEventRenderTheme())
+        }
     }
 
     private fun roundedDrawable(color: Int, radiusPx: Int): GradientDrawable {
@@ -1272,10 +1310,12 @@ private class ChatMessageAdapter(
     var onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
     var onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit
-) : ListAdapter<ChatTimelineItem, RecyclerView.ViewHolder>(ChatTimelineItemDiffCallback) {
+) : ListAdapter<ChatTimelineItem, RecyclerView.ViewHolder>(ChatTimelineItemDiffCallback),
+    DateHeaderTimelineLookup {
     private var lastMediaPrefetchWindowSignature: String? = null
     private var lastMediaPrefetchSignature: String? = null
     private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
+    private var dateDividerByPosition: List<TimelineDateDividerModel?> = emptyList()
     var matrixMediaLoader: MatrixMediaLoader? = matrixMediaLoader
         set(value) {
             if (field !== value) {
@@ -1293,6 +1333,7 @@ private class ChatMessageAdapter(
             is ChatTimelineItem.Message -> VIEW_TYPE_MESSAGE
             is ChatTimelineItem.SystemEvent -> VIEW_TYPE_SYSTEM_EVENT
             is ChatTimelineItem.CallEvent -> VIEW_TYPE_CALL_EVENT
+            is ChatTimelineItem.DateDivider -> VIEW_TYPE_DATE_DIVIDER
         }
     }
 
@@ -1301,7 +1342,8 @@ private class ChatMessageAdapter(
         val holder = when (viewType) {
             VIEW_TYPE_MESSAGE -> ChatMessageViewHolder(parent, matrixMediaLoader)
             VIEW_TYPE_SYSTEM_EVENT,
-            VIEW_TYPE_CALL_EVENT -> SystemEventViewHolder(parent)
+            VIEW_TYPE_CALL_EVENT,
+            VIEW_TYPE_DATE_DIVIDER -> SystemEventViewHolder(parent)
             else -> error("Unknown chat timeline view type: $viewType")
         }
         return holder.also {
@@ -1340,6 +1382,16 @@ private class ChatMessageAdapter(
             }
             holder is SystemEventViewHolder && item is ChatTimelineItem.CallEvent -> {
                 holder.bind(item.renderModel, messageTheme.toSystemEventRenderTheme())
+            }
+            holder is SystemEventViewHolder && item is ChatTimelineItem.DateDivider -> {
+                holder.bind(
+                    SystemEventRenderModel(
+                        text = item.model.title,
+                        accessibilityText = item.model.title,
+                        kind = SystemEventRenderKind.SYSTEM_EVENT
+                    ),
+                    messageTheme.toSystemEventRenderTheme()
+                )
             }
             else -> error(
                 "Chat timeline holder/item mismatch: ${holder::class.java.simpleName} / " +
@@ -1386,7 +1438,16 @@ private class ChatMessageAdapter(
         previousList: List<ChatTimelineItem>,
         currentList: List<ChatTimelineItem>
     ) {
+        dateDividerByPosition = currentList.dateDividersByPosition()
         resetMediaPrefetchSignature()
+    }
+
+    override fun timelineItemAt(position: Int): ChatTimelineItem? {
+        return currentList.getOrNull(position)
+    }
+
+    override fun dateDividerForPosition(position: Int): TimelineDateDividerModel? {
+        return dateDividerByPosition.getOrNull(position)
     }
 
     fun prefetchMediaAround(
@@ -1467,6 +1528,7 @@ private class ChatMessageAdapter(
         const val VIEW_TYPE_MESSAGE = 0
         const val VIEW_TYPE_SYSTEM_EVENT = 1
         const val VIEW_TYPE_CALL_EVENT = 2
+        const val VIEW_TYPE_DATE_DIVIDER = 3
     }
 }
 
@@ -1897,6 +1959,7 @@ private const val MEDIA_PREFETCH_MAX_HEIGHT_DP = 390
 private const val MEDIA_PREFETCH_TILE_SPACING_DP = 2
 private const val NATIVE_TOP_BAR_HEIGHT_DP = 64
 private const val ACTIVE_CALL_BANNER_HEIGHT_DP = 48
+private const val FLOATING_DATE_VIEW_TOP_MARGIN_DP = 4
 private const val FNV_64_OFFSET_BASIS = -3750763034362895579L
 private const val FNV_64_PRIME = 1099511628211L
 

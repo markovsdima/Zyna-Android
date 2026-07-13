@@ -2,6 +2,10 @@ package com.zyna.app.ui.chat
 
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixMessageContentType
+import com.zyna.app.ui.time.TimelineDateFormattingSnapshot
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -86,18 +90,72 @@ class ChatTimelineItemTest {
         }
     }
 
+    @Test
+    fun withDateDividers_addsOneStableRowAfterEachNewestToOldestDayGroup() {
+        val newerDate = LocalDate.of(2026, 7, 13)
+        val olderDate = newerDate.minusDays(1)
+        val formatting = dateFormatting(today = newerDate)
+        val items = listOf(
+            timelineEvent(id = "new-1", timestampMillis = noonMillis(newerDate)),
+            timelineEvent(id = "new-2", timestampMillis = noonMillis(newerDate) - 1_000L),
+            timelineEvent(id = "old-1", timestampMillis = noonMillis(olderDate))
+        ).map { message -> message.toChatTimelineItem() }
+
+        val rows = items.withDateDividers(formatting)
+
+        assertEquals(
+            listOf(
+                "message:new-1",
+                "message:new-2",
+                "date:${newerDate.toEpochDay()}",
+                "message:old-1",
+                "date:${olderDate.toEpochDay()}"
+            ),
+            rows.map { it.stableKey }
+        )
+        assertEquals("Today", (rows[2] as ChatTimelineItem.DateDivider).model.title)
+        assertEquals("Yesterday", (rows[4] as ChatTimelineItem.DateDivider).model.title)
+        assertNull(rows[2].readReceiptEventOrNull())
+        assertEquals(
+            listOf(
+                newerDate.toEpochDay(),
+                newerDate.toEpochDay(),
+                newerDate.toEpochDay(),
+                olderDate.toEpochDay(),
+                olderDate.toEpochDay()
+            ),
+            rows.dateDividersByPosition().map { model -> model?.epochDay }
+        )
+    }
+
     private fun timelineEvent(
         id: String = "event-id",
-        contentType: MatrixMessageContentType
+        contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
+        timestampMillis: Long = 1_700_000_000_000L
     ): MatrixChatMessage {
         return MatrixChatMessage(
             id = id,
             eventId = id,
             sender = "@alice:example.org",
             body = "Event body",
-            timestampMillis = 1_700_000_000_000L,
+            timestampMillis = timestampMillis,
             isOwn = false,
             contentType = contentType
         )
+    }
+
+    private fun dateFormatting(today: LocalDate): TimelineDateFormattingSnapshot {
+        return TimelineDateFormattingSnapshot(
+            zoneId = ZoneId.of("UTC"),
+            today = today,
+            todayText = "Today",
+            yesterdayText = "Yesterday",
+            currentYearFormatter = DateTimeFormatter.ofPattern("MMMM d"),
+            otherYearFormatter = DateTimeFormatter.ISO_LOCAL_DATE
+        )
+    }
+
+    private fun noonMillis(date: LocalDate): Long {
+        return date.atTime(12, 0).atZone(ZoneId.of("UTC")).toInstant().toEpochMilli()
     }
 }

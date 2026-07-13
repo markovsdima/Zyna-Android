@@ -8,6 +8,8 @@
     <string name="calls_outcome_unanswered">Нет ответа</string>
     <string name="system_event_generic">Событие комнаты</string>
     <string name="system_event_call_with_time">%1$s · %2$s</string>
+    <string name="timeline_date_today">Сегодня</string>
+    <string name="timeline_date_yesterday">Вчера</string>
     <string name="system_event_you_joined_room">Вы вошли в комнату</string>
     <string name="system_event_member_joined_room">%1$s вошёл(ла) в комнату</string>
     <string name="system_event_you_left_room">Вы вышли из комнаты</string>

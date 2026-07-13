@@ -1,5 +1,7 @@
 package com.zyna.app.ui.chat.render
 
+import android.animation.TimeInterpolator
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -65,12 +67,53 @@ internal class SystemEventCellView(context: Context) : View(context) {
     private var pillHeight = 0
     private var textDrawLeft = 0f
     private var textDrawTop = 0f
+    private var backgroundAnimator: ValueAnimator? = null
 
     init {
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
     }
 
     fun bind(model: SystemEventRenderModel, theme: SystemEventRenderTheme) {
+        bind(model = model, theme = theme, keepMeasuredSize = false)
+    }
+
+    /** Rebinds a full-width overlay without propagating a layout request through its host. */
+    fun bindKeepingMeasuredSize(model: SystemEventRenderModel, theme: SystemEventRenderTheme) {
+        bind(model = model, theme = theme, keepMeasuredSize = true)
+    }
+
+    fun setPillBackgroundColor(color: Int) {
+        backgroundAnimator?.cancel()
+        backgroundAnimator = null
+        updatePillBackgroundColor(color)
+    }
+
+    fun animatePillBackgroundColor(
+        color: Int,
+        durationMillis: Long,
+        interpolator: TimeInterpolator
+    ) {
+        if (fillPaint.color == color) return
+        backgroundAnimator?.cancel()
+        backgroundAnimator = ValueAnimator.ofArgb(fillPaint.color, color).apply {
+            duration = durationMillis
+            this.interpolator = interpolator
+            addUpdateListener { animation ->
+                updatePillBackgroundColor(animation.animatedValue as Int)
+            }
+            start()
+        }
+    }
+
+    fun resetPillBackground() {
+        setPillBackgroundColor(renderTheme?.backgroundColor ?: return)
+    }
+
+    private fun bind(
+        model: SystemEventRenderModel,
+        theme: SystemEventRenderTheme,
+        keepMeasuredSize: Boolean
+    ) {
         if (renderModel == model && renderTheme == theme) {
             return
         }
@@ -90,7 +133,11 @@ internal class SystemEventCellView(context: Context) : View(context) {
         contentDescription = model.accessibilityText
         textLayout = null
         lastLayoutAvailableWidth = -1
-        requestLayout()
+        if (keepMeasuredSize && width > 0 && height > 0) {
+            updateFixedSizeGeometry()
+        } else {
+            requestLayout()
+        }
         invalidate()
     }
 
@@ -191,6 +238,50 @@ internal class SystemEventCellView(context: Context) : View(context) {
             (groupLeft + iconSize).roundToInt(),
             (pillTop + (pillHeight + iconSize) / 2f).roundToInt()
         )
+    }
+
+    private fun updateFixedSizeGeometry() {
+        val measuredWidth = width
+        val measuredHeight = height
+        val outerHorizontalPadding = OUTER_HORIZONTAL_PADDING_DP.dpToPx()
+        val contentHorizontalPadding = CONTENT_HORIZONTAL_PADDING_DP.dpToPx()
+        val iconBlockWidth = if (leadingIconDrawable != null) {
+            ICON_SIZE_DP.dpToPx() + ICON_TEXT_GAP_DP.dpToPx()
+        } else {
+            0
+        }
+        val availableTextWidth = (
+            measuredWidth - outerHorizontalPadding * 2 - contentHorizontalPadding * 2 -
+                iconBlockWidth
+            ).coerceAtLeast(1)
+        ensureTextLayout(availableTextWidth)
+
+        val layout = textLayout
+        val textWidth = layout?.width?.coerceAtLeast(1) ?: 1
+        val textHeight = layout?.height ?: 0
+        val iconSize = if (leadingIconDrawable != null) ICON_SIZE_DP.dpToPx() else 0
+        val contentWidth = iconBlockWidth + textWidth
+        val contentHeight = max(textHeight, iconSize)
+        pillWidth = (contentWidth + contentHorizontalPadding * 2)
+            .coerceAtMost((measuredWidth - outerHorizontalPadding * 2).coerceAtLeast(1))
+        pillHeight = max(
+            MIN_PILL_HEIGHT_DP.dpToPx(),
+            contentHeight + CONTENT_VERTICAL_PADDING_DP.dpToPx() * 2
+        ).coerceAtMost(measuredHeight)
+        updateDrawGeometry(
+            measuredWidth = measuredWidth,
+            measuredHeight = measuredHeight,
+            textWidth = textWidth,
+            textHeight = textHeight,
+            iconBlockWidth = iconBlockWidth,
+            iconSize = iconSize
+        )
+    }
+
+    private fun updatePillBackgroundColor(color: Int) {
+        if (fillPaint.color == color) return
+        fillPaint.color = color
+        invalidate()
     }
 
     override fun verifyDrawable(who: Drawable): Boolean {

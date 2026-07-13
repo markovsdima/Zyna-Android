@@ -659,6 +659,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
         return true
     }
 
+    fun isSnapshotTeleportActive(): Boolean {
+        return teleportSnapshotView != null || teleportAnimator != null
+    }
+
     fun completeSnapshotTeleport(onComplete: () -> Unit = {}) {
         val snapshotView = teleportSnapshotView
         if (snapshotView == null) {

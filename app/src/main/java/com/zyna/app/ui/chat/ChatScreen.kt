@@ -23,6 +23,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
+import com.zyna.app.R
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.AudioPlaybackSnapshot
@@ -61,6 +62,7 @@ import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
+import com.zyna.app.ui.glass.GlassComposerPreviewKind
 import com.zyna.app.ui.glass.GlassVoiceComposerState
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
@@ -583,11 +585,11 @@ internal class ChatScreenView(
         }
         chatLayout.inputBar.allowEmptySend = state.forwardTarget != null
         chatLayout.inputBar.setPreview(
-            state.forwardTarget?.toComposerPreview() ?: state.replyTarget?.toComposerPreview()
+            state.forwardTarget?.toComposerPreview(context) ?: state.replyTarget?.toComposerPreview(context)
         )
         chatLayout.inputBar.onEditCancelled = actions.onCancelEdit
         chatLayout.inputBar.setEditDraft(state.editTarget?.eventId, state.editTarget?.body)
-        chatLayout.inputBar.setEditPreview(state.editTarget?.toComposerPreview())
+        chatLayout.inputBar.setEditPreview(state.editTarget?.toComposerPreview(context))
         chatLayout.setPaginationState(
             isLoadingOlder = state.isLoadingOlder,
             canLoadOlder = state.canLoadOlder &&
@@ -1918,32 +1920,35 @@ private fun MessageForwardPreview.toMatrixForwardTarget(): MatrixForwardTarget {
     )
 }
 
-private fun MatrixReplyInfo.toComposerPreview(): GlassComposerPreview {
+private fun MatrixReplyInfo.toComposerPreview(context: Context): GlassComposerPreview {
     val sender = senderDisplayName
         ?.takeIf { it.isNotBlank() }
         ?: senderId.takeIf { it.isNotBlank() }
-        ?: "Unknown"
+        ?: context.getString(R.string.chat_composer_unknown_sender)
     return GlassComposerPreview(
         title = sender,
-        body = body.ifBlank { "Message" }
+        body = body.ifBlank { context.getString(R.string.chat_composer_message_fallback) },
+        kind = GlassComposerPreviewKind.REPLY
     )
 }
 
-private fun MatrixForwardTarget.toComposerPreview(): GlassComposerPreview {
+private fun MatrixForwardTarget.toComposerPreview(context: Context): GlassComposerPreview {
     val title = forwardedFrom
         ?.takeIf { it.isNotBlank() }
-        ?.let { "Forwarded from $it" }
-        ?: "Forward message"
+        ?.let { context.getString(R.string.chat_composer_forwarded_from, it) }
+        ?: context.getString(R.string.chat_composer_forward_message)
     return GlassComposerPreview(
         title = title,
-        body = body.ifBlank { "Message" }
+        body = body.ifBlank { context.getString(R.string.chat_composer_message_fallback) },
+        kind = GlassComposerPreviewKind.FORWARD
     )
 }
 
-private fun MatrixEditTarget.toComposerPreview(): GlassComposerPreview {
+private fun MatrixEditTarget.toComposerPreview(context: Context): GlassComposerPreview {
     return GlassComposerPreview(
-        title = "Edit message",
-        body = body.ifBlank { "Message" }
+        title = context.getString(R.string.chat_composer_edit_message),
+        body = body.ifBlank { context.getString(R.string.chat_composer_message_fallback) },
+        kind = GlassComposerPreviewKind.EDIT
     )
 }
 

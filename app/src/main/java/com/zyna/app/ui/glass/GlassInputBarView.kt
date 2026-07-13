@@ -29,8 +29,15 @@ import kotlin.math.max
 /** Chat input panel composed of separate glass surfaces sharing one controller. */
 data class GlassComposerPreview(
     val title: String,
-    val body: String
+    val body: String,
+    val kind: GlassComposerPreviewKind
 )
+
+enum class GlassComposerPreviewKind {
+    REPLY,
+    FORWARD,
+    EDIT
+}
 
 sealed interface GlassVoiceComposerState {
     data object Idle : GlassVoiceComposerState
@@ -114,15 +121,14 @@ class GlassInputBarView @JvmOverloads constructor(
         includeFontPadding = false
         isClickable = true
         isFocusable = true
-        contentDescription = "Cancel reply"
     }
     private val attachButton = GlassIconButton(context, controller).apply {
         setText("+")
-        contentDescription = "Attach"
+        contentDescription = context.getText(R.string.chat_composer_action_attach)
     }
     private val sendButton = GlassIconButton(context, controller).apply {
         setText(">")
-        contentDescription = "Send"
+        contentDescription = context.getText(R.string.chat_composer_action_send)
     }
     private val voiceContentView = VoiceComposerContentView(context).apply {
         visibility = GONE
@@ -138,7 +144,7 @@ class GlassInputBarView @JvmOverloads constructor(
         gravity = Gravity.CENTER_VERTICAL or Gravity.START
         textSize = 16f
         setPadding(14.dpToPx(density), 0, 14.dpToPx(density), 0)
-        hint = "Message"
+        hint = context.getText(R.string.chat_composer_hint_message)
         inputType = InputType.TYPE_CLASS_TEXT or
             InputType.TYPE_TEXT_FLAG_MULTI_LINE or
             InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
@@ -412,6 +418,12 @@ class GlassInputBarView @JvmOverloads constructor(
         val isVisible = activePreview != null
         previewTitle.text = activePreview?.title.orEmpty()
         previewBody.text = activePreview?.body.orEmpty()
+        previewCancel.contentDescription = when (activePreview?.kind) {
+            GlassComposerPreviewKind.REPLY -> context.getText(R.string.chat_composer_action_cancel_reply)
+            GlassComposerPreviewKind.FORWARD -> context.getText(R.string.chat_composer_action_cancel_forward)
+            GlassComposerPreviewKind.EDIT -> context.getText(R.string.chat_composer_action_cancel_edit)
+            null -> null
+        }
         previewTitle.visibility = if (isVisible) VISIBLE else GONE
         previewBody.visibility = if (isVisible) VISIBLE else GONE
         previewCancel.visibility = if (isVisible) VISIBLE else GONE
@@ -901,7 +913,11 @@ class GlassInputBarView @JvmOverloads constructor(
         val state = voiceState
         val voiceActive = state !is GlassVoiceComposerState.Idle
         editText.isEnabled = !voiceActive && !sending
-        editText.hint = if (voiceActive) "" else "Message"
+        editText.hint = if (voiceActive) {
+            null
+        } else {
+            context.getText(R.string.chat_composer_hint_message)
+        }
         editText.visibility = if (voiceActive) INVISIBLE else VISIBLE
         sendButton.isEnabled = !sending
         sendButton.alpha = if (sending) 0.48f else 1f
@@ -910,44 +926,44 @@ class GlassInputBarView @JvmOverloads constructor(
 
         if (sending) {
             sendButton.setText("...")
-            sendButton.contentDescription = "Sending"
+            sendButton.contentDescription = context.getText(R.string.chat_composer_state_sending)
             return
         }
 
         when (state) {
             GlassVoiceComposerState.Idle -> {
                 attachButton.setText("+")
-                attachButton.contentDescription = "Attach"
+                attachButton.contentDescription = context.getText(R.string.chat_composer_action_attach)
                 if (shouldRecordVoice()) {
                     sendButton.setIconResource(R.drawable.ic_input_mic_24)
-                    sendButton.contentDescription = "Record voice"
+                    sendButton.contentDescription = context.getText(R.string.chat_composer_action_record_voice)
                 } else {
                     sendButton.setText(">")
-                    sendButton.contentDescription = "Send"
+                    sendButton.contentDescription = context.getText(R.string.chat_composer_action_send)
                 }
             }
             is GlassVoiceComposerState.Recording -> {
                 attachButton.setIconResource(R.drawable.ic_input_trash_24)
-                attachButton.contentDescription = "Cancel voice recording"
+                attachButton.contentDescription = context.getText(R.string.chat_composer_action_cancel_voice_recording)
                 if (voiceGesturePhase == VoiceGesturePhase.Locked) {
                     sendButton.setIconResource(R.drawable.ic_input_pause_24)
-                    sendButton.contentDescription = "Stop voice recording"
+                    sendButton.contentDescription = context.getText(R.string.chat_composer_action_stop_voice_recording)
                 } else {
                     sendButton.setIconResource(R.drawable.ic_input_mic_24)
-                    sendButton.contentDescription = "Recording voice"
+                    sendButton.contentDescription = context.getText(R.string.chat_composer_state_recording_voice)
                 }
             }
             is GlassVoiceComposerState.Preview -> {
                 attachButton.setIconResource(R.drawable.ic_input_trash_24)
-                attachButton.contentDescription = "Delete voice preview"
+                attachButton.contentDescription = context.getText(R.string.chat_composer_action_delete_voice_preview)
                 sendButton.setIconResource(R.drawable.ic_input_send_24)
-                sendButton.contentDescription = "Send voice"
+                sendButton.contentDescription = context.getText(R.string.chat_composer_action_send_voice)
             }
             is GlassVoiceComposerState.Error -> {
                 attachButton.setText("x")
-                attachButton.contentDescription = "Dismiss voice error"
+                attachButton.contentDescription = context.getText(R.string.chat_composer_action_dismiss_voice_error)
                 sendButton.setText("x")
-                sendButton.contentDescription = "Dismiss voice error"
+                sendButton.contentDescription = context.getText(R.string.chat_composer_action_dismiss_voice_error)
             }
         }
     }
@@ -1088,19 +1104,18 @@ private const val VOICE_SLIDE_DEAD_ZONE_DP = 15
 private const val VOICE_CANCEL_DISTANCE_DP = 120
 private const val VOICE_LOCK_DISTANCE_DP = 80
 private const val VOICE_DESTRUCTIVE_COLOR = 0xFFE5484D.toInt()
-private const val VOICE_CANCEL_LABEL_TEXT_SP = 14f
+private const val VOICE_CANCEL_LABEL_TEXT_SP = 13f
 private const val VOICE_TIMER_TEXT_SP = 16f
 private const val VOICE_PREVIEW_DURATION_TEXT_SP = 14f
 private const val VOICE_MESSAGE_TEXT_SP = 14f
 private const val VOICE_RECORDING_MAX_BARS = 24
 private const val VOICE_PREVIEW_MAX_BARS = 32
-private const val VOICE_HOLDING_WAVEFORM_WIDTH_DP = 38f
-private const val VOICE_HOLDING_WAVEFORM_GAP_DP = 6f
+private const val VOICE_HOLDING_WAVEFORM_GAP_DP = 10f
+private const val VOICE_HOLDING_WAVEFORM_ALPHA = 104
 private const val VOICE_LOCK_INDICATOR_WIDTH_DP = 40
 private const val VOICE_LOCK_INDICATOR_HEIGHT_DP = 80
 private const val VOICE_SLIDE_CHEVRON_WIDTH_DP = 8f
 private const val VOICE_SLIDE_CHEVRON_GAP_DP = 6f
-private const val SLIDE_TO_CANCEL_LABEL = "Slide to cancel"
 
 private enum class VoiceGesturePhase {
     Idle,
@@ -1221,10 +1236,12 @@ private class VoiceLockIndicatorView(context: Context) : View(context) {
 
 private class VoiceComposerContentView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
+    private val slideToCancelLabel = context.getString(R.string.chat_composer_slide_to_cancel)
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
         textSize = VOICE_CANCEL_LABEL_TEXT_SP.spToPx(resources.displayMetrics)
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     }
+    private val slideToCancelLabelWidth = textPaint.measureText(slideToCancelLabel)
     private val timerPaint = TextPaint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
         textSize = VOICE_TIMER_TEXT_SP.spToPx(resources.displayMetrics)
         typeface = Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -1264,9 +1281,12 @@ private class VoiceComposerContentView(context: Context) : View(context) {
     private var secondary = 0xB3FFFFFF.toInt()
     private var destructive = VOICE_DESTRUCTIVE_COLOR
     private var playPressed = false
+    private var previewAccessibilityState = VoicePreviewAccessibilityState.HIDDEN
 
     init {
-        isClickable = true
+        isClickable = false
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        updateSlideLabelShadow(secondary)
     }
 
     fun setColors(primary: Int, secondary: Int, destructive: Int) {
@@ -1280,6 +1300,7 @@ private class VoiceComposerContentView(context: Context) : View(context) {
         this.primary = primary
         this.secondary = secondary
         this.destructive = destructive
+        updateSlideLabelShadow(secondary)
         invalidate()
     }
 
@@ -1304,12 +1325,23 @@ private class VoiceComposerContentView(context: Context) : View(context) {
         this.locked = locked
         this.cancelProgress = nextCancelProgress
         this.lockProgress = nextLockProgress
+        updatePreviewAccessibility(state)
         if (previousState !is GlassVoiceComposerState.Preview ||
             state !is GlassVoiceComposerState.Preview
         ) {
             playPressed = false
         }
         invalidate()
+    }
+
+    override fun performClick(): Boolean {
+        val preview = state as? GlassVoiceComposerState.Preview
+        if (preview == null || preview.isLoading) {
+            return super.performClick()
+        }
+        super.performClick()
+        onPreviewPlaybackClicked()
+        return true
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -1341,7 +1373,7 @@ private class VoiceComposerContentView(context: Context) : View(context) {
                 invalidate()
                 parent?.requestDisallowInterceptTouchEvent(false)
                 if (wasPressed && playButtonRect.contains(event.x, event.y)) {
-                    onPreviewPlaybackClicked()
+                    performClick()
                 }
                 return wasPressed
             }
@@ -1405,44 +1437,38 @@ private class VoiceComposerContentView(context: Context) : View(context) {
         if (locked) {
             return
         }
+        val centerY = height / 2f
+        val waveGap = VOICE_HOLDING_WAVEFORM_GAP_DP.dpToPx(density)
+        val waveStartX = timerEndX + waveGap
+        val rightLimit = width - 14f.dpToPx(density)
+        drawWaveform(
+            canvas = canvas,
+            waveform = waveform,
+            startX = waveStartX,
+            centerY = centerY,
+            maxWidth = rightLimit - waveStartX,
+            maxBars = VOICE_RECORDING_MAX_BARS,
+            tail = true,
+            alpha = VOICE_HOLDING_WAVEFORM_ALPHA
+        )
+
         val alpha = ((1f - cancelProgress * 1.5f).coerceIn(0f, 1f) * 255f).toInt()
         if (alpha <= 0) {
             return
         }
-        val centerY = height / 2f
-        val label = SLIDE_TO_CANCEL_LABEL
-        textPaint.color = secondary.withAlpha(alpha)
+        val label = slideToCancelLabel
+        textPaint.color = secondary
+        textPaint.alpha = alpha
         chevronPaint.color = secondary.withAlpha(alpha)
 
         val chevronWidth = VOICE_SLIDE_CHEVRON_WIDTH_DP.dpToPx(density)
         val gap = VOICE_SLIDE_CHEVRON_GAP_DP.dpToPx(density)
-        val waveGap = VOICE_HOLDING_WAVEFORM_GAP_DP.dpToPx(density)
-        val labelWidth = textPaint.measureText(label)
-        val rightLimit = width - 14f.dpToPx(density)
-        val leftLimit = timerEndX + waveGap
-        val fixedWidth = waveGap + chevronWidth + gap + labelWidth
-        val waveWidth = VOICE_HOLDING_WAVEFORM_WIDTH_DP.dpToPx(density)
-            .coerceAtMost(rightLimit - leftLimit - fixedWidth)
-            .coerceAtLeast(0f)
-        val wavePartWidth = if (waveWidth > 0f) waveWidth + waveGap else 0f
-        val totalWidth = wavePartWidth + chevronWidth + gap + labelWidth
-        val centeredX = (width - totalWidth) / 2f - cancelProgress * 20f.dpToPx(density)
-        var x = centeredX
-            .coerceAtLeast(leftLimit)
-            .coerceAtMost((rightLimit - totalWidth).coerceAtLeast(leftLimit))
-
-        if (waveWidth > 0f) {
-            drawWaveform(
-                canvas = canvas,
-                waveform = waveform,
-                startX = x,
-                centerY = centerY,
-                maxWidth = waveWidth,
-                maxBars = 8,
-                tail = true
-            )
-            x += waveWidth + waveGap
-        }
+        val totalWidth = chevronWidth + gap + slideToCancelLabelWidth
+        val centeredX = (waveStartX + rightLimit - totalWidth) / 2f -
+            cancelProgress * 20f.dpToPx(density)
+        val x = centeredX
+            .coerceAtLeast(waveStartX)
+            .coerceAtMost((rightLimit - totalWidth).coerceAtLeast(waveStartX))
 
         val chevronCenterX = x + chevronWidth / 2f
         val chevronHalfH = 5f.dpToPx(density)
@@ -1542,7 +1568,8 @@ private class VoiceComposerContentView(context: Context) : View(context) {
         centerY: Float,
         maxWidth: Float,
         maxBars: Int,
-        tail: Boolean
+        tail: Boolean,
+        alpha: Int = 210
     ) {
         if (waveform.isEmpty() || maxWidth <= 0f) {
             return
@@ -1554,7 +1581,7 @@ private class VoiceComposerContentView(context: Context) : View(context) {
         if (count <= 0) {
             return
         }
-        waveformPaint.color = primary.withAlpha(210)
+        waveformPaint.color = primary.withAlpha(alpha)
         val maxHeight = 20f.dpToPx(density)
         val minHeight = 3f.dpToPx(density)
         val startIndex = if (tail) {
@@ -1582,6 +1609,56 @@ private class VoiceComposerContentView(context: Context) : View(context) {
         val baseline = height / 2f - (messagePaint.descent() + messagePaint.ascent()) / 2f
         canvas.drawText(message, width / 2f, baseline, messagePaint)
     }
+
+    private fun updatePreviewAccessibility(state: GlassVoiceComposerState) {
+        val nextState = when (state) {
+            is GlassVoiceComposerState.Preview -> when {
+                state.isLoading -> VoicePreviewAccessibilityState.LOADING
+                state.isPlaying -> VoicePreviewAccessibilityState.PAUSE
+                else -> VoicePreviewAccessibilityState.PLAY
+            }
+            else -> VoicePreviewAccessibilityState.HIDDEN
+        }
+        if (previewAccessibilityState == nextState) {
+            return
+        }
+        previewAccessibilityState = nextState
+        isClickable = nextState == VoicePreviewAccessibilityState.PLAY ||
+            nextState == VoicePreviewAccessibilityState.PAUSE
+        isFocusable = isClickable
+        importantForAccessibility = if (nextState == VoicePreviewAccessibilityState.HIDDEN) {
+            IMPORTANT_FOR_ACCESSIBILITY_NO
+        } else {
+            IMPORTANT_FOR_ACCESSIBILITY_YES
+        }
+        contentDescription = when (nextState) {
+            VoicePreviewAccessibilityState.HIDDEN -> null
+            VoicePreviewAccessibilityState.LOADING -> context.getText(R.string.chat_composer_voice_preview_loading)
+            VoicePreviewAccessibilityState.PLAY -> context.getText(R.string.chat_composer_voice_preview_play)
+            VoicePreviewAccessibilityState.PAUSE -> context.getText(R.string.chat_composer_voice_preview_pause)
+        }
+    }
+
+    private fun updateSlideLabelShadow(foreground: Int) {
+        val red = foreground ushr 16 and 0xFF
+        val green = foreground ushr 8 and 0xFF
+        val blue = foreground and 0xFF
+        val isLight = red * 299 + green * 587 + blue * 114 >= 128_000
+        val shadowColor = if (isLight) 0xB0000000.toInt() else 0x8CFFFFFF.toInt()
+        textPaint.setShadowLayer(
+            2.25f.dpToPx(density),
+            0f,
+            0.5f.dpToPx(density),
+            shadowColor
+        )
+    }
+}
+
+private enum class VoicePreviewAccessibilityState {
+    HIDDEN,
+    LOADING,
+    PLAY,
+    PAUSE
 }
 
 private fun GlassAdaptiveMaterial.isVisiblyCloseTo(other: GlassAdaptiveMaterial): Boolean {

@@ -169,6 +169,7 @@ class GlassInputBarView @JvmOverloads constructor(
     private var preview: GlassComposerPreview? = null
     private var editPreview: GlassComposerPreview? = null
     private var editDraftKey: String? = null
+    private var hasDraftText = false
     private var voiceState: GlassVoiceComposerState = GlassVoiceComposerState.Idle
     private var palette: GlassPalette? = null
     private var vulkanGlassBackgroundEnabled = false
@@ -213,10 +214,12 @@ class GlassInputBarView @JvmOverloads constructor(
         editText.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                // Invalidate the editor's exact-height measurement before probing its content height.
-                editText.requestLayout()
-                updateActionButtons()
-                requestContentLayout()
+                val nextHasDraftText = !s.isNullOrBlank()
+                if (hasDraftText != nextHasDraftText) {
+                    hasDraftText = nextHasDraftText
+                    updateActionButtons()
+                }
+                updateEditorGeometryIfNeeded()
             }
             override fun afterTextChanged(s: Editable?) = Unit
         })
@@ -420,7 +423,29 @@ class GlassInputBarView @JvmOverloads constructor(
     private fun requestContentLayout() {
         requestLayout()
         onContentLayoutChanged()
-        controller.invalidateRegions()
+    }
+
+    private fun updateEditorGeometryIfNeeded() {
+        val textLayout = editText.layout ?: run {
+            requestContentLayout()
+            return
+        }
+        val maxLines = editText.maxLines
+        val layoutHeight = if (textLayout.lineCount > maxLines) {
+            textLayout.getLineTop(maxLines)
+        } else {
+            textLayout.height
+        }
+        val desiredHeight = (
+            layoutHeight + editText.compoundPaddingTop + editText.compoundPaddingBottom
+        ).coerceIn(editMinHeight, editMaxHeight)
+        if (editGlass.measuredHeight == desiredHeight) {
+            return
+        }
+
+        // Discard the final exact-height measurement before remeasuring content.
+        editText.requestLayout()
+        requestContentLayout()
     }
 
     private fun activePreview(): GlassComposerPreview? {
@@ -928,7 +953,7 @@ class GlassInputBarView @JvmOverloads constructor(
     }
 
     private fun shouldRecordVoice(): Boolean {
-        return editText.text?.toString()?.trim().orEmpty().isEmpty() &&
+        return !hasDraftText &&
             !allowEmptySend &&
             editPreview == null &&
             editDraftKey == null

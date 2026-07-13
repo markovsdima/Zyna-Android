@@ -374,7 +374,6 @@ internal class GlassChatLayout @JvmOverloads constructor(
         inputBar.setVulkanGlassBackgroundEnabled(isVulkanChatInputGlassEnabled())
         inputBar.onContentLayoutChanged = {
             requestLayout()
-            glassController.invalidateRegions()
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->

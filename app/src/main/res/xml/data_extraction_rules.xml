@@ -1,13 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <exclude domain="sharedpref" path="matrix_session.xml" />
-        <exclude domain="sharedpref" path="matrix_store_secrets.xml" />
-        <exclude domain="file" path="matrix/" />
+        <!-- No app data is eligible for cloud backup. -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
+        <exclude domain="device_sharedpref" path="." />
     </cloud-backup>
     <device-transfer>
-        <exclude domain="sharedpref" path="matrix_session.xml" />
-        <exclude domain="sharedpref" path="matrix_store_secrets.xml" />
-        <exclude domain="file" path="matrix/" />
+        <!-- Some Android 12+ implementations ignore allowBackup for D2D migration. -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="device_root" path="." />
+        <exclude domain="device_file" path="." />
+        <exclude domain="device_database" path="." />
+        <exclude domain="device_sharedpref" path="." />
     </device-transfer>
 </data-extraction-rules>

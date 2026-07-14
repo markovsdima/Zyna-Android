@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <exclude domain="sharedpref" path="matrix_session.xml" />
-    <exclude domain="sharedpref" path="matrix_store_secrets.xml" />
-    <exclude domain="file" path="matrix/" />
+    <!--
+        App state is installation-bound and rebuildable after login. Keep every
+        domain excluded even though allowBackup is false, as defense in depth.
+    -->
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="device_root" path="." />
+    <exclude domain="device_file" path="." />
+    <exclude domain="device_database" path="." />
+    <exclude domain="device_sharedpref" path="." />
 </full-backup-content>

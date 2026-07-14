@@ -16,6 +16,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import com.zyna.app.R
 import com.zyna.app.data.presence.PresenceProviderMode
+import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.ui.theme.AppThemeMode
 import kotlin.math.roundToInt
 
@@ -23,6 +24,11 @@ internal data class SettingsScreenViewState(
     val selectedChatThemeTitle: String,
     val selectedAppThemeMode: AppThemeMode,
     val selectedPresenceProvider: PresenceProviderMode,
+    val isSessionSecurityReady: Boolean,
+    val isLoggingOut: Boolean,
+    val logoutErrorMessage: String?,
+    val isLogoutConfirmationVisible: Boolean,
+    val logoutWarning: MatrixLogoutWarning?,
     val bottomContentPaddingPx: Int
 )
 
@@ -31,7 +37,10 @@ internal data class SettingsScreenViewActions(
     val onOpenChatTheme: () -> Unit,
     val onSelectAppThemeMode: (AppThemeMode) -> Unit,
     val onSelectPresenceProvider: (PresenceProviderMode) -> Unit,
-    val onLogout: () -> Unit
+    val onOpenSessionSecurity: () -> Unit,
+    val onLogoutRequested: () -> Unit,
+    val onLogoutConfirmed: () -> Unit,
+    val onLogoutCancelled: () -> Unit
 )
 
 internal class SettingsScreenView(context: Context) : FrameLayout(context) {
@@ -92,8 +101,13 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         isFocusable = true
     }
     private val accountHeader = sectionHeader("Account")
+    private val encryptionRow = SettingsRowView(context).apply {
+        title = context.getString(R.string.settings_encryption)
+        isClickable = true
+        isFocusable = true
+    }
     private val logoutRow = SettingsRowView(context).apply {
-        title = "Log out"
+        title = context.getString(R.string.settings_logout)
         showsAccessory = false
         isClickable = true
         isFocusable = true
@@ -150,6 +164,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         content.addView(chatThemeRow, rowLayoutParams())
         content.addView(presenceRow, rowLayoutParams())
         content.addView(accountHeader)
+        content.addView(encryptionRow, rowLayoutParams())
         content.addView(logoutRow, rowLayoutParams())
 
         applyPalette()
@@ -204,8 +219,30 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
                 onSelectProvider = actions.onSelectPresenceProvider
             )
         }
-        logoutRow.detail = null
-        logoutRow.setOnClickListener { showLogoutConfirmation(actions.onLogout) }
+        encryptionRow.detail = context.getString(
+            if (state.isSessionSecurityReady) {
+                R.string.settings_encryption_ready
+            } else {
+                R.string.settings_encryption_action_required
+            }
+        )
+        encryptionRow.setOnClickListener { actions.onOpenSessionSecurity() }
+        logoutRow.detail = when {
+            state.isLoggingOut -> context.getString(R.string.settings_logout_preparing)
+            state.logoutErrorMessage != null -> context.getString(R.string.settings_logout_error)
+            else -> null
+        }
+        logoutRow.isEnabled = !state.isLoggingOut
+        logoutRow.setOnClickListener {
+            if (!state.isLoggingOut) actions.onLogoutRequested()
+        }
+        if (state.isLogoutConfirmationVisible) {
+            showLogoutConfirmation(
+                warning = state.logoutWarning,
+                onConfirm = actions.onLogoutConfirmed,
+                onCancel = actions.onLogoutCancelled
+            )
+        }
     }
 
     private fun applyPalette() {
@@ -221,6 +258,7 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
         appThemeRow.setPalette(palette)
         chatThemeRow.setPalette(palette)
         presenceRow.setPalette(palette)
+        encryptionRow.setPalette(palette)
         logoutRow.setPalette(palette)
     }
 
@@ -310,20 +348,45 @@ internal class SettingsScreenView(context: Context) : FrameLayout(context) {
             }
     }
 
-    private fun showLogoutConfirmation(onLogout: () -> Unit) {
+    private fun showLogoutConfirmation(
+        warning: MatrixLogoutWarning?,
+        onConfirm: () -> Unit,
+        onCancel: () -> Unit
+    ) {
         val existingDialog = logoutDialog
         if (existingDialog?.isShowing == true) {
             return
         }
+        var handled = false
+        val messageRes = when (warning) {
+            MatrixLogoutWarning.SECURITY_NOT_READY -> R.string.settings_logout_security_warning
+            MatrixLogoutWarning.BACKUP_NOT_READY -> R.string.settings_logout_backup_warning
+            null -> R.string.settings_logout_confirmation
+        }
+        val positiveButtonRes = if (warning == null) {
+            R.string.settings_logout
+        } else {
+            R.string.settings_logout_anyway
+        }
         logoutDialog = AlertDialog.Builder(context)
-            .setTitle("Log out?")
-            .setMessage("Are you sure you want to log out?")
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Log out") { _, _ ->
-                onLogout()
+            .setTitle(R.string.settings_logout_title)
+            .setMessage(messageRes)
+            .setNegativeButton(R.string.common_cancel) { _, _ ->
+                handled = true
+                onCancel()
+            }
+            .setPositiveButton(positiveButtonRes) { _, _ ->
+                handled = true
+                onConfirm()
             }
             .create()
             .also { dialog ->
+                dialog.setOnCancelListener {
+                    if (!handled) {
+                        handled = true
+                        onCancel()
+                    }
+                }
                 dialog.setOnDismissListener {
                     if (logoutDialog === dialog) {
                         logoutDialog = null

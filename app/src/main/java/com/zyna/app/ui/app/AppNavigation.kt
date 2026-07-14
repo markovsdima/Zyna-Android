@@ -26,6 +26,7 @@ sealed interface AppRoute {
     data object Profile : AppRoute
     data object EditProfile : AppRoute
     data object Settings : AppRoute
+    data class SessionSecurity(val userId: String) : AppRoute
     data object ChatThemeSettings : AppRoute
     data class RoomDetails(
         val roomId: String
@@ -67,7 +68,7 @@ data class AppNavState(
             if (mode != AppNavMode.Main) {
                 return false
             }
-            if (top is AppRoute.UserProfile) {
+            if (top is AppRoute.UserProfile || top is AppRoute.SessionSecurity) {
                 return false
             }
             if (selectedTab == AppTab.CONTACTS && contactsStack.lastOrNull() != AppRoute.Contacts) {
@@ -229,6 +230,25 @@ data class AppNavState(
         )
     }
 
+    fun openSessionSecurity(userId: String): AppNavState {
+        if (mode != AppNavMode.Main || userId.isBlank()) return this
+        val route = AppRoute.SessionSecurity(userId)
+        return when (selectedTab) {
+            AppTab.CONTACTS -> copy(
+                contactsStack = contactsStack.pushSingleTop(route)
+            )
+            AppTab.CALLS -> copy(
+                callsStack = callsStack.pushSingleTop(route)
+            )
+            AppTab.CHATS -> copy(
+                chatsStack = chatsStack.pushSingleTop(route)
+            )
+            AppTab.PROFILE -> copy(
+                profileStack = profileStack.pushSingleTop(route)
+            )
+        }
+    }
+
     fun popActiveStack(): AppNavState? {
         if (mode != AppNavMode.Main) {
             return null
@@ -275,6 +295,10 @@ data class AppNavState(
             return null
         }
         return update(stack.dropLast(1))
+    }
+
+    private fun List<AppRoute>.pushSingleTop(route: AppRoute): List<AppRoute> {
+        return if (lastOrNull() == route) this else this + route
     }
 
     private fun ensureChatsRoot(stack: List<AppRoute>): List<AppRoute> {

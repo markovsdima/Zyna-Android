@@ -30,6 +30,10 @@ import com.zyna.app.data.push.MatrixPushRegistrar
 import com.zyna.app.data.presence.PresenceSession
 import com.zyna.app.data.push.ZynaPushNotificationContent
 import com.zyna.app.data.push.ZynaPushNotificationResolution
+import com.zyna.app.data.security.MatrixSessionSecurityAction
+import com.zyna.app.data.security.MatrixLogoutWarning
+import com.zyna.app.data.security.MatrixSessionSecurityService
+import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.session.MatrixSessionStore
 import com.zyna.app.data.session.MatrixStorePassphraseStore
 import java.io.File
@@ -390,6 +394,9 @@ class MatrixClientService(
     private val _state = MutableStateFlow<MatrixClientState>(MatrixClientState.LoggedOut)
     val state: StateFlow<MatrixClientState> = _state.asStateFlow()
 
+    private val sessionSecurityService = MatrixSessionSecurityService(sessionStore)
+    val sessionSecurityState: StateFlow<MatrixSessionSecurityState> = sessionSecurityService.state
+
     private val sessionDelegate = AndroidMatrixSessionDelegate(sessionStore)
 
     private var client: Client? = null
@@ -447,6 +454,7 @@ class MatrixClientService(
 
         val session = sessionStore.loadLastSession()
         if (session == null) {
+            sessionSecurityService.detach()
             clearStoredMatrixState()
             _state.value = MatrixClientState.LoggedOut
             return
@@ -461,7 +469,9 @@ class MatrixClientService(
             restoredClient = null
             _state.value = MatrixClientState.LoggedIn(session.userId)
             startSync()
+            client?.let { sessionSecurityService.attach(it) }
         } catch (error: Throwable) {
+            sessionSecurityService.detach()
             restoredClient?.close()
             client = null
             matrixRtcNotificationHandlerClient = null
@@ -491,7 +501,9 @@ class MatrixClientService(
             loginClient = null
             _state.value = MatrixClientState.LoggedIn(session.userId)
             startSync()
+            client?.let { sessionSecurityService.attach(it) }
         } catch (error: Throwable) {
+            sessionSecurityService.detach()
             loginClient?.close()
             client = null
             matrixRtcNotificationHandlerClient = null
@@ -504,6 +516,7 @@ class MatrixClientService(
     }
 
     private suspend fun resetClientForFreshLogin() {
+        sessionSecurityService.detach()
         roomListService?.close()
         roomListService = null
         syncService?.stop()
@@ -519,42 +532,43 @@ class MatrixClientService(
     }
 
     suspend fun logout() {
-        roomListService?.close()
+        val activeClient = client
+        runCatching { sessionSecurityService.detach() }
+            .onFailure { Log.w(TAG, "Failed to detach session security during logout", it) }
+        runCatching { roomListService?.close() }
+            .onFailure { Log.w(TAG, "Failed to close room list during logout", it) }
         roomListService = null
-        syncService?.stop()
-        syncService?.close()
+        runCatching { syncService?.stop() }
+            .onFailure { Log.w(TAG, "Failed to stop sync during logout", it) }
+        runCatching { syncService?.close() }
+            .onFailure { Log.w(TAG, "Failed to close sync during logout", it) }
         syncService = null
-        client?.let { activeClient ->
-            unregisterPushPusher(activeClient)
+        activeClient?.let { logoutClient ->
+            unregisterPushPusher(logoutClient)
+            runCatching { logoutClient.logout() }
+                .onFailure { Log.w(TAG, "Server logout failed; continuing locally", it) }
         }
-        client?.close()
+        runCatching { activeClient?.close() }
+            .onFailure { Log.w(TAG, "Failed to close Matrix client during logout", it) }
         client = null
         matrixRtcNotificationHandlerClient = null
-        clearStoredMatrixState()
+        runCatching { clearStoredMatrixState() }
+            .onFailure { Log.w(TAG, "Failed to clear part of the local Matrix state", it) }
         _state.value = MatrixClientState.LoggedOut
     }
 
-    suspend fun recoverWithRecoveryKey(recoveryKey: String) {
-        val activeClient = client ?: error("Matrix client is not ready")
-        val trimmedKey = recoveryKey.trim()
-        require(trimmedKey.isNotEmpty()) { "Recovery key is empty" }
-
-        try {
-            activeClient.encryption().recoverAndFixBackup(trimmedKey)
-        } catch (firstError: Throwable) {
-            delay(2_000)
-            try {
-                activeClient.encryption().recoverAndFixBackup(trimmedKey)
-            } catch (_: Throwable) {
-                throw firstError
-            }
-        }
-
-        sessionStore.markRecoveryComplete(activeClient.userId())
+    suspend fun prepareForLogout(): MatrixLogoutWarning? {
+        return sessionSecurityService.prepareForLogout()
     }
 
-    fun isRecoveryComplete(userId: String): Boolean {
-        return sessionStore.isRecoveryComplete(userId)
+    fun handleSessionSecurityAction(action: MatrixSessionSecurityAction) {
+        sessionSecurityService.handle(action)
+    }
+
+    fun isSessionSecurityReady(userId: String): Boolean {
+        val securityState = sessionSecurityState.value
+        return securityState.userId == userId &&
+            securityState.readyForEncryptedTraffic
     }
 
     suspend fun loadOwnProfile(): MatrixOwnProfile = withContext(Dispatchers.IO) {

@@ -128,7 +128,7 @@ class MatrixSessionStore(context: Context) {
         secretBox.deleteKey()
     }
 
-    fun isRecoveryComplete(userId: String): Boolean {
+    private fun isLegacyRecoveryComplete(userId: String): Boolean {
         if (preferences.getBoolean(KEY_RECOVERY_COMPLETE, false)) {
             return true
         }
@@ -143,10 +143,60 @@ class MatrixSessionStore(context: Context) {
         return legacyComplete
     }
 
-    fun markRecoveryComplete(userId: String) {
+    fun hasLocalEncryptionSecrets(userId: String): Boolean {
+        val key = localEncryptionSecretsKey(userId)
+        if (preferences.getBoolean(key, false)) {
+            return true
+        }
+
+        // Migrate the old coarse recovery flag. It was only ever associated with
+        // the last stored session, so it is safe to attach it to that session's user.
+        if (isLegacyRecoveryComplete(userId)) {
+            preferences.edit()
+                .putBoolean(key, true)
+                .putBoolean(recoverySetupCompleteKey(userId), true)
+                .remove(KEY_RECOVERY_COMPLETE)
+                .apply()
+            return true
+        }
+        return false
+    }
+
+    fun hasPendingRecoverySetup(userId: String): Boolean {
+        return preferences.getBoolean(recoverySetupPendingKey(userId), false)
+    }
+
+    fun hasCompletedRecoverySetup(userId: String): Boolean {
+        return preferences.getBoolean(recoverySetupCompleteKey(userId), false)
+    }
+
+    fun markLocalEncryptionSecretsPresent(userId: String) {
         preferences.edit()
-            .putBoolean(KEY_RECOVERY_COMPLETE, true)
+            .putBoolean(localEncryptionSecretsKey(userId), true)
+            .apply()
+    }
+
+    fun markRecoverySetupPending(userId: String) {
+        preferences.edit()
+            .putBoolean(recoverySetupPendingKey(userId), true)
+            .remove(recoverySetupCompleteKey(userId))
+            .apply()
+    }
+
+    fun markRecoverySetupComplete(userId: String) {
+        preferences.edit()
+            .remove(recoverySetupPendingKey(userId))
+            .putBoolean(recoverySetupCompleteKey(userId), true)
+            .apply()
+    }
+
+    fun clearLocalEncryptionFlags(userId: String) {
+        preferences.edit()
+            .remove(localEncryptionSecretsKey(userId))
+            .remove(recoverySetupPendingKey(userId))
+            .remove(recoverySetupCompleteKey(userId))
             .remove(legacyRecoveryCompleteKey(userId))
+            .remove(KEY_RECOVERY_COMPLETE)
             .apply()
     }
 
@@ -159,6 +209,15 @@ class MatrixSessionStore(context: Context) {
     private fun legacySessionKey(userId: String): String = "session:$userId"
 
     private fun legacyRecoveryCompleteKey(userId: String): String = "recovery_complete:$userId"
+
+    private fun localEncryptionSecretsKey(userId: String): String =
+        "local_encryption_secrets:$userId"
+
+    private fun recoverySetupPendingKey(userId: String): String =
+        "recovery_setup_pending:$userId"
+
+    private fun recoverySetupCompleteKey(userId: String): String =
+        "recovery_setup_complete:$userId"
 
     private companion object {
         const val PREFERENCES_NAME = "matrix_session"

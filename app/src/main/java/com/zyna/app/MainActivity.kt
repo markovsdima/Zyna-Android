@@ -189,7 +189,7 @@ class MainActivity : AppCompatActivity() {
             audioPlaybackController = appContainer.audioPlaybackController,
             voiceRecorderController = appContainer.voiceRecorderController,
             onLogin = appViewModel::login,
-            onSubmitRecoveryKey = appViewModel::submitRecoveryKey,
+            onSessionSecurityAction = appViewModel::handleSessionSecurityAction,
             onSelectTab = appViewModel::selectTab,
             onNavigateBack = appViewModel::navigateBack,
             onOpenRoom = appViewModel::openRoom,
@@ -244,10 +244,14 @@ class MainActivity : AppCompatActivity() {
             onRemoveOwnProfileAvatar = ::removeOwnProfileAvatarDraft,
             onSaveOwnProfile = appViewModel::saveOwnProfile,
             onOpenChatThemeSettings = appViewModel::openChatThemeSettings,
+            onOpenSessionSecurity = appViewModel::openSessionSecurity,
             onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
             onSelectAppThemeMode = appContainer.appThemeStore::setSelectedMode,
             onSelectPresenceProvider = appContainer.presenceSettingsStore::setSelectedProvider,
-            onLogout = {
+            onLogoutRequested = appViewModel::requestLogout,
+            onLogoutCancelled = appViewModel::cancelLogout,
+            onLogoutConfirmed = {
+                appViewModel.confirmLogout()
                 dismissNativeMatrixRtcCall()
                 pendingNativeMatrixRtcCall = null
                 pendingRecordAudioPermissionRequest = null
@@ -256,7 +260,6 @@ class MainActivity : AppCompatActivity() {
                 sendVoiceAfterFinish = false
                 appContainer.voiceRecorderController.clear()
                 appContainer.matrixAudioMediaLoader.clear()
-                appViewModel.logout()
             }
         )
 
@@ -1025,6 +1028,7 @@ private fun AppRoute.perfName(): String {
         AppRoute.EditProfile -> "EditProfile"
         AppRoute.Profile -> "Profile"
         is AppRoute.RecoveryKey -> "RecoveryKey"
+        is AppRoute.SessionSecurity -> "SessionSecurity"
         is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"

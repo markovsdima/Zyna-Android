@@ -10,6 +10,7 @@ import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.presence.PresenceProviderMode
+import com.zyna.app.data.security.MatrixSessionSecurityAction
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 import com.zyna.app.ui.theme.AppThemeMode
@@ -19,7 +20,7 @@ data class ZynaAppActions(
     val audioPlaybackController: AudioPlaybackController?,
     val voiceRecorderController: VoiceRecorderController?,
     val onLogin: (homeserver: String, username: String, password: String) -> Unit,
-    val onSubmitRecoveryKey: (String) -> Unit,
+    val onSessionSecurityAction: (MatrixSessionSecurityAction) -> Unit,
     val onSelectTab: (AppTab) -> Unit,
     val onNavigateBack: () -> Boolean,
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
@@ -77,10 +78,13 @@ data class ZynaAppActions(
     val onRemoveOwnProfileAvatar: () -> Unit,
     val onSaveOwnProfile: () -> Unit,
     val onOpenChatThemeSettings: () -> Unit,
+    val onOpenSessionSecurity: () -> Unit,
     val onSelectChatBubbleTheme: (String) -> Unit,
     val onSelectAppThemeMode: (AppThemeMode) -> Unit,
     val onSelectPresenceProvider: (PresenceProviderMode) -> Unit,
-    val onLogout: () -> Unit
+    val onLogoutRequested: () -> Unit,
+    val onLogoutConfirmed: () -> Unit,
+    val onLogoutCancelled: () -> Unit
 )
 
 data class ZynaRootPreferences(

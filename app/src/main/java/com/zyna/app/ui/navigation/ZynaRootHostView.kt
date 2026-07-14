@@ -52,7 +52,7 @@ import com.zyna.app.ui.rooms.RoomsScreenView
 import com.zyna.app.ui.rooms.RoomsScreenViewActions
 import com.zyna.app.ui.rooms.RoomsScrollAnchor
 import com.zyna.app.ui.rooms.RoomsScreenViewState
-import com.zyna.app.ui.security.RecoveryKeyScreen
+import com.zyna.app.ui.security.SessionSecurityScreen
 import com.zyna.app.ui.settings.ChatThemeSettingsScreenView
 import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewActions
 import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewState
@@ -641,6 +641,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             when (route) {
                 AppRoute.Login -> loginEntry(state, actions)
                 is AppRoute.RecoveryKey -> recoveryEntry(state, actions, route)
+                is AppRoute.SessionSecurity -> sessionSecurityEntry(state, actions, route)
                 AppRoute.Contacts -> contactsEntry(state, actions)
                 is AppRoute.UserProfile -> userProfileEntry(state, actions, route)
                 AppRoute.Calls -> callsEntry(state, actions)
@@ -660,7 +661,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 )
                 AppRoute.Profile -> profileEntry(state, actions)
                 AppRoute.EditProfile -> editProfileEntry(state, actions)
-                AppRoute.Settings -> settingsEntry(actions, preferences)
+                AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
                 is AppRoute.Chat -> chatEntry(state, actions, preferences, route)
@@ -687,11 +688,26 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     ): ZynaScreenEntry {
         return composeEntry("recovery:${route.userId}") {
             ZynaAndroidTheme {
-                RecoveryKeyScreen(
+                SessionSecurityScreen(
                     userId = route.userId,
-                    isRecovering = state.isRecovering,
-                    errorMessage = state.recoveryErrorMessage,
-                    onSubmit = actions.onSubmitRecoveryKey
+                    state = state.sessionSecurity,
+                    onAction = actions.onSessionSecurityAction
+                )
+            }
+        }
+    }
+
+    private fun sessionSecurityEntry(
+        state: AppUiState,
+        actions: ZynaAppActions,
+        route: AppRoute.SessionSecurity
+    ): ZynaScreenEntry {
+        return composeEntry("security:${route.userId}") {
+            ZynaAndroidTheme {
+                SessionSecurityScreen(
+                    userId = route.userId,
+                    state = state.sessionSecurity,
+                    onAction = actions.onSessionSecurityAction
                 )
             }
         }
@@ -907,6 +923,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     private fun settingsEntry(
+        state: AppUiState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ): ZynaScreenEntry {
@@ -919,6 +936,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         selectedChatThemeTitle = preferences.chatBubbleTheme.title,
                         selectedAppThemeMode = preferences.appThemeMode,
                         selectedPresenceProvider = preferences.presenceProvider,
+                        isSessionSecurityReady = state.sessionSecurity.readyForEncryptedTraffic,
+                        isLoggingOut = state.isLoggingOut,
+                        logoutErrorMessage = state.logoutErrorMessage,
+                        isLogoutConfirmationVisible = state.logoutConfirmation != null,
+                        logoutWarning = state.logoutConfirmation?.warning,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = SettingsScreenViewActions(
@@ -926,7 +948,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenChatTheme = actions.onOpenChatThemeSettings,
                         onSelectAppThemeMode = actions.onSelectAppThemeMode,
                         onSelectPresenceProvider = actions.onSelectPresenceProvider,
-                        onLogout = actions.onLogout
+                        onOpenSessionSecurity = actions.onOpenSessionSecurity,
+                        onLogoutRequested = actions.onLogoutRequested,
+                        onLogoutConfirmed = actions.onLogoutConfirmed,
+                        onLogoutCancelled = actions.onLogoutCancelled
                     )
                 )
             }
@@ -1285,6 +1310,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             AppRoute.EditProfile -> "EditProfile"
             AppRoute.Profile -> "Profile"
             is AppRoute.RecoveryKey -> "RecoveryKey"
+            is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"

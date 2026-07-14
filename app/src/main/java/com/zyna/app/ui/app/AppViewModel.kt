@@ -38,6 +38,9 @@ import com.zyna.app.data.outgoing.OutgoingVoiceDraft
 import com.zyna.app.data.presence.PresenceRepository
 import com.zyna.app.data.presence.UserPresenceStatus
 import com.zyna.app.data.profile.ProfileAvatarDraft
+import com.zyna.app.data.security.MatrixSessionSecurityAction
+import com.zyna.app.data.security.MatrixLogoutWarning
+import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -102,6 +105,10 @@ data class PendingNativeMatrixRtcCallLaunch(
     val roomName: String
 )
 
+data class LogoutConfirmationState(
+    val warning: MatrixLogoutWarning?
+)
+
 data class AppUiState(
     val navState: AppNavState = AppNavState(),
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
@@ -120,8 +127,10 @@ data class AppUiState(
     val callHistoryErrorMessage: String? = null,
     val pendingNativeMatrixRtcCallLaunch: PendingNativeMatrixRtcCallLaunch? = null,
     val isRefreshingRooms: Boolean = false,
-    val isRecovering: Boolean = false,
-    val recoveryErrorMessage: String? = null,
+    val isLoggingOut: Boolean = false,
+    val logoutErrorMessage: String? = null,
+    val logoutConfirmation: LogoutConfirmationState? = null,
+    val sessionSecurity: MatrixSessionSecurityState = MatrixSessionSecurityState(),
     val chatMessages: List<MatrixChatMessage> = emptyList(),
     val chatWindowChangeOrigin: TimelineWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
     val chatTimelineFlushSummary: TimelineFlushSummary? = null,
@@ -344,7 +353,8 @@ class AppViewModel(
                     userId = nextUserId,
                     allowed = nextUserId != null &&
                         matrixState !is MatrixClientState.Error &&
-                        matrixClientService.isRecoveryComplete(nextUserId)
+                        _uiState.value.sessionSecurity.userId == nextUserId &&
+                        _uiState.value.sessionSecurity.gateComplete
                 )
                 val didChangeUser = previousUserId != null &&
                     nextUserId != null &&
@@ -381,7 +391,8 @@ class AppViewModel(
 
                     val nextNavState = navStateForState(
                         matrixState,
-                        if (didChangeUser) AppNavState() else current.navState
+                        if (didChangeUser) AppNavState() else current.navState,
+                        current.sessionSecurity
                     )
 
                     current.copy(
@@ -459,6 +470,17 @@ class AppViewModel(
                         } else {
                             current.pendingNativeMatrixRtcCallLaunch
                         },
+                        isLoggingOut = if (shouldClearSessionData) false else current.isLoggingOut,
+                        logoutErrorMessage = if (shouldClearSessionData) {
+                            null
+                        } else {
+                            current.logoutErrorMessage
+                        },
+                        logoutConfirmation = if (shouldClearSessionData) {
+                            null
+                        } else {
+                            current.logoutConfirmation
+                        },
                         chatMessages = if (shouldClearChat) emptyList() else current.chatMessages,
                         chatWindowChangeOrigin = if (shouldClearChat) {
                             TimelineWindowChangeOrigin.INITIAL_LOAD
@@ -520,9 +542,64 @@ class AppViewModel(
 
                 if (matrixState is MatrixClientState.Syncing) {
                     val userId = matrixState.userId
-                    if (matrixClientService.isRecoveryComplete(userId)) {
+                    if (
+                        _uiState.value.sessionSecurity.userId == userId &&
+                        _uiState.value.sessionSecurity.gateComplete
+                    ) {
                         startRoomListLiveRefresh(userId)
                         launchRoomRefresh(showRefreshing = true)
+                    }
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            matrixClientService.sessionSecurityState.collect { sessionSecurity ->
+                val matrixState = _uiState.value.matrixState
+                val userId = matrixState.userIdOrNull()
+                val previousSecurity = _uiState.value.sessionSecurity
+                val becameGateComplete =
+                    !previousSecurity.gateComplete && sessionSecurity.gateComplete
+                val receivedNewVerificationRequest =
+                    sessionSecurity.incomingRequest != null &&
+                        sessionSecurity.incomingRequest.flowId !=
+                        previousSecurity.incomingRequest?.flowId
+
+                _uiState.update { current ->
+                    val securityMatchesSession = userId != null && sessionSecurity.userId == userId
+                    current.copy(
+                        sessionSecurity = sessionSecurity,
+                        navState = if (securityMatchesSession) {
+                            val routedState = current.navState.routeForClientState(
+                                shouldShowLogin = false,
+                                recoveryUserId = userId.takeUnless { sessionSecurity.gateComplete }
+                            )
+                            if (
+                                sessionSecurity.gateComplete &&
+                                receivedNewVerificationRequest &&
+                                routedState.mode == AppNavMode.Main
+                            ) {
+                                routedState.openSessionSecurity(userId)
+                            } else {
+                                routedState
+                            }
+                        } else {
+                            current.navState
+                        }
+                    )
+                }
+
+                if (userId != null && sessionSecurity.userId == userId) {
+                    presenceRepository.setSessionContext(
+                        userId = userId,
+                        allowed = sessionSecurity.gateComplete
+                    )
+                    if (becameGateComplete && matrixState is MatrixClientState.Syncing) {
+                        startRoomListLiveRefresh(userId)
+                        launchRoomRefresh(showRefreshing = true)
+                        if (sessionSecurity.canSendEncryptedMessages) {
+                            outgoingOutboxService.kick(reason = "session-security-ready")
+                        }
                     }
                 }
             }
@@ -745,37 +822,22 @@ class AppViewModel(
         }
     }
 
-    fun submitRecoveryKey(recoveryKey: String) {
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isRecovering = true,
-                    recoveryErrorMessage = null
-                )
-            }
+    fun handleSessionSecurityAction(action: MatrixSessionSecurityAction) {
+        matrixClientService.handleSessionSecurityAction(action)
+        if (
+            (action == MatrixSessionSecurityAction.Continue ||
+                action == MatrixSessionSecurityAction.Skip) &&
+            _uiState.value.route is AppRoute.SessionSecurity
+        ) {
+            popActiveStack()
+        }
+    }
 
-            try {
-                matrixClientService.recoverWithRecoveryKey(recoveryKey)
-                val userId = matrixClientService.state.value.userIdOrNull() ?: return@launch
-                presenceRepository.setSessionContext(userId = userId, allowed = true)
-                _uiState.update {
-                    it.copy(
-                        navState = it.navState.enterMain(),
-                        isRecovering = false,
-                        recoveryErrorMessage = null
-                    )
-                }
-                startRoomListLiveRefresh(userId)
-                awaitRoomRefresh(showRefreshing = false)
-                outgoingOutboxService.kick(reason = "recovery-complete")
-            } catch (error: Throwable) {
-                _uiState.update {
-                    it.copy(
-                        isRecovering = false,
-                        recoveryErrorMessage = error.message ?: error.javaClass.simpleName
-                    )
-                }
-            }
+    fun openSessionSecurity() {
+        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        matrixClientService.handleSessionSecurityAction(MatrixSessionSecurityAction.Manage)
+        _uiState.update { current ->
+            current.copy(navState = current.navState.openSessionSecurity(userId))
         }
     }
 
@@ -2616,23 +2678,100 @@ class AppViewModel(
         )
     }
 
-    fun logout() {
-        stopChatTimeline()
-        stopRoomCache()
-        stopRoomListLiveRefresh()
+    fun requestLogout() {
+        val current = _uiState.value
+        if (current.isLoggingOut || current.logoutConfirmation != null) return
+        val requestedUserId = current.matrixState.userIdOrNull() ?: return
+        _uiState.update {
+            it.copy(
+                isLoggingOut = true,
+                logoutErrorMessage = null
+            )
+        }
         viewModelScope.launch {
+            val warning = runCatching { matrixClientService.prepareForLogout() }
+                .onFailure { Log.w(TAG, "Failed to check key backup before logout", it) }
+                .getOrDefault(MatrixLogoutWarning.BACKUP_NOT_READY)
+            _uiState.update { latest ->
+                if (latest.matrixState.userIdOrNull() == requestedUserId) {
+                    latest.copy(
+                        isLoggingOut = false,
+                        logoutConfirmation = LogoutConfirmationState(warning)
+                    )
+                } else {
+                    latest.copy(isLoggingOut = false, logoutConfirmation = null)
+                }
+            }
+        }
+    }
+
+    fun cancelLogout() {
+        if (_uiState.value.isLoggingOut) return
+        _uiState.update { it.copy(logoutConfirmation = null) }
+    }
+
+    fun confirmLogout() {
+        val current = _uiState.value
+        if (current.isLoggingOut || current.logoutConfirmation == null) return
+        _uiState.update {
+            it.copy(
+                isLoggingOut = true,
+                logoutConfirmation = null,
+                logoutErrorMessage = null
+            )
+        }
+        viewModelScope.launch {
+            try {
+                matrixClientService.logout()
+            } catch (error: Throwable) {
+                _uiState.update {
+                    it.copy(
+                        isLoggingOut = false,
+                        logoutErrorMessage = error.message ?: error.javaClass.simpleName
+                    )
+                }
+                return@launch
+            }
+
+            _uiState.update {
+                it.copy(isLoggingOut = false, logoutErrorMessage = null)
+            }
+            cleanupAfterLogout()
+        }
+    }
+
+    private suspend fun cleanupAfterLogout() {
+        runLogoutCleanup("stop chat timeline") { stopChatTimeline() }
+        runLogoutCleanup("stop room cache") { stopRoomCache() }
+        runLogoutCleanup("stop room refresh") { stopRoomListLiveRefresh() }
+        runLogoutCleanup("deactivate room refresh") {
             roomRefreshCoordinator.deactivateSession()
-            localCacheRepository.clearAll()
+        }
+        runLogoutCleanup("clear local cache") { localCacheRepository.clearAll() }
+        runLogoutCleanup("clear media cache") {
             withContext(Dispatchers.IO) {
                 matrixMediaLoader.clear()
             }
-            matrixClientService.logout()
+        }
+    }
+
+    private suspend fun runLogoutCleanup(
+        operationName: String,
+        operation: suspend () -> Unit
+    ) {
+        try {
+            operation()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to $operationName after logout", error)
         }
     }
 
     private fun navStateForState(
         state: MatrixClientState,
-        currentNavState: AppNavState
+        currentNavState: AppNavState,
+        sessionSecurity: MatrixSessionSecurityState
     ): AppNavState {
         return when (state) {
             MatrixClientState.LoggedOut,
@@ -2646,7 +2785,7 @@ class AppViewModel(
                 currentNavState.routeForClientState(
                     shouldShowLogin = false,
                     recoveryUserId = userId.takeUnless {
-                        matrixClientService.isRecoveryComplete(it)
+                        sessionSecurity.userId == it && sessionSecurity.gateComplete
                     }
                 )
             }
@@ -2656,7 +2795,7 @@ class AppViewModel(
                 currentNavState.routeForClientState(
                     shouldShowLogin = false,
                     recoveryUserId = userId.takeUnless {
-                        matrixClientService.isRecoveryComplete(it)
+                        sessionSecurity.userId == it && sessionSecurity.gateComplete
                     }
                 )
             }
@@ -3515,7 +3654,8 @@ class AppViewModel(
         roomListLiveJob = viewModelScope.launch {
             try {
                 matrixClientService.roomListChangeSignals().collect {
-                    if (matrixClientService.isRecoveryComplete(userId)) {
+                    val security = _uiState.value.sessionSecurity
+                    if (security.userId == userId && security.gateComplete) {
                         awaitRoomRefresh(showRefreshing = false)
                     }
                 }
@@ -3665,6 +3805,7 @@ class AppViewModel(
             AppRoute.EditProfile -> "EditProfile"
             AppRoute.Profile -> "Profile"
             is AppRoute.RecoveryKey -> "RecoveryKey"
+            is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"

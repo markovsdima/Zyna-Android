@@ -63,6 +63,49 @@ class AppNavStateTest {
     }
 
     @Test
+    fun sessionSecurity_canBeReopenedFromSettingsWithoutLeavingMainMode() {
+        val state = AppNavState()
+            .enterMain()
+            .openProfileSettings()
+            .openSessionSecurity("@alice:example.org")
+
+        assertEquals(AppNavMode.Main, state.mode)
+        assertEquals(AppTab.PROFILE, state.selectedTab)
+        assertEquals(
+            listOf(
+                AppRoute.Profile,
+                AppRoute.Settings,
+                AppRoute.SessionSecurity("@alice:example.org")
+            ),
+            state.visibleStack
+        )
+        assertFalse(state.showsTabs)
+    }
+
+    @Test
+    fun incomingSessionSecurity_preservesAndRestoresCurrentChatStack() {
+        val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
+        val securityRoute = AppRoute.SessionSecurity("@alice:example.org")
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(chatRoute.roomId, chatRoute.displayName)
+
+        val verificationState = chatState.openSessionSecurity("@alice:example.org")
+
+        assertEquals(AppNavMode.Main, verificationState.mode)
+        assertEquals(AppTab.CHATS, verificationState.selectedTab)
+        assertEquals(listOf(AppRoute.Rooms, chatRoute, securityRoute), verificationState.visibleStack)
+        assertEquals(chatRoute, verificationState.activeChatRoute)
+        assertFalse(verificationState.showsTabs)
+        assertEquals(verificationState, verificationState.openSessionSecurity("@alice:example.org"))
+
+        val restoredState = verificationState.popActiveStack()
+        requireNotNull(restoredState)
+        assertEquals(listOf(AppRoute.Rooms, chatRoute), restoredState.visibleStack)
+        assertEquals(chatRoute, restoredState.top)
+    }
+
+    @Test
     fun routeForClientState_resetsNavigationWhenLoginIsRequired() {
         val state = AppNavState()
             .enterMain()

@@ -937,13 +937,13 @@ class OutgoingOutboxService(
 
     private fun canScan(state: MatrixClientState = matrixClientService.state.value): Boolean {
         val userId = (state as? MatrixClientState.Syncing)?.userId ?: return false
-        return matrixClientService.isRecoveryComplete(userId)
+        return matrixClientService.isSessionSecurityReady(userId)
     }
 
     private fun syncingUserIdOrNull(): String? {
         val state = matrixClientService.state.value
         val userId = (state as? MatrixClientState.Syncing)?.userId ?: return null
-        return userId.takeIf { matrixClientService.isRecoveryComplete(it) }
+        return userId.takeIf { matrixClientService.isSessionSecurityReady(it) }
     }
 
     private sealed interface AttemptDecision {

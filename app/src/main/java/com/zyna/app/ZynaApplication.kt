@@ -29,6 +29,7 @@ class ZynaApplication : Application() {
             context = this,
             appThemeStore = appThemeStore
         )
+        appContainer.outgoingOutboxService.start(applicationScope)
         FirebaseMessagingRegistration.requestIfInstallationIdMissing(
             installationIdStore = appContainer.firebaseInstallationIdStore,
             reason = REASON_APP_START

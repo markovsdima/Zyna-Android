@@ -326,7 +326,6 @@ class AppViewModel(
     private var chatCallInfoObserverEnabled: Boolean = false
 
     init {
-        outgoingOutboxService.start(viewModelScope)
         presenceRepository.start(viewModelScope)
 
         viewModelScope.launch {
@@ -597,9 +596,6 @@ class AppViewModel(
                     if (becameGateComplete && matrixState is MatrixClientState.Syncing) {
                         startRoomListLiveRefresh(userId)
                         launchRoomRefresh(showRefreshing = true)
-                        if (sessionSecurity.canSendEncryptedMessages) {
-                            outgoingOutboxService.kick(reason = "session-security-ready")
-                        }
                     }
                 }
             }

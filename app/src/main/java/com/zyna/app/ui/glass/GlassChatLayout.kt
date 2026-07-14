@@ -399,6 +399,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             if (imeBottomInset != ime || navBottomInset != nav) {
                 imeBottomInset = ime
                 navBottomInset = nav
+                contextMenuLayer.setBottomSafeInset(if (ime > 0) ime else nav)
                 requestLayout()
                 glassController.invalidateRegions()
             }

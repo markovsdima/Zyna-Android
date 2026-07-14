@@ -81,6 +81,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private var didRestoreSourceDuringDismiss = false
     private var hoveredActionView: TextView? = null
     private var selectedCellTargetOffsetY = 0f
+    private var bottomSafeInset = 0
     private var hasSelectedViewportOverride = false
     private var selectedViewportWidth = 0
     private var selectedViewportHeight = 0
@@ -140,6 +141,17 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         }
         palette = nextPalette
         applyPalette(nextPalette)
+    }
+
+    fun setBottomSafeInset(inset: Int) {
+        val nextInset = inset.coerceAtLeast(0)
+        if (bottomSafeInset == nextInset) {
+            return
+        }
+        bottomSafeInset = nextInset
+        if (visibility == VISIBLE) {
+            requestLayout()
+        }
     }
 
     fun beginPreview(request: MessageContextMenuRequest): Boolean {
@@ -628,7 +640,9 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
 
     private fun computeSelectedCellTargetOffsetY(menuHeight: Int, margin: Int, gap: Int): Float {
         val safeTop = margin.toFloat()
-        val safeBottom = (height - margin).toFloat()
+        val safeBottom = (height - bottomSafeInset - margin)
+            .coerceAtLeast(margin)
+            .toFloat()
         val minOffsetForTop = safeTop - bubbleBoundsInLayer.top
         val maxOffsetForMenuBottom = safeBottom - (bubbleBoundsInLayer.bottom + gap + menuHeight)
 

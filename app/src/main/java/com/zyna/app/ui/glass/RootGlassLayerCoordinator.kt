@@ -279,6 +279,53 @@ internal class RootGlassLayerCoordinator(
         )
     }
 
+    fun setTeleportScene(
+        ownerKey: String,
+        oldFrame: HardwareBufferChatCapture.CapturedFrame,
+        newFrame: HardwareBufferChatCapture.CapturedFrame,
+        viewportLeft: Float,
+        viewportTop: Float,
+        viewportRight: Float,
+        viewportBottom: Float,
+        captureLeft: Float,
+        captureTop: Float,
+        captureWidth: Int,
+        captureHeight: Int,
+        directionSign: Float,
+        onReady: (Boolean) -> Unit
+    ): Boolean {
+        if (!isOwnerActive(ownerKey)) {
+            oldFrame.closeCapturedFrame()
+            newFrame.closeCapturedFrame()
+            onReady(false)
+            return false
+        }
+        return vulkanOverlay.setTeleportScene(
+            oldFrame = oldFrame,
+            newFrame = newFrame,
+            viewportLeft = viewportLeft,
+            viewportTop = viewportTop,
+            viewportRight = viewportRight,
+            viewportBottom = viewportBottom,
+            captureLeft = captureLeft,
+            captureTop = captureTop,
+            captureWidth = captureWidth,
+            captureHeight = captureHeight,
+            directionSign = directionSign,
+            onReady = onReady
+        )
+    }
+
+    fun updateTeleportProgress(ownerKey: String, progress: Float): Boolean {
+        return isOwnerActive(ownerKey) && vulkanOverlay.updateTeleportProgress(progress)
+    }
+
+    fun clearTeleportScene(ownerKey: String) {
+        if (isOwnerActive(ownerKey)) {
+            vulkanOverlay.clearTeleportScene()
+        }
+    }
+
     fun addPaintSplash(ownerKey: String, target: PaintSplashTarget) {
         if (!isOwnerActive(ownerKey)) {
             target.bitmap.recycle()
@@ -316,6 +363,7 @@ internal class RootGlassLayerCoordinator(
         }
 
         if (previousOwner != null) {
+            vulkanOverlay.clearTeleportScene()
             vulkanOverlay.discardBackdropFrame()
         }
         geometrySnapshot = null

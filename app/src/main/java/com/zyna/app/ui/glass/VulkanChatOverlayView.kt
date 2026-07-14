@@ -40,6 +40,10 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
     private var pendingBackdropFrame: PendingBackdropFrame? = null
     private var pendingBackdropRectUpdate: PendingBackdropRectUpdate? = null
     private var activeBackdropFrame: ActiveBackdropFrame? = null
+    private var pendingTeleportScene: PendingTeleportScene? = null
+    private var activeTeleportScene: ActiveTeleportScene? = null
+    private var pendingTeleportProgress: Float? = null
+    private var pendingTeleportClear = false
     private var idleClearFramesRemaining = 0
     private var backdropStatsPollCallbackPosted = false
     private var backdropStatsPollAttemptsRemaining = 0
@@ -118,6 +122,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
             stopBackdropStatsPollCallback()
             stopRenderThread()
             clearPendingSplash()
+            releaseTeleportState(clearNative = true)
             clearBackdropFrame(clearNative = true)
             clearNativeSurface()
         }
@@ -325,6 +330,98 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         )
     }
 
+    fun setTeleportScene(
+        oldFrame: HardwareBufferChatCapture.CapturedFrame,
+        newFrame: HardwareBufferChatCapture.CapturedFrame,
+        viewportLeft: Float,
+        viewportTop: Float,
+        viewportRight: Float,
+        viewportBottom: Float,
+        captureLeft: Float,
+        captureTop: Float,
+        captureWidth: Int,
+        captureHeight: Int,
+        directionSign: Float,
+        onReady: (Boolean) -> Unit
+    ): Boolean {
+        if (!enabled ||
+            viewportRight <= viewportLeft ||
+            viewportBottom <= viewportTop ||
+            captureWidth <= 0 ||
+            captureHeight <= 0) {
+            oldFrame.closeCapturedFrame()
+            newFrame.closeCapturedFrame()
+            onReady(false)
+            return false
+        }
+        ensureRenderer()
+        if (nativeHandle == 0L) {
+            oldFrame.closeCapturedFrame()
+            newFrame.closeCapturedFrame()
+            onReady(false)
+            return false
+        }
+
+        val replacedScene = synchronized(renderStateLock) {
+            pendingTeleportScene.also {
+                pendingTeleportScene = PendingTeleportScene(
+                    oldFrame = oldFrame,
+                    newFrame = newFrame,
+                    viewportLeft = viewportLeft,
+                    viewportTop = viewportTop,
+                    viewportRight = viewportRight,
+                    viewportBottom = viewportBottom,
+                    captureLeft = captureLeft,
+                    captureTop = captureTop,
+                    captureWidth = captureWidth,
+                    captureHeight = captureHeight,
+                    directionSign = directionSign,
+                    onReady = onReady
+                )
+                pendingTeleportClear = false
+                pendingTeleportProgress = 0f
+            }
+        }
+        replacedScene?.closeAndNotify(false)
+        alpha = presentedAlpha()
+        visibility = VISIBLE
+        bindCurrentSurface()
+        val didQueue = requestRenderFrame()
+        if (!didQueue) {
+            val failedScene = synchronized(renderStateLock) {
+                pendingTeleportScene.also { pendingTeleportScene = null }
+            }
+            failedScene?.closeAndNotify(false)
+        }
+        return didQueue
+    }
+
+    fun updateTeleportProgress(progress: Float): Boolean {
+        val hasTeleport = synchronized(renderStateLock) {
+            if (pendingTeleportScene == null && activeTeleportScene == null) {
+                false
+            } else {
+                pendingTeleportProgress = progress.coerceIn(0f, 1f)
+                true
+            }
+        }
+        return hasTeleport && requestRenderFrame()
+    }
+
+    fun clearTeleportScene() {
+        val pendingScene = synchronized(renderStateLock) {
+            pendingTeleportScene.also {
+                pendingTeleportScene = null
+                pendingTeleportProgress = null
+                pendingTeleportClear = true
+            }
+        }
+        pendingScene?.closeAndNotify(false)
+        if (!requestRenderFrame()) {
+            releaseTeleportState(clearNative = true)
+        }
+    }
+
     fun clearBackdropFrame() {
         clearPendingBackdropFrame()
         clearBackdropFrame(clearNative = true)
@@ -367,6 +464,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         stopFrameCallback()
         stopBackdropStatsPollCallback()
         stopRenderThread()
+        releaseTeleportState(clearNative = true)
         clearPendingSplash()
         clearPendingBackdropFrame()
         clearBackdropFrame(clearNative = true)
@@ -415,6 +513,7 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         stopFrameCallback()
         stopBackdropStatsPollCallback()
         stopRenderThread()
+        releaseTeleportState(clearNative = false)
         clearNativeSurface()
         surface?.release()
         surface = null
@@ -560,6 +659,27 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         }
     }
 
+    private fun releaseTeleportState(clearNative: Boolean) {
+        val scenes = synchronized(renderStateLock) {
+            val pending = pendingTeleportScene
+            val active = activeTeleportScene
+            pendingTeleportScene = null
+            activeTeleportScene = null
+            pendingTeleportProgress = null
+            pendingTeleportClear = false
+            pending to active
+        }
+        scenes.first?.closeAndNotify(false)
+        scenes.second?.close()
+        if (clearNative && nativeHandle != 0L) {
+            synchronized(nativeCallLock) {
+                if (nativeHandle != 0L) {
+                    NativeVulkanChat.nativeClearTeleport(nativeHandle)
+                }
+            }
+        }
+    }
+
     private fun postNativeRenderWork(
         frameId: Long,
         frameTimeNanos: Long,
@@ -604,6 +724,9 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
                 }
                 if (renderResult.didUpdateBackdrop) {
                     scheduleBackdropStatsPoll()
+                }
+                renderResult.teleportActivation?.let { activation ->
+                    activation.onReady(activation.ready)
                 }
                 lastRenderHadActiveEffects = renderResult.hasActiveEffects
                 logRenderPacing(
@@ -759,6 +882,86 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         }
 
         var didUpdateBackdrop = false
+        var teleportActivation: TeleportActivation? = null
+
+        val shouldClearTeleport = synchronized(renderStateLock) {
+            pendingTeleportClear.also { pendingTeleportClear = false }
+        }
+        if (shouldClearTeleport) {
+            synchronized(nativeCallLock) {
+                val handle = nativeHandle
+                if (handle != 0L) {
+                    NativeVulkanChat.nativeClearTeleport(handle)
+                }
+            }
+            val previousScene = synchronized(renderStateLock) {
+                activeTeleportScene.also { activeTeleportScene = null }
+            }
+            previousScene?.close()
+        }
+
+        val teleportScene = synchronized(renderStateLock) {
+            pendingTeleportScene.also { pendingTeleportScene = null }
+        }
+        if (teleportScene != null) {
+            val previousScene = synchronized(renderStateLock) {
+                activeTeleportScene.also { activeTeleportScene = null }
+            }
+            val didImport = synchronized(nativeCallLock) {
+                val handle = nativeHandle
+                if (handle == 0L) {
+                    false
+                } else {
+                    runCatching {
+                        NativeVulkanChat.nativeSetTeleportHardwareBuffers(
+                            handle = handle,
+                            oldHardwareBuffer = teleportScene.oldFrame.hardwareBuffer,
+                            newHardwareBuffer = teleportScene.newFrame.hardwareBuffer,
+                            viewportLeft = teleportScene.viewportLeft,
+                            viewportTop = teleportScene.viewportTop,
+                            viewportRight = teleportScene.viewportRight,
+                            viewportBottom = teleportScene.viewportBottom,
+                            captureLeft = teleportScene.captureLeft,
+                            captureTop = teleportScene.captureTop,
+                            captureWidth = teleportScene.captureWidth,
+                            captureHeight = teleportScene.captureHeight,
+                            directionSign = teleportScene.directionSign
+                        )
+                    }.getOrElse { error ->
+                        Log.w(TAG, "Failed to import teleport HardwareBuffers", error)
+                        false
+                    }
+                }
+            }
+            previousScene?.close()
+            if (didImport) {
+                synchronized(renderStateLock) {
+                    activeTeleportScene = ActiveTeleportScene(
+                        oldFrame = teleportScene.oldFrame,
+                        newFrame = teleportScene.newFrame
+                    )
+                }
+            } else {
+                teleportScene.close()
+            }
+            teleportActivation = TeleportActivation(
+                ready = didImport,
+                onReady = teleportScene.onReady
+            )
+        }
+
+        val teleportProgress = synchronized(renderStateLock) {
+            pendingTeleportProgress.also { pendingTeleportProgress = null }
+        }
+        if (teleportProgress != null) {
+            synchronized(nativeCallLock) {
+                val handle = nativeHandle
+                if (handle != 0L) {
+                    NativeVulkanChat.nativeUpdateTeleportProgress(handle, teleportProgress)
+                }
+            }
+        }
+
         val backdrop = synchronized(renderStateLock) {
             pendingBackdropFrame.also { pendingBackdropFrame = null }
         }
@@ -822,7 +1025,8 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
 
         return RenderFrameResult(
             hasActiveEffects = renderNativeFrame(),
-            didUpdateBackdrop = didUpdateBackdrop
+            didUpdateBackdrop = didUpdateBackdrop,
+            teleportActivation = teleportActivation
         )
     }
 
@@ -830,7 +1034,10 @@ internal class VulkanChatOverlayView @JvmOverloads constructor(
         return synchronized(renderStateLock) {
             pendingPaintSplash != null ||
                 pendingBackdropFrame != null ||
-                pendingBackdropRectUpdate != null
+                pendingBackdropRectUpdate != null ||
+                pendingTeleportScene != null ||
+                pendingTeleportProgress != null ||
+                pendingTeleportClear
         }
     }
 
@@ -1061,9 +1268,50 @@ private data class ActiveBackdropFrame(
     val frame: HardwareBufferChatCapture.CapturedFrame
 )
 
+private data class PendingTeleportScene(
+    val oldFrame: HardwareBufferChatCapture.CapturedFrame,
+    val newFrame: HardwareBufferChatCapture.CapturedFrame,
+    val viewportLeft: Float,
+    val viewportTop: Float,
+    val viewportRight: Float,
+    val viewportBottom: Float,
+    val captureLeft: Float,
+    val captureTop: Float,
+    val captureWidth: Int,
+    val captureHeight: Int,
+    val directionSign: Float,
+    val onReady: (Boolean) -> Unit
+) {
+    fun close() {
+        oldFrame.closeCapturedFrame()
+        newFrame.closeCapturedFrame()
+    }
+
+    fun closeAndNotify(ready: Boolean) {
+        close()
+        onReady(ready)
+    }
+}
+
+private data class ActiveTeleportScene(
+    val oldFrame: HardwareBufferChatCapture.CapturedFrame,
+    val newFrame: HardwareBufferChatCapture.CapturedFrame
+) {
+    fun close() {
+        oldFrame.closeCapturedFrame()
+        newFrame.closeCapturedFrame()
+    }
+}
+
+private data class TeleportActivation(
+    val ready: Boolean,
+    val onReady: (Boolean) -> Unit
+)
+
 private data class RenderFrameResult(
     val hasActiveEffects: Boolean,
-    val didUpdateBackdrop: Boolean
+    val didUpdateBackdrop: Boolean,
+    val teleportActivation: TeleportActivation? = null
 )
 
 internal data class BackdropFrameResult(

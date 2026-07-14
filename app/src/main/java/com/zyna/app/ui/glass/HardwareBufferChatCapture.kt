@@ -213,6 +213,7 @@ internal class HardwareBufferChatCapture(
             }
             return
         }
+        latestRequest = null
 
         val hardwareBufferStartNanos = SystemClock.elapsedRealtimeNanos()
         val hardwareBuffer = image.hardwareBuffer

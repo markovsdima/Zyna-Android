@@ -43,7 +43,6 @@
     <string name="ongoing_call_ending">Ending call</string>
     <string name="ongoing_call_end">End call</string>
     <string name="contacts_title">Contacts</string>
-    <string name="contacts_refresh">Refresh</string>
     <string name="contacts_search_hint">Search contacts</string>
     <string name="contacts_searching">Searching...</string>
     <string name="contacts_empty">No contacts yet</string>
@@ -51,7 +50,6 @@
     <string name="contacts_message">Message</string>
     <string name="contacts_call">Call</string>
     <string name="calls_title">Calls</string>
-    <string name="calls_refresh">Refresh</string>
     <string name="calls_refreshing">Refreshing...</string>
     <string name="calls_empty">No calls yet</string>
     <string name="calls_call">Call</string>

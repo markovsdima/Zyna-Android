@@ -573,10 +573,6 @@ class AppViewModel(
         presenceRepository.setForeground(isForeground)
     }
 
-    fun refreshRooms() {
-        launchRoomRefresh(showRefreshing = true)
-    }
-
     private fun launchRoomRefresh(showRefreshing: Boolean) {
         viewModelScope.launch {
             awaitRoomRefresh(showRefreshing = showRefreshing)
@@ -729,11 +725,6 @@ class AppViewModel(
 
     fun callUserProfile() {
         contactFromUserProfile()?.let { callContact(it) }
-    }
-
-    fun refreshCallHistory() {
-        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-        startCallHistoryRefresh(userId = userId, showRefreshing = true)
     }
 
     fun openCallHistoryRoom(item: MatrixRtcCallHistoryItem) {
@@ -1591,12 +1582,6 @@ class AppViewModel(
         } else {
             pauseChatCallInfoObserver()
         }
-    }
-
-    fun refreshCurrentChat() {
-        val route = _uiState.value.activeChatRoute ?: return
-        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-        startChatTimeline(userId, route.roomId, resetMessages = false)
     }
 
     fun sendChatMessage(body: String): Boolean {

@@ -105,7 +105,6 @@ data class ChatScreenViewState(
 )
 
 data class ChatScreenViewActions(
-    val onRefresh: () -> Unit,
     val onStartCall: () -> Unit,
     val onBack: () -> Unit,
     val onOpenRoomDetails: () -> Unit,
@@ -217,14 +216,6 @@ internal class ChatScreenView(
         textSize = 12f
         setTextColor(nativeColors.subtitleText)
     }
-    private val refreshButton = TextView(context).apply {
-        gravity = Gravity.CENTER
-        textSize = 15f
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(nativeColors.actionText)
-        isClickable = true
-        isFocusable = true
-    }
     private val callButton = TextView(context).apply {
         gravity = Gravity.CENTER
         text = "Call"
@@ -330,13 +321,6 @@ internal class ChatScreenView(
             callButton,
             LinearLayout.LayoutParams(
                 dp(72),
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
-        topBar.addView(
-            refreshButton,
-            LinearLayout.LayoutParams(
-                dp(96),
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
@@ -492,11 +476,6 @@ internal class ChatScreenView(
         titleColumn.setOnClickListener { actions.onOpenRoomDetails() }
         callButton.setOnClickListener { actions.onStartCall() }
         renderActiveCallBanner(state.callBanner, actions)
-        refreshButton.text = if (state.isLoading) "Loading" else "Refresh"
-        refreshButton.isEnabled = !state.isLoading
-        refreshButton.alpha = if (state.isLoading) 0.54f else 1f
-        refreshButton.setOnClickListener { actions.onRefresh() }
-
         val errorMessage = state.errorMessage
         if (errorMessage != null) {
             chatLayout.visibility = View.GONE
@@ -981,7 +960,6 @@ internal class ChatScreenView(
         callButton.setTextColor(nativeColors.actionText)
         titleText.setTextColor(nativeColors.titleText)
         subtitleText.setTextColor(nativeColors.subtitleText)
-        refreshButton.setTextColor(nativeColors.actionText)
         activeCallBanner.setBackgroundColor(nativeColors.callBannerBackground)
         activeCallAccent.background = roundedDrawable(
             color = nativeColors.callBannerAccent,

@@ -61,7 +61,6 @@ data class RoomsScrollAnchor(
 )
 
 data class RoomsScreenViewActions(
-    val onRefresh: () -> Unit,
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onBack: (() -> Unit)?
 )
@@ -97,13 +96,6 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         textSize = 22f
         typeface = Typeface.DEFAULT_BOLD
         updatePadding(left = dp(12), right = dp(8))
-    }
-    private val refreshButton = TextView(context).apply {
-        gravity = Gravity.CENTER
-        textSize = 15f
-        typeface = Typeface.DEFAULT_BOLD
-        isClickable = true
-        isFocusable = true
     }
     private val contentFrame = FrameLayout(context)
     private val recyclerView = RecyclerView(context).apply {
@@ -152,13 +144,6 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
                 0,
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 1f
-            )
-        )
-        topBar.addView(
-            refreshButton,
-            LinearLayout.LayoutParams(
-                dp(96),
-                ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
         root.addView(
@@ -225,11 +210,6 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         titleText.text = state.title
         backButton.visibility = if (state.showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { actions.onBack?.invoke() }
-        refreshButton.text = if (state.isRefreshing) "Syncing" else "Refresh"
-        refreshButton.isEnabled = !state.isRefreshing
-        refreshButton.alpha = if (state.isRefreshing) 0.54f else 1f
-        refreshButton.setOnClickListener { actions.onRefresh() }
-
         recyclerView.setPadding(
             recyclerView.paddingLeft,
             recyclerView.paddingTop,
@@ -295,7 +275,6 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.actionText)
         titleText.setTextColor(palette.titleText)
-        refreshButton.setTextColor(palette.actionText)
         emptyView.setTextColor(palette.secondaryText)
         adapter.setPalette(palette)
     }

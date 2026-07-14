@@ -38,8 +38,7 @@ internal data class CallsScreenViewState(
 
 internal data class CallsScreenViewActions(
     val onOpenRoom: (MatrixRtcCallHistoryItem) -> Unit,
-    val onCall: (MatrixRtcCallHistoryItem) -> Unit,
-    val onRefresh: () -> Unit
+    val onCall: (MatrixRtcCallHistoryItem) -> Unit
 )
 
 internal class CallsScreenView(context: Context) : FrameLayout(context) {
@@ -61,15 +60,6 @@ internal class CallsScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER_VERTICAL
         includeFontPadding = true
         updatePadding(left = dp(20), right = dp(12))
-    }
-    private val refreshButton = TextView(context).apply {
-        text = context.getString(R.string.calls_refresh)
-        textSize = 16f
-        gravity = Gravity.CENTER
-        includeFontPadding = true
-        isClickable = true
-        isFocusable = true
-        updatePadding(left = dp(12), right = dp(20))
     }
     private val statusText = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -106,13 +96,6 @@ internal class CallsScreenView(context: Context) : FrameLayout(context) {
         topBar.addView(
             titleText,
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-        )
-        topBar.addView(
-            refreshButton,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
         )
         root.addView(
             statusText,
@@ -154,7 +137,6 @@ internal class CallsScreenView(context: Context) : FrameLayout(context) {
     }
 
     fun render(state: CallsScreenViewState, actions: CallsScreenViewActions) {
-        refreshButton.setOnClickListener { actions.onRefresh() }
         adapter.actions = actions
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.palette = palette
@@ -176,7 +158,6 @@ internal class CallsScreenView(context: Context) : FrameLayout(context) {
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         titleText.setTextColor(palette.titleText)
-        refreshButton.setTextColor(palette.actionText)
         statusText.setTextColor(palette.secondaryText)
         recyclerView.setBackgroundColor(palette.background)
     }

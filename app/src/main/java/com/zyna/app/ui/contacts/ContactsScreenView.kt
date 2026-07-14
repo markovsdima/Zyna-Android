@@ -45,8 +45,7 @@ internal data class ContactsScreenViewActions(
     val onSearchQueryChanged: (String) -> Unit,
     val onOpenProfile: (MatrixContact) -> Unit,
     val onOpenChat: (MatrixContact) -> Unit,
-    val onCall: (MatrixContact) -> Unit,
-    val onRefresh: () -> Unit
+    val onCall: (MatrixContact) -> Unit
 )
 
 internal class ContactsScreenView(context: Context) : FrameLayout(context) {
@@ -70,15 +69,6 @@ internal class ContactsScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER_VERTICAL
         includeFontPadding = true
         updatePadding(left = dp(20), right = dp(12))
-    }
-    private val refreshButton = TextView(context).apply {
-        text = context.getString(R.string.contacts_refresh)
-        textSize = 16f
-        gravity = Gravity.CENTER
-        includeFontPadding = true
-        isClickable = true
-        isFocusable = true
-        updatePadding(left = dp(12), right = dp(20))
     }
     private val searchField = EditText(context).apply {
         setSingleLine(true)
@@ -125,13 +115,6 @@ internal class ContactsScreenView(context: Context) : FrameLayout(context) {
         topBar.addView(
             titleText,
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-        )
-        topBar.addView(
-            refreshButton,
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
         )
         root.addView(
             searchField,
@@ -205,7 +188,6 @@ internal class ContactsScreenView(context: Context) : FrameLayout(context) {
 
     fun render(state: ContactsScreenViewState, actions: ContactsScreenViewActions) {
         this.actions = actions
-        refreshButton.setOnClickListener { actions.onRefresh() }
         adapter.actions = actions
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.actionUserId = state.actionUserId
@@ -238,7 +220,6 @@ internal class ContactsScreenView(context: Context) : FrameLayout(context) {
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         titleText.setTextColor(palette.titleText)
-        refreshButton.setTextColor(palette.actionText)
         searchField.setTextColor(palette.primaryText)
         searchField.setHintTextColor(palette.secondaryText)
         searchField.background = roundedDrawable(palette.surface, dp(12))

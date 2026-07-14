@@ -720,8 +720,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onSearchQueryChanged = actions.onContactsSearchQueryChanged,
                         onOpenProfile = actions.onOpenUserProfile,
                         onOpenChat = actions.onOpenContactChat,
-                        onCall = actions.onCallContact,
-                        onRefresh = actions.onRefreshRooms
+                        onCall = actions.onCallContact
                     )
                 )
             }
@@ -746,8 +745,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     ),
                     actions = CallsScreenViewActions(
                         onOpenRoom = actions.onOpenCallHistoryRoom,
-                        onCall = actions.onCallHistoryItem,
-                        onRefresh = actions.onRefreshCallHistory
+                        onCall = actions.onCallHistoryItem
                     )
                 )
             }
@@ -827,7 +825,6 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         }
                     ),
                     actions = RoomsScreenViewActions(
-                        onRefresh = actions.onRefreshRooms,
                         onOpenRoom = if (title == "Forward to") {
                             actions.onForwardRoomSelected
                         } else {
@@ -1046,7 +1043,6 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         chatBubbleTheme = preferences.chatBubbleTheme
                     ),
                     actions = ChatScreenViewActions(
-                        onRefresh = actions.onRefreshChat,
                         onStartCall = {
                             actions.onStartNativeMatrixRtcCall(route.roomId, route.displayName)
                         },

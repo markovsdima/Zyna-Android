@@ -123,7 +123,7 @@ class GlassInputBarView @JvmOverloads constructor(
         isFocusable = true
     }
     private val attachButton = GlassIconButton(context, controller).apply {
-        setText("+")
+        setIconResource(R.drawable.ic_input_attach_24)
         contentDescription = context.getText(R.string.chat_composer_action_attach)
     }
     private val sendButton = GlassIconButton(context, controller).apply {
@@ -932,7 +932,7 @@ class GlassInputBarView @JvmOverloads constructor(
 
         when (state) {
             GlassVoiceComposerState.Idle -> {
-                attachButton.setText("+")
+                attachButton.setIconResource(R.drawable.ic_input_attach_24)
                 attachButton.contentDescription = context.getText(R.string.chat_composer_action_attach)
                 if (shouldRecordVoice()) {
                     sendButton.setIconResource(R.drawable.ic_input_mic_24)

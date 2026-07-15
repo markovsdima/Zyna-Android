@@ -6,6 +6,7 @@ import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixTimelineUpdate
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,8 +29,39 @@ class ChatTimelineStoreTest {
     private val windowDeliveries = mutableListOf<WindowDelivery>()
     private val settledTargets = mutableListOf<ChatTimelineTarget>()
     private val errors = mutableListOf<Pair<ChatTimelineTarget, Throwable>>()
+    private val initialSnapshotErrors = mutableListOf<Pair<ChatTimelineTarget, Throwable>>()
+    private val pendingBootstrapWindows =
+        mutableMapOf<ChatTimelineTarget, MutableList<FakeWindowStore>>()
     private val store = ChatTimelineStore<FakeWindowStore>(
         scope = scope,
+        bootstrapDriver = ChatTimelineBootstrapDriver(
+            createWindowStore = { target ->
+                val windows = pendingBootstrapWindows[target]
+                if (windows.isNullOrEmpty()) {
+                    FakeWindowStore()
+                } else {
+                    windows.removeAt(0)
+                }
+            },
+            initialMessagesSnapshot = { _, windowStore ->
+                windowStore.initialSnapshotError?.let { throw it }
+                val gate = windowStore.initialSnapshotGate
+                when {
+                    gate == null -> windowStore.initialMessages
+                    windowStore.ignoreSnapshotCancellation -> {
+                        try {
+                            gate.await()
+                        } catch (_: CancellationException) {
+                            windowStore.initialMessages
+                        }
+                    }
+                    else -> gate.await()
+                }
+            }
+        ),
+        onInitialSnapshotError = { target, error ->
+            initialSnapshotErrors += target to error
+        },
         observeTimeline = { target ->
             timelineOverrides[target] ?: timelineFlow(target)
         },
@@ -53,6 +85,121 @@ class ChatTimelineStoreTest {
     @After
     fun tearDown() {
         scope.cancel()
+    }
+
+    @Test
+    fun open_loadsInitialSnapshotAndActivatesSubscriptions() {
+        val target = target(roomId = ROOM_A)
+        val initialMessage = message(EVENT_A)
+        val windowStore = FakeWindowStore(initialMessages = listOf(initialMessage))
+        enqueueBootstrapWindow(target, windowStore)
+
+        store.open(target)
+
+        assertEquals(ROOM_A, store.state.value.roomId)
+        assertEquals(listOf(initialMessage), store.state.value.messages)
+        assertFalse(store.state.value.isLoading)
+
+        assertTrue(windowStore.updates.tryEmit(windowUpdate()))
+        assertTrue(timelineFlow(target).tryEmit(timelineUpdate()))
+        assertEquals(listOf(target), windowDeliveries.map { it.target })
+        assertEquals(listOf(target), settledTargets)
+    }
+
+    @Test
+    fun open_notifiesActivationAfterBootstrap() {
+        val target = target(roomId = ROOM_A)
+        val activatedTargets = mutableListOf<ChatTimelineTarget>()
+        enqueueBootstrapWindow(
+            target,
+            FakeWindowStore(initialMessages = listOf(message(EVENT_A)))
+        )
+
+        store.open(target) { activatedTarget ->
+            activatedTargets += activatedTarget
+            store.jumpToEvent(activatedTarget, EVENT_A)
+        }
+
+        assertEquals(listOf(target), activatedTargets)
+        assertEquals(EVENT_A, store.state.value.jumpTargetEventId)
+        assertEquals(
+            TimelineWindowChangeOrigin.JUMP,
+            store.state.value.windowChangeOrigin
+        )
+    }
+
+    @Test
+    fun failedInitialSnapshot_reportsErrorAndStillActivatesTimeline() {
+        val target = target(roomId = ROOM_A)
+        val expected = IllegalStateException("snapshot failed")
+        enqueueBootstrapWindow(
+            target,
+            FakeWindowStore(initialSnapshotError = expected)
+        )
+
+        store.open(target)
+        assertTrue(timelineFlow(target).tryEmit(timelineUpdate()))
+
+        assertEquals(listOf(target to expected), initialSnapshotErrors)
+        assertEquals(listOf(target), settledTargets)
+        assertFalse(store.state.value.isLoading)
+    }
+
+    @Test
+    fun deactivate_ignoresPendingBootstrapCompletion() {
+        val target = target(roomId = ROOM_A)
+        val gate = CompletableDeferred<List<MatrixChatMessage>>()
+        var didActivate = false
+        enqueueBootstrapWindow(
+            target,
+            FakeWindowStore(
+                initialSnapshotGate = gate,
+                ignoreSnapshotCancellation = true
+            )
+        )
+
+        store.open(target) { didActivate = true }
+        store.deactivate()
+        gate.complete(listOf(message(EVENT_A)))
+
+        assertEquals(ChatTimelineState(), store.state.value)
+        assertFalse(didActivate)
+        assertTrue(timelineFlow(target).tryEmit(timelineUpdate()))
+        assertTrue(settledTargets.isEmpty())
+    }
+
+    @Test
+    fun reopeningSameRoom_ignoresFirstBootstrapCompletion() {
+        val targetA = target(roomId = ROOM_A)
+        val targetB = target(roomId = ROOM_B)
+        val firstGate = CompletableDeferred<List<MatrixChatMessage>>()
+        val firstMessage = message("\$first-a")
+        val latestMessage = message("\$latest-a")
+        var didActivateFirstBootstrap = false
+        enqueueBootstrapWindow(
+            targetA,
+            FakeWindowStore(
+                initialSnapshotGate = firstGate,
+                ignoreSnapshotCancellation = true,
+                initialMessages = listOf(firstMessage)
+            )
+        )
+        enqueueBootstrapWindow(
+            targetB,
+            FakeWindowStore(initialMessages = listOf(message("\$room-b")))
+        )
+        enqueueBootstrapWindow(
+            targetA,
+            FakeWindowStore(initialMessages = listOf(latestMessage))
+        )
+
+        store.open(targetA) { didActivateFirstBootstrap = true }
+        store.open(targetB)
+        store.open(targetA)
+
+        assertFalse(didActivateFirstBootstrap)
+        assertEquals(ROOM_A, store.state.value.roomId)
+        assertEquals(listOf(latestMessage), store.state.value.messages)
     }
 
     @Test
@@ -293,6 +440,13 @@ class ChatTimelineStoreTest {
         }
     }
 
+    private fun enqueueBootstrapWindow(
+        target: ChatTimelineTarget,
+        windowStore: FakeWindowStore
+    ) {
+        pendingBootstrapWindows.getOrPut(target) { mutableListOf() } += windowStore
+    }
+
     private fun target(
         userId: String = USER_A,
         roomId: String
@@ -338,7 +492,11 @@ class ChatTimelineStoreTest {
             MutableSharedFlow(extraBufferCapacity = 8),
         var isAtLiveEdge: Boolean = true,
         val recordedFlushes: MutableList<TimelineFlushSummary> = mutableListOf(),
-        val refreshedFlushes: MutableList<TimelineFlushSummary> = mutableListOf()
+        val refreshedFlushes: MutableList<TimelineFlushSummary> = mutableListOf(),
+        val initialMessages: List<MatrixChatMessage> = emptyList(),
+        val initialSnapshotGate: CompletableDeferred<List<MatrixChatMessage>>? = null,
+        val ignoreSnapshotCancellation: Boolean = false,
+        val initialSnapshotError: Throwable? = null
     )
 
     private data class WindowDelivery(

@@ -31,7 +31,6 @@ import com.zyna.app.data.profile.ProfileAvatarDraft
 import com.zyna.app.data.security.MatrixSessionSecurityAction
 import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
-import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatCallBannerPolicy
@@ -265,6 +264,9 @@ class AppViewModel(
         localCacheRepository = localCacheRepository,
         onWindowUpdate = ::logChatTimelineWindowUpdate,
         onTimelineSettled = ::logChatTimelineSettled,
+        onInitialSnapshotError = { _, error ->
+            Log.w(TAG, "Failed to load initial chat window from cache", error)
+        },
         onNavigationError = ::failChatTimelineNavigation,
         onNavigationTrace = ::logTeleport
     )
@@ -296,7 +298,6 @@ class AppViewModel(
         onLog = ::logChatCall
     )
     private var visibleRoomRefreshRequestCount = 0
-    private var openRoomJob: Job? = null
     private var roomCacheJob: Job? = null
     private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
@@ -822,14 +823,6 @@ class AppViewModel(
             "roomId=${room.id}"
         }
 
-        val storeStart = ZynaPerfLog.start()
-        val timelineStore = RoomTimelineWindowStore(
-            userId = userId,
-            roomId = room.id,
-            localCacheRepository = localCacheRepository
-        )
-        ZynaPerfLog.end(storeStart, "openRoom.createStore") { "roomId=${room.id}" }
-
         val routeUpdateStart = ZynaPerfLog.start()
         val timelineTarget = ChatTimelineTarget(userId = userId, roomId = room.id)
         if (_uiState.value.matrixState.userIdOrNull() == userId) {
@@ -837,7 +830,6 @@ class AppViewModel(
                 target = ChatComposerSendTarget(userId = userId, roomId = room.id),
                 forwardTarget = forwardTarget
             )
-            chatTimelineStore.prepareRoom(timelineTarget)
         }
         _uiState.update {
             if (it.matrixState.userIdOrNull() != userId) {
@@ -849,72 +841,16 @@ class AppViewModel(
                 )
             }
         }
-        chatCallInfoCoordinator.activate(
-            ChatCallInfoTarget(userId = userId, roomId = room.id)
-        )
+        if (_uiState.value.isRouteForRoom(userId, room.id)) {
+            chatTimelineStore.open(timelineTarget) {
+                initialEventId?.let(::jumpToChatEvent)
+            }
+            chatCallInfoCoordinator.activate(
+                ChatCallInfoTarget(userId = userId, roomId = room.id)
+            )
+        }
         ZynaPerfLog.end(routeUpdateStart, "openRoom.routeUpdate") {
             "roomId=${room.id}"
-        }
-
-        openRoomJob = viewModelScope.launch {
-            val jobStart = ZynaPerfLog.start()
-            ZynaPerfLog.mark { "openRoom.job.start roomId=${room.id}" }
-            val snapshotStart = ZynaPerfLog.start()
-            val initialMessages = try {
-                timelineStore.initialMessagesSnapshot()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to load initial chat window from cache", error)
-                emptyList()
-            }
-            ZynaPerfLog.end(
-                snapshotStart,
-                "openRoom.initialSnapshot"
-            ) {
-                "roomId=${room.id} count=${initialMessages.size}"
-            }
-
-            val stateUpdateStart = ZynaPerfLog.start()
-            chatTimelineStore.applyInitialSnapshot(timelineTarget, initialMessages)
-            ZynaPerfLog.end(
-                stateUpdateStart,
-                "openRoom.stateUpdate"
-            ) {
-                "roomId=${room.id} count=${initialMessages.size}"
-            }
-
-            if (_uiState.value.isRouteForRoom(userId, room.id)) {
-                val startTimelineStart = ZynaPerfLog.start()
-                startChatTimeline(
-                    userId = userId,
-                    roomId = room.id,
-                    timelineStore = timelineStore
-                )
-                initialEventId?.let(::jumpToChatEvent)
-                ZynaPerfLog.end(
-                    startTimelineStart,
-                    "openRoom.startTimeline"
-                ) {
-                    "roomId=${room.id}"
-                }
-            }
-            ZynaPerfLog.end(
-                jobStart,
-                "openRoom.job.done"
-            ) {
-                "roomId=${room.id} count=${initialMessages.size}"
-            }
-        }.also { job ->
-            job.invokeOnCompletion {
-                ZynaPerfLog.mark {
-                    "openRoom.job.complete roomId=${room.id} " +
-                        "cancelled=${job.isCancelled}"
-                }
-                if (openRoomJob == job) {
-                    openRoomJob = null
-                }
-            }
         }
     }
 
@@ -2009,25 +1945,6 @@ class AppViewModel(
         }
     }
 
-    private fun startChatTimeline(
-        userId: String,
-        roomId: String,
-        timelineStore: RoomTimelineWindowStore = RoomTimelineWindowStore(
-            userId = userId,
-            roomId = roomId,
-            localCacheRepository = localCacheRepository
-        )
-    ) {
-        ZynaPerfLog.mark {
-            "startChatTimeline.begin roomId=$roomId " +
-                "currentMessages=${chatTimelineStore.state.value.messages.size}"
-        }
-        chatTimelineStore.activate(
-            target = ChatTimelineTarget(userId = userId, roomId = roomId),
-            windowStore = timelineStore
-        )
-    }
-
     private fun logChatTimelineWindowUpdate(
         target: ChatTimelineTarget,
         update: TimelineWindowUpdate<MatrixChatMessage>,
@@ -2066,8 +1983,6 @@ class AppViewModel(
     }
 
     private fun stopChatTimeline() {
-        openRoomJob?.cancel()
-        openRoomJob = null
         chatTimelineStore.deactivate()
         clearChatCallInfoObserver()
         chatReadReceiptCoordinator.reset()

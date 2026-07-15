@@ -99,6 +99,14 @@ internal class ChatTimelineNavigationDriver<WindowStore : Any>(
     val maxPaginationAttempts: Int
 )
 
+internal class ChatTimelineBootstrapDriver<WindowStore : Any>(
+    val createWindowStore: (ChatTimelineTarget) -> WindowStore,
+    val initialMessagesSnapshot: suspend (
+        ChatTimelineTarget,
+        WindowStore
+    ) -> List<MatrixChatMessage>
+)
+
 /**
  * Owns the subscriptions and window associated with one active chat timeline.
  *
@@ -118,6 +126,8 @@ internal class ChatTimelineStore<WindowStore : Any>(
         WindowStore,
         TimelineFlushSummary
     ) -> Unit,
+    private val bootstrapDriver: ChatTimelineBootstrapDriver<WindowStore>? = null,
+    private val onInitialSnapshotError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> },
     private val onWindowUpdate: (
         ChatTimelineTarget,
         TimelineWindowUpdate<MatrixChatMessage>,
@@ -147,13 +157,75 @@ internal class ChatTimelineStore<WindowStore : Any>(
     val state: StateFlow<ChatTimelineState> = _state.asStateFlow()
 
     private var stateTarget: ChatTimelineTarget? = null
+    private var activeBootstrap: TimelineBootstrap<WindowStore>? = null
+    private var bootstrapJob: Job? = null
     private var activeTimeline: ActiveTimeline<WindowStore>? = null
     private var timelineJob: Job? = null
     private var windowJob: Job? = null
     private var windowOperationJob: Job? = null
 
+    /**
+     * Loads the cached window and activates subscriptions for [target].
+     * [onActivated] runs only for the latest bootstrap, after activation.
+     */
+    @MainThread
+    fun open(
+        target: ChatTimelineTarget,
+        onActivated: (ChatTimelineTarget) -> Unit = {}
+    ) {
+        val driver = checkNotNull(bootstrapDriver) {
+            "Chat timeline bootstrap is not configured"
+        }
+        prepareRoom(target)
+
+        val bootstrap = TimelineBootstrap(
+            windowStore = driver.createWindowStore(target)
+        )
+        activeBootstrap = bootstrap
+        val job = scope.launch {
+            val initialMessages = try {
+                driver.initialMessagesSnapshot(target, bootstrap.windowStore)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (activeBootstrap !== bootstrap) {
+                    return@launch
+                }
+                onInitialSnapshotError(target, error)
+                emptyList()
+            }
+            if (activeBootstrap !== bootstrap) {
+                return@launch
+            }
+
+            applyInitialSnapshot(target, initialMessages)
+            if (activeBootstrap !== bootstrap) {
+                return@launch
+            }
+
+            activateTimeline(target, bootstrap.windowStore)
+            if (activeBootstrap !== bootstrap) {
+                return@launch
+            }
+            onActivated(target)
+            if (activeBootstrap === bootstrap) {
+                activeBootstrap = null
+            }
+        }
+        bootstrapJob = job
+        job.invokeOnCompletion {
+            if (activeBootstrap === bootstrap) {
+                activeBootstrap = null
+            }
+            if (bootstrapJob === job) {
+                bootstrapJob = null
+            }
+        }
+    }
+
     @MainThread
     fun prepareRoom(target: ChatTimelineTarget) {
+        cancelBootstrap()
         stopActiveTimeline()
         stateTarget = target
         _state.value = ChatTimelineState(
@@ -184,6 +256,14 @@ internal class ChatTimelineStore<WindowStore : Any>(
 
     @MainThread
     fun activate(
+        target: ChatTimelineTarget,
+        windowStore: WindowStore
+    ) {
+        cancelBootstrap()
+        activateTimeline(target, windowStore)
+    }
+
+    private fun activateTimeline(
         target: ChatTimelineTarget,
         windowStore: WindowStore
     ) {
@@ -273,9 +353,16 @@ internal class ChatTimelineStore<WindowStore : Any>(
 
     @MainThread
     fun deactivate() {
+        cancelBootstrap()
         stopActiveTimeline()
         stateTarget = null
         _state.value = ChatTimelineState()
+    }
+
+    private fun cancelBootstrap() {
+        activeBootstrap = null
+        bootstrapJob?.cancel()
+        bootstrapJob = null
     }
 
     private fun stopActiveTimeline() {
@@ -724,6 +811,10 @@ private data class ActiveTimeline<WindowStore : Any>(
     val windowStore: WindowStore
 )
 
+private data class TimelineBootstrap<WindowStore : Any>(
+    val windowStore: WindowStore
+)
+
 internal fun createChatTimelineStore(
     scope: CoroutineScope,
     matrixClientService: MatrixClientService,
@@ -735,6 +826,7 @@ internal fun createChatTimelineStore(
     ) -> Unit = { _, _, _ -> },
     onTimelineSettled: (ChatTimelineTarget, messageCount: Int) -> Unit = { _, _ -> },
     onTimelineError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> },
+    onInitialSnapshotError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> },
     onPaginationResult: (ChatTimelineTarget, ChatTimelinePaginationResult) -> Unit = { _, _ -> },
     onPaginationError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> },
     onNavigationResult: (ChatTimelineTarget, ChatTimelineNavigationResult) -> Unit = { _, _ -> },
@@ -747,6 +839,29 @@ internal fun createChatTimelineStore(
 ): ChatTimelineStore<RoomTimelineWindowStore> {
     return ChatTimelineStore(
         scope = scope,
+        bootstrapDriver = ChatTimelineBootstrapDriver(
+            createWindowStore = { target ->
+                val start = ZynaPerfLog.start()
+                RoomTimelineWindowStore(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    localCacheRepository = localCacheRepository
+                ).also {
+                    ZynaPerfLog.end(start, "openRoom.createStore") {
+                        "roomId=${target.roomId}"
+                    }
+                }
+            },
+            initialMessagesSnapshot = { target, windowStore ->
+                val start = ZynaPerfLog.start()
+                windowStore.initialMessagesSnapshot().also { messages ->
+                    ZynaPerfLog.end(start, "openRoom.initialSnapshot") {
+                        "roomId=${target.roomId} count=${messages.size}"
+                    }
+                }
+            }
+        ),
+        onInitialSnapshotError = onInitialSnapshotError,
         observeTimeline = { target ->
             matrixClientService.roomTimelineMessageUpserts(target.roomId)
                 .onEach { update ->

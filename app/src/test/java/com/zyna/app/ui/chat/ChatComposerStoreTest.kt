@@ -4,12 +4,23 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ChatComposerStoreTest {
-    private val store = ChatComposerStore(noOpSendDriver())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    private val store = ChatComposerStore(scope, noOpSendDriver())
+
+    @After
+    fun tearDown() {
+        scope.cancel()
+    }
 
     @Test
     fun stateFlow_exposesLatestTargetState() {
@@ -39,7 +50,7 @@ class ChatComposerStoreTest {
         assertNull(pickerState.forwardTarget)
         assertEquals(FORWARD, pickerState.pendingForwardTarget)
 
-        val roomState = store.enterRoom(FORWARD)
+        val roomState = store.enterRoom(TARGET, FORWARD)
         assertNull(roomState.replyTarget)
         assertNull(roomState.editTarget)
         assertEquals(FORWARD, roomState.forwardTarget)
@@ -83,8 +94,8 @@ class ChatComposerStoreTest {
 
     @Test
     fun activeAndFullReset_haveDifferentScopes() {
-        store.enterRoom(FORWARD)
-        assertEquals(ChatComposerState(), store.clearActiveTargets())
+        store.enterRoom(TARGET, FORWARD)
+        assertEquals(ChatComposerState(roomId = TARGET.roomId), store.clearActiveTargets())
 
         store.startForwardPicker(FORWARD)
 
@@ -95,11 +106,25 @@ class ChatComposerStoreTest {
     }
 
     @Test
+    fun deactivateRoom_clearsRoomStateButPreservesPendingForward() {
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.startForwardPicker(FORWARD)
+
+        assertEquals(
+            ChatComposerState(pendingForwardTarget = FORWARD),
+            store.deactivateRoom()
+        )
+    }
+
+    @Test
     fun enteringRegularRoom_clearsPreviousAndPendingTargets() {
         store.selectReply(REPLY)
         store.startForwardPicker(FORWARD)
 
-        assertEquals(ChatComposerState(), store.enterRoom(forwardTarget = null))
+        assertEquals(
+            ChatComposerState(roomId = TARGET.roomId),
+            store.enterRoom(target = TARGET, forwardTarget = null)
+        )
     }
 
     @Test
@@ -110,11 +135,15 @@ class ChatComposerStoreTest {
         store.selectEdit(EDIT)
         assertEquals(ChatComposerState(), store.clearEdit())
 
-        store.enterRoom(FORWARD)
-        assertEquals(ChatComposerState(), store.clearForward())
+        store.enterRoom(TARGET, FORWARD)
+        assertEquals(ChatComposerState(roomId = TARGET.roomId), store.clearForward())
     }
 
     private companion object {
+        val TARGET = ChatComposerSendTarget(
+            userId = "@me:example.org",
+            roomId = "!room:example.org"
+        )
         val REPLY = MatrixReplyInfo(
             eventId = "reply-event",
             senderId = "@alice:example.org",

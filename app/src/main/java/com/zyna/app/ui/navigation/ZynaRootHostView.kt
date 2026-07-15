@@ -1055,6 +1055,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 isLoading = true,
                 canLoadOlder = false
             )
+        val composer = chatComposer.takeIf { it.roomId == route.roomId }
+            ?: ChatComposerState(roomId = route.roomId)
         return ZynaScreenEntry(
             key = "chat:${route.roomId}",
             rootGlassOwnerKey = chatGlassOwnerKey(),
@@ -1094,11 +1096,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isAtLiveEdge = timeline.isAtLiveEdge,
                         scrollToLiveEdgeRequested = timeline.scrollToLiveEdgeRequested,
                         errorMessage = timeline.errorMessage,
-                        isSendingMessage = state.isSendingChatMessage,
-                        sendErrorMessage = state.chatSendErrorMessage,
-                        replyTarget = chatComposer.replyTarget,
-                        editTarget = chatComposer.editTarget,
-                        forwardTarget = chatComposer.forwardTarget,
+                        isSendingMessage = composer.isSending,
+                        sendErrorMessage = composer.errorMessage,
+                        replyTarget = composer.replyTarget,
+                        editTarget = composer.editTarget,
+                        forwardTarget = composer.forwardTarget,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         audioPlaybackController = actions.audioPlaybackController,
                         voiceRecorderController = actions.voiceRecorderController,

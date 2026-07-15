@@ -10,8 +10,16 @@ import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
+import com.zyna.app.data.outgoing.OutgoingOutboxFailure
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -19,13 +27,19 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatComposerSendTest {
-    @Test
-    fun blankOrBusySend_isRejectedBeforeIdentifiersAreAllocated() {
-        val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
 
-        assertNull(store.createSendRequest(TARGET, "   ", isSending = false))
-        assertNull(store.createSendRequest(TARGET, "Message", isSending = true))
+    @After
+    fun tearDown() {
+        scope.cancel()
+    }
+
+    @Test
+    fun blankSend_isRejectedBeforeIdentifiersAreAllocated() {
+        val recorder = RecordingSendDriver()
+        val store = store(recorder.driver)
+
+        assertNull(store.createSendRequest(TARGET, "   "))
 
         assertEquals(0, recorder.idCallCount)
         assertEquals(0, recorder.transactionCallCount)
@@ -34,13 +48,12 @@ class ChatComposerSendTest {
     @Test
     fun textRequest_trimsBodyAndCarriesReplyTarget() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         store.selectReply(REPLY)
 
         val request = store.createSendRequest(
             target = TARGET,
-            body = "  Hello  ",
-            isSending = false
+            body = "  Hello  "
         )
 
         assertEquals(
@@ -59,14 +72,13 @@ class ChatComposerSendTest {
     @Test
     fun editRequest_takesPrecedenceOverReplyTarget() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         store.selectReply(REPLY)
         store.selectEdit(EDIT)
 
         val request = store.createSendRequest(
             target = TARGET,
-            body = "  Updated  ",
-            isSending = false
+            body = "  Updated  "
         )
 
         assertEquals(
@@ -84,14 +96,13 @@ class ChatComposerSendTest {
     @Test
     fun textForward_usesForwardBodyAndSuppressesOtherTargets() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         store.selectReply(REPLY)
-        store.enterRoom(TEXT_FORWARD)
+        store.enterRoom(TARGET, TEXT_FORWARD)
 
         val request = store.createSendRequest(
             target = TARGET,
-            body = "Ignored composer body",
-            isSending = false
+            body = "Ignored composer body"
         )
 
         assertEquals(
@@ -110,18 +121,17 @@ class ChatComposerSendTest {
     @Test
     fun imageForward_isAcceptedWithoutTextBody() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val forward = MatrixForwardTarget(
             body = "",
             forwardedFrom = "Alice",
             imageItems = listOf(IMAGE_A)
         )
-        store.enterRoom(forward)
+        store.enterRoom(TARGET, forward)
 
         val request = store.createSendRequest(
             target = TARGET,
-            body = "",
-            isSending = false
+            body = ""
         )
 
         assertEquals(ChatComposerSendRequest.ForwardImages(TARGET, forward), request)
@@ -132,15 +142,14 @@ class ChatComposerSendTest {
     @Test
     fun photoRequest_filtersInvalidItemsAndReservesGroupId() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val draft = photoDraft(
             items = listOf(PHOTO_A.copy(localPath = ""), PHOTO_A)
         )
 
         val request = store.createPhotoSendRequest(
             target = TARGET,
-            draft = draft,
-            isSending = false
+            draft = draft
         )
 
         assertEquals(
@@ -156,22 +165,14 @@ class ChatComposerSendTest {
     }
 
     @Test
-    fun emptyOrBusyPhotoRequest_isRejectedBeforeGroupIdIsAllocated() {
+    fun emptyPhotoRequest_isRejectedBeforeGroupIdIsAllocated() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
 
         assertNull(
             store.createPhotoSendRequest(
                 target = TARGET,
-                draft = photoDraft(items = listOf(PHOTO_A.copy(localPath = ""))),
-                isSending = false
-            )
-        )
-        assertNull(
-            store.createPhotoSendRequest(
-                target = TARGET,
-                draft = photoDraft(items = listOf(PHOTO_A)),
-                isSending = true
+                draft = photoDraft(items = listOf(PHOTO_A.copy(localPath = "")))
             )
         )
 
@@ -180,22 +181,14 @@ class ChatComposerSendTest {
     }
 
     @Test
-    fun blankOrBusyVoiceRequest_isRejectedBeforeIdentifiersAreAllocated() {
+    fun blankVoiceRequest_isRejectedBeforeIdentifiersAreAllocated() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
 
         assertNull(
             store.createVoiceSendRequest(
                 target = TARGET,
-                draft = VOICE.copy(localPath = " "),
-                isSending = false
-            )
-        )
-        assertNull(
-            store.createVoiceSendRequest(
-                target = TARGET,
-                draft = VOICE,
-                isSending = true
+                draft = VOICE.copy(localPath = " ")
             )
         )
 
@@ -206,13 +199,12 @@ class ChatComposerSendTest {
     @Test
     fun voiceRequest_capturesReplyWithoutAllocatingIdentifiers() {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         store.selectReply(REPLY)
 
         val request = store.createVoiceSendRequest(
             target = TARGET,
-            draft = VOICE,
-            isSending = false
+            draft = VOICE
         )
 
         assertEquals(ChatComposerSendRequest.Voice(TARGET, VOICE, REPLY), request)
@@ -221,9 +213,137 @@ class ChatComposerSendTest {
     }
 
     @Test
+    fun acceptedSend_ownsBusyStateAndClearsActiveTargetsAfterEnqueue() {
+        val gate = CompletableDeferred<Unit>()
+        val recorder = RecordingSendDriver(textEnvelopeGate = gate)
+        val store = store(recorder.driver)
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.selectReply(REPLY)
+
+        assertTrue(store.sendText(TARGET, "Message"))
+
+        assertTrue(store.state.value.isSending)
+        assertFalse(store.sendText(TARGET, "Another message"))
+        assertEquals(1, recorder.idCallCount)
+
+        gate.complete(Unit)
+
+        assertFalse(store.state.value.isSending)
+        assertNull(store.state.value.replyTarget)
+        assertNull(store.state.value.errorMessage)
+    }
+
+    @Test
+    fun photoSend_preservesComposerTargetsAfterEnqueue() {
+        val recorder = RecordingSendDriver()
+        val store = store(recorder.driver)
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.selectReply(REPLY)
+
+        assertTrue(
+            store.sendPhotos(
+                target = TARGET,
+                draft = photoDraft(items = listOf(PHOTO_A))
+            )
+        )
+
+        assertFalse(store.state.value.isSending)
+        assertEquals(REPLY, store.state.value.replyTarget)
+        assertEquals(listOf("photo", "kick:new-images:null"), recorder.events)
+    }
+
+    @Test
+    fun voiceSend_runsCleanupAndClearsActiveTargetsAfterEnqueue() {
+        val recorder = RecordingSendDriver()
+        val store = store(recorder.driver)
+        var cleanupCount = 0
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.selectReply(REPLY)
+
+        assertTrue(
+            store.sendVoice(
+                target = TARGET,
+                draft = VOICE,
+                onEnqueued = { cleanupCount += 1 }
+            )
+        )
+
+        assertFalse(store.state.value.isSending)
+        assertNull(store.state.value.replyTarget)
+        assertEquals(1, cleanupCount)
+        assertEquals(listOf("voice", "kick:new-voice:voice:id-1"), recorder.events)
+    }
+
+    @Test
+    fun staleSendCompletion_doesNotMutateReopenedRoom() {
+        val gate = CompletableDeferred<Unit>()
+        val recorder = RecordingSendDriver(textEnvelopeGate = gate)
+        val store = store(recorder.driver)
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.selectReply(REPLY)
+        assertTrue(store.sendText(TARGET, "Message"))
+
+        store.enterRoom(OTHER_TARGET, forwardTarget = null)
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.selectReply(OTHER_REPLY)
+        gate.complete(Unit)
+
+        assertEquals(TARGET.roomId, store.state.value.roomId)
+        assertEquals(OTHER_REPLY, store.state.value.replyTarget)
+        assertFalse(store.state.value.isSending)
+        assertNull(store.state.value.errorMessage)
+    }
+
+    @Test
+    fun deactivatedRoom_doesNotReceiveSendCompletion() {
+        val gate = CompletableDeferred<Unit>()
+        val recorder = RecordingSendDriver(textEnvelopeGate = gate)
+        val store = store(recorder.driver)
+        store.enterRoom(TARGET, forwardTarget = null)
+        assertTrue(store.sendText(TARGET, "Message"))
+
+        store.deactivateRoom()
+        gate.complete(Unit)
+
+        assertEquals(ChatComposerState(), store.state.value)
+        assertEquals(1, recorder.textEnvelopes.size)
+        assertEquals(listOf("text", "kick:new-envelope:text:id-1"), recorder.events)
+    }
+
+    @Test
+    fun sendFailure_isScopedToAcceptedRoomGeneration() {
+        val expected = IllegalStateException("enqueue failed")
+        val recorder = RecordingSendDriver(textEnvelopeError = expected)
+        val store = store(recorder.driver)
+        store.enterRoom(TARGET, forwardTarget = null)
+
+        assertTrue(store.sendText(TARGET, "Message"))
+
+        assertFalse(store.state.value.isSending)
+        assertEquals("enqueue failed", store.state.value.errorMessage)
+    }
+
+    @Test
+    fun outboxFailure_updatesOnlyMatchingActiveRoom() {
+        val failures = MutableSharedFlow<OutgoingOutboxFailure>(extraBufferCapacity = 2)
+        val store = ChatComposerStore(
+            scope = scope,
+            sendDriver = RecordingSendDriver().driver,
+            sendFailures = failures
+        )
+        store.enterRoom(TARGET, forwardTarget = null)
+
+        assertTrue(failures.tryEmit(OutgoingOutboxFailure(OTHER_TARGET.roomId, "Other")))
+        assertNull(store.state.value.errorMessage)
+
+        assertTrue(failures.tryEmit(OutgoingOutboxFailure(TARGET.roomId, "Failed")))
+        assertEquals("Failed", store.state.value.errorMessage)
+    }
+
+    @Test
     fun enqueueText_createsDurableEnvelopeBeforeKickingOutbox() = runBlocking {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val request = ChatComposerSendRequest.Text(
             target = TARGET,
             envelopeId = "text:envelope",
@@ -262,8 +382,8 @@ class ChatComposerSendTest {
             body = "Updated"
         )
 
-        ChatComposerStore(preparedRecorder.driver).enqueue(request)
-        ChatComposerStore(rejectedRecorder.driver).enqueue(request)
+        store(preparedRecorder.driver).enqueue(request)
+        store(rejectedRecorder.driver).enqueue(request)
 
         val expectedEdit = PreparedEdit(TARGET, EDIT, "Updated", "transaction")
         assertEquals(listOf(expectedEdit), preparedRecorder.preparedEdits)
@@ -275,7 +395,7 @@ class ChatComposerSendTest {
     @Test
     fun enqueueImageForward_writesGroupMetadataBeforeSingleKick() = runBlocking {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val layout = MediaGroupLayoutOverride(primarySplitPermille = 620)
         val forward = MatrixForwardTarget(
             body = "",
@@ -312,7 +432,7 @@ class ChatComposerSendTest {
     @Test
     fun enqueueSingleDefaultImage_doesNotWriteGroupMetadata() = runBlocking {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val forward = MatrixForwardTarget(
             body = "",
             forwardedFrom = "Alice",
@@ -331,7 +451,7 @@ class ChatComposerSendTest {
     @Test
     fun enqueuePhotos_writesGroupMetadataBeforeSingleKick() = runBlocking {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val layout = MediaGroupLayoutOverride(primarySplitPermille = 640)
         val draft = photoDraft(
             items = listOf(PHOTO_A, PHOTO_B),
@@ -340,7 +460,7 @@ class ChatComposerSendTest {
             layoutOverride = layout
         )
         val request = requireNotNull(
-            store.createPhotoSendRequest(TARGET, draft, isSending = false)
+            store.createPhotoSendRequest(TARGET, draft)
         )
 
         store.enqueue(request)
@@ -369,12 +489,11 @@ class ChatComposerSendTest {
     @Test
     fun enqueueSingleDefaultPhoto_doesNotWriteGroupMetadata() = runBlocking {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         val request = requireNotNull(
             store.createPhotoSendRequest(
                 target = TARGET,
-                draft = photoDraft(items = listOf(PHOTO_A)),
-                isSending = false
+                draft = photoDraft(items = listOf(PHOTO_A))
             )
         )
 
@@ -387,10 +506,10 @@ class ChatComposerSendTest {
     @Test
     fun enqueueVoice_usesCapturedReplyBeforeKickingOutbox() = runBlocking {
         val recorder = RecordingSendDriver()
-        val store = ChatComposerStore(recorder.driver)
+        val store = store(recorder.driver)
         store.selectReply(REPLY)
         val request = requireNotNull(
-            store.createVoiceSendRequest(TARGET, VOICE, isSending = false)
+            store.createVoiceSendRequest(TARGET, VOICE)
         )
         store.clearReply()
 
@@ -416,11 +535,19 @@ class ChatComposerSendTest {
             userId = "@me:example.org",
             roomId = "!room:example.org"
         )
+        val OTHER_TARGET = ChatComposerSendTarget(
+            userId = "@me:example.org",
+            roomId = "!other:example.org"
+        )
         val REPLY = MatrixReplyInfo(
             eventId = "reply-event",
             senderId = "@alice:example.org",
             senderDisplayName = "Alice",
             body = "Original"
+        )
+        val OTHER_REPLY = REPLY.copy(
+            eventId = "other-reply-event",
+            body = "Other original"
         )
         val EDIT = MatrixEditTarget(
             messageId = "message",
@@ -481,10 +608,16 @@ class ChatComposerSendTest {
             )
         }
     }
+
+    private fun store(driver: ChatComposerSendDriver): ChatComposerStore {
+        return ChatComposerStore(scope, driver)
+    }
 }
 
 private class RecordingSendDriver(
-    private val didPrepareEdit: Boolean = true
+    private val didPrepareEdit: Boolean = true,
+    private val textEnvelopeGate: CompletableDeferred<Unit>? = null,
+    private val textEnvelopeError: Throwable? = null
 ) {
     var idCallCount = 0
         private set
@@ -513,6 +646,8 @@ private class RecordingSendDriver(
         },
         createTextEnvelope = {
                 target, envelopeId, transactionId, body, replyInfo, forwardedFrom ->
+            textEnvelopeGate?.await()
+            textEnvelopeError?.let { throw it }
             textEnvelopes += TextEnvelope(
                 target,
                 envelopeId,

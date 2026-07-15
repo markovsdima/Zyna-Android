@@ -134,8 +134,6 @@ data class AppUiState(
     val logoutErrorMessage: String? = null,
     val logoutConfirmation: LogoutConfirmationState? = null,
     val sessionSecurity: MatrixSessionSecurityState = MatrixSessionSecurityState(),
-    val isSendingChatMessage: Boolean = false,
-    val chatSendErrorMessage: String? = null,
     val chatCallBanner: ChatCallBannerState? = null
 ) {
     val route: AppRoute
@@ -240,6 +238,7 @@ class AppViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     private val chatComposerStore = createChatComposerStore(
+        scope = viewModelScope,
         matrixClientService = matrixClientService,
         localCacheRepository = localCacheRepository,
         outgoingOutboxService = outgoingOutboxService
@@ -382,7 +381,7 @@ class AppViewModel(
 
                 when {
                     shouldClearSessionData -> chatComposerStore.clearAll()
-                    shouldClearChat -> chatComposerStore.clearActiveTargets()
+                    shouldClearChat -> chatComposerStore.deactivateRoom()
                 }
 
                 _uiState.update { current ->
@@ -463,8 +462,6 @@ class AppViewModel(
                         } else {
                             current.logoutConfirmation
                         },
-                        isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
-                        chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
                         chatCallBanner = if (shouldClearChat) null else current.chatCallBanner
                     )
                 }
@@ -533,16 +530,6 @@ class AppViewModel(
                         startRoomListLiveRefresh(userId)
                         launchRoomRefresh(showRefreshing = true)
                     }
-                }
-            }
-        }
-
-        viewModelScope.launch {
-            outgoingOutboxService.sendFailures.collect { failure ->
-                _uiState.update {
-                    if (!it.isRouteForRoom(failure.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = failure.message)
                 }
             }
         }
@@ -844,10 +831,13 @@ class AppViewModel(
         ZynaPerfLog.end(storeStart, "openRoom.createStore") { "roomId=${room.id}" }
 
         val routeUpdateStart = ZynaPerfLog.start()
-        val target = ChatTimelineTarget(userId = userId, roomId = room.id)
+        val timelineTarget = ChatTimelineTarget(userId = userId, roomId = room.id)
         if (_uiState.value.matrixState.userIdOrNull() == userId) {
-            chatComposerStore.enterRoom(forwardTarget)
-            chatTimelineStore.prepareRoom(target)
+            chatComposerStore.enterRoom(
+                target = ChatComposerSendTarget(userId = userId, roomId = room.id),
+                forwardTarget = forwardTarget
+            )
+            chatTimelineStore.prepareRoom(timelineTarget)
         }
         _uiState.update {
             if (it.matrixState.userIdOrNull() != userId) {
@@ -886,7 +876,7 @@ class AppViewModel(
             }
 
             val stateUpdateStart = ZynaPerfLog.start()
-            chatTimelineStore.applyInitialSnapshot(target, initialMessages)
+            chatTimelineStore.applyInitialSnapshot(timelineTarget, initialMessages)
             ZynaPerfLog.end(
                 stateUpdateStart,
                 "openRoom.stateUpdate"
@@ -934,8 +924,6 @@ class AppViewModel(
         _uiState.update {
             it.copy(
                 navState = it.navState.closeChat(),
-                isSendingChatMessage = false,
-                chatSendErrorMessage = null,
                 chatCallBanner = null,
                 pendingNativeMatrixRtcCallLaunch = null
             )
@@ -1602,97 +1590,20 @@ class AppViewModel(
         val state = _uiState.value
         val route = state.activeChatRoute ?: return false
         val userId = state.matrixState.userIdOrNull() ?: return false
-        val request = chatComposerStore.createSendRequest(
+        return chatComposerStore.sendText(
             target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
-            body = body,
-            isSending = state.isSendingChatMessage
-        ) ?: return false
-
-        _uiState.update {
-            if (!it.isRouteForRoom(route.roomId)) {
-                it
-            } else it.copy(
-                isSendingChatMessage = true,
-                chatSendErrorMessage = null
-            )
-        }
-
-        viewModelScope.launch {
-            try {
-                chatComposerStore.enqueue(request)
-                if (_uiState.value.isRouteForRoom(route.roomId)) {
-                    chatComposerStore.clearActiveTargets()
-                }
-                _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
-                        it
-                    } else it.copy(
-                        isSendingChatMessage = false,
-                        chatSendErrorMessage = null
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
-                        it
-                    } else it.copy(
-                        isSendingChatMessage = false,
-                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
-                    )
-                }
-            }
-        }
-
-        return true
+            body = body
+        )
     }
 
     fun sendPhotoMessages(draft: OutgoingPhotoDraft): Boolean {
         val state = _uiState.value
         val route = state.activeChatRoute ?: return false
         val userId = state.matrixState.userIdOrNull() ?: return false
-        val request = chatComposerStore.createPhotoSendRequest(
+        return chatComposerStore.sendPhotos(
             target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
-            draft = draft,
-            isSending = state.isSendingChatMessage
-        ) ?: return false
-
-        _uiState.update {
-            if (!it.isRouteForRoom(route.roomId)) {
-                it
-            } else it.copy(
-                isSendingChatMessage = true,
-                chatSendErrorMessage = null
-            )
-        }
-
-        viewModelScope.launch {
-            try {
-                chatComposerStore.enqueue(request)
-                _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
-                        it
-                    } else it.copy(
-                        isSendingChatMessage = false,
-                        chatSendErrorMessage = null
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
-                        it
-                    } else it.copy(
-                        isSendingChatMessage = false,
-                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
-                    )
-                }
-            }
-        }
-
-        return true
+            draft = draft
+        )
     }
 
     fun sendVoiceMessage(
@@ -1702,51 +1613,11 @@ class AppViewModel(
         val state = _uiState.value
         val route = state.activeChatRoute ?: return false
         val userId = state.matrixState.userIdOrNull() ?: return false
-        val request = chatComposerStore.createVoiceSendRequest(
+        return chatComposerStore.sendVoice(
             target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
             draft = draft,
-            isSending = state.isSendingChatMessage
-        ) ?: return false
-
-        _uiState.update {
-            if (!it.isRouteForRoom(route.roomId)) {
-                it
-            } else it.copy(
-                isSendingChatMessage = true,
-                chatSendErrorMessage = null
-            )
-        }
-
-        viewModelScope.launch {
-            try {
-                chatComposerStore.enqueue(request)
-                onEnqueued()
-                if (_uiState.value.isRouteForRoom(route.roomId)) {
-                    chatComposerStore.clearActiveTargets()
-                }
-                _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
-                        it
-                    } else it.copy(
-                        isSendingChatMessage = false,
-                        chatSendErrorMessage = null
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(route.roomId)) {
-                        it
-                    } else it.copy(
-                        isSendingChatMessage = false,
-                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
-                    )
-                }
-            }
-        }
-
-        return true
+            onEnqueued = onEnqueued
+        )
     }
 
     fun toggleReaction(messageId: String, reactionKey: String) {
@@ -1844,21 +1715,22 @@ class AppViewModel(
                     ChatMessageActionResult.COMPLETED -> Unit
                     ChatMessageActionResult.NOT_APPLIED -> return@launch
                 }
-                _uiState.update {
-                    if (!it.isRouteForRoom(request.target.userId, request.target.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = null)
-                }
+                chatComposerStore.clearError(
+                    ChatComposerSendTarget(
+                        userId = request.target.userId,
+                        roomId = request.target.roomId
+                    )
+                )
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(request.target.userId, request.target.roomId)) {
-                        it
-                    } else it.copy(
-                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
-                    )
-                }
+                chatComposerStore.reportError(
+                    target = ChatComposerSendTarget(
+                        userId = request.target.userId,
+                        roomId = request.target.roomId
+                    ),
+                    message = error.message ?: error.javaClass.simpleName
+                )
             }
         }
     }
@@ -1896,11 +1768,10 @@ class AppViewModel(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
-                }
+                chatComposerStore.reportError(
+                    target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
+                    message = error.message ?: error.javaClass.simpleName
+                )
             }
         }
     }
@@ -1963,13 +1834,9 @@ class AppViewModel(
         }
 
         if (chatTimelineStore.jumpToEvent(target, normalizedEventId)) {
-            _uiState.update {
-                if (it.isRouteForRoom(userId, route.roomId)) {
-                    it.copy(chatSendErrorMessage = null)
-                } else {
-                    it
-                }
-            }
+            chatComposerStore.clearError(
+                ChatComposerSendTarget(userId = userId, roomId = route.roomId)
+            )
             chatReadReceiptCoordinator.reset()
         } else {
             logTeleport("jump abort unavailable target=${normalizedEventId.shortLogId()}")
@@ -1990,13 +1857,9 @@ class AppViewModel(
         }
 
         if (chatTimelineStore.jumpToLiveEdge(target)) {
-            _uiState.update {
-                if (it.isRouteForRoom(userId, route.roomId)) {
-                    it.copy(chatSendErrorMessage = null)
-                } else {
-                    it
-                }
-            }
+            chatComposerStore.clearError(
+                ChatComposerSendTarget(userId = userId, roomId = route.roomId)
+            )
             chatReadReceiptCoordinator.reset()
         } else {
             logTeleport("live abort unavailable")
@@ -2388,8 +2251,6 @@ class AppViewModel(
                 roomId = room.id,
                 displayName = room.displayName
             ),
-            isSendingChatMessage = false,
-            chatSendErrorMessage = null,
             chatCallBanner = null
         )
     }

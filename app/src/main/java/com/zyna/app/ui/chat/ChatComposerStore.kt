@@ -13,20 +13,29 @@ import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupInfo
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.ZynaMessageAttributes
+import com.zyna.app.data.outgoing.OutgoingOutboxFailure
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
 
 data class ChatComposerState(
+    val roomId: String? = null,
     val replyTarget: MatrixReplyInfo? = null,
     val editTarget: MatrixEditTarget? = null,
     val forwardTarget: MatrixForwardTarget? = null,
-    val pendingForwardTarget: MatrixForwardTarget? = null
+    val pendingForwardTarget: MatrixForwardTarget? = null,
+    val isSending: Boolean = false,
+    val errorMessage: String? = null
 )
 
 internal data class ChatComposerSendTarget(
@@ -118,11 +127,14 @@ internal class ChatComposerSendDriver(
  * Owns target selection and durable enqueue rules for the chat composer.
  *
  * Target selection and request creation are main-thread confined. [state] is
- * the single source of truth projected into AppUiState by AppViewModel.
- * Durable enqueue may suspend, but does not mutate state.
+ * the single source of truth rendered by the active chat. [scope] must dispatch
+ * onto the same main thread from which public methods are called. Durable
+ * enqueue survives room changes, while its UI completion is generation-guarded.
  */
 internal class ChatComposerStore(
+    private val scope: CoroutineScope,
     private val sendDriver: ChatComposerSendDriver,
+    sendFailures: Flow<OutgoingOutboxFailure> = emptyFlow(),
     initialState: ChatComposerState = ChatComposerState()
 ) {
     private val _state = MutableStateFlow(initialState)
@@ -130,6 +142,20 @@ internal class ChatComposerStore(
 
     private val currentState: ChatComposerState
         get() = _state.value
+
+    private var activeTarget: ChatComposerSendTarget? = null
+    private var roomGeneration = 0L
+
+    init {
+        scope.launch {
+            sendFailures.collect { failure ->
+                val target = activeTarget
+                if (target?.roomId == failure.roomId) {
+                    setState(currentState.copy(errorMessage = failure.message))
+                }
+            }
+        }
+    }
 
     @MainThread
     fun selectReply(target: MatrixReplyInfo): ChatComposerState? {
@@ -171,8 +197,7 @@ internal class ChatComposerStore(
     @MainThread
     fun createSendRequest(
         target: ChatComposerSendTarget,
-        body: String,
-        isSending: Boolean
+        body: String
     ): ChatComposerSendRequest? {
         val forwardTarget = currentState.forwardTarget
         val isForwardingMedia = forwardTarget?.imageItems?.isNotEmpty() == true
@@ -181,7 +206,7 @@ internal class ChatComposerStore(
         } else {
             forwardTarget?.body?.trim() ?: body.trim()
         }
-        if (text.isEmpty() || isSending) {
+        if (text.isEmpty() || currentState.isSending) {
             return null
         }
 
@@ -214,11 +239,10 @@ internal class ChatComposerStore(
     @MainThread
     fun createPhotoSendRequest(
         target: ChatComposerSendTarget,
-        draft: OutgoingPhotoDraft,
-        isSending: Boolean
+        draft: OutgoingPhotoDraft
     ): ChatComposerSendRequest.Photos? {
         val items = draft.items.filter { it.localPath.isNotBlank() }
-        if (items.isEmpty() || isSending) {
+        if (items.isEmpty() || currentState.isSending) {
             return null
         }
         return ChatComposerSendRequest.Photos(
@@ -231,10 +255,9 @@ internal class ChatComposerStore(
     @MainThread
     fun createVoiceSendRequest(
         target: ChatComposerSendTarget,
-        draft: OutgoingVoiceDraft,
-        isSending: Boolean
+        draft: OutgoingVoiceDraft
     ): ChatComposerSendRequest.Voice? {
-        if (draft.localPath.isBlank() || isSending) {
+        if (draft.localPath.isBlank() || currentState.isSending) {
             return null
         }
         return ChatComposerSendRequest.Voice(
@@ -255,13 +278,65 @@ internal class ChatComposerStore(
     }
 
     @MainThread
+    fun sendText(target: ChatComposerSendTarget, body: String): Boolean {
+        if (activeTarget != target) {
+            return false
+        }
+        val request = createSendRequest(target, body) ?: return false
+        return launchSend(
+            request = request,
+            clearActiveTargetsOnSuccess = true
+        )
+    }
+
+    @MainThread
+    fun sendPhotos(
+        target: ChatComposerSendTarget,
+        draft: OutgoingPhotoDraft
+    ): Boolean {
+        if (activeTarget != target) {
+            return false
+        }
+        val request = createPhotoSendRequest(target, draft) ?: return false
+        return launchSend(
+            request = request,
+            clearActiveTargetsOnSuccess = false
+        )
+    }
+
+    @MainThread
+    fun sendVoice(
+        target: ChatComposerSendTarget,
+        draft: OutgoingVoiceDraft,
+        onEnqueued: () -> Unit = {}
+    ): Boolean {
+        if (activeTarget != target) {
+            return false
+        }
+        val request = createVoiceSendRequest(target, draft) ?: return false
+        return launchSend(
+            request = request,
+            clearActiveTargetsOnSuccess = true,
+            onEnqueued = onEnqueued
+        )
+    }
+
+    @MainThread
     fun cancelForwardPicker(): ChatComposerState {
         return currentState.copy(pendingForwardTarget = null).also(::setState)
     }
 
     @MainThread
-    fun enterRoom(forwardTarget: MatrixForwardTarget?): ChatComposerState {
-        return ChatComposerState(forwardTarget = forwardTarget).also(::setState)
+    fun enterRoom(
+        target: ChatComposerSendTarget,
+        forwardTarget: MatrixForwardTarget?
+    ): ChatComposerState {
+        roomGeneration += 1
+        activeTarget = target
+        return ChatComposerState(
+            roomId = target.roomId,
+            forwardTarget = forwardTarget
+        ).also(::setState)
     }
 
     @MainThread
@@ -289,8 +364,98 @@ internal class ChatComposerStore(
     }
 
     @MainThread
+    fun deactivateRoom(): ChatComposerState {
+        roomGeneration += 1
+        activeTarget = null
+        return ChatComposerState(
+            pendingForwardTarget = currentState.pendingForwardTarget
+        ).also(::setState)
+    }
+
+    @MainThread
     fun clearAll(): ChatComposerState {
+        roomGeneration += 1
+        activeTarget = null
         return ChatComposerState().also(::setState)
+    }
+
+    @MainThread
+    fun clearError(target: ChatComposerSendTarget) {
+        if (activeTarget == target && currentState.errorMessage != null) {
+            setState(currentState.copy(errorMessage = null))
+        }
+    }
+
+    @MainThread
+    fun reportError(target: ChatComposerSendTarget, message: String) {
+        if (activeTarget == target) {
+            setState(currentState.copy(errorMessage = message))
+        }
+    }
+
+    private fun launchSend(
+        request: ChatComposerSendRequest,
+        clearActiveTargetsOnSuccess: Boolean,
+        onEnqueued: () -> Unit = {}
+    ): Boolean {
+        val target = request.target
+        if (activeTarget != target || currentState.isSending) {
+            return false
+        }
+        val generation = roomGeneration
+        setState(
+            currentState.copy(
+                isSending = true,
+                errorMessage = null
+            )
+        )
+        scope.launch {
+            try {
+                enqueue(request)
+                onEnqueued()
+                updateActiveRoom(target, generation) { state ->
+                    state.copy(
+                        replyTarget = if (clearActiveTargetsOnSuccess) {
+                            null
+                        } else {
+                            state.replyTarget
+                        },
+                        editTarget = if (clearActiveTargetsOnSuccess) {
+                            null
+                        } else {
+                            state.editTarget
+                        },
+                        forwardTarget = if (clearActiveTargetsOnSuccess) {
+                            null
+                        } else {
+                            state.forwardTarget
+                        },
+                        isSending = false,
+                        errorMessage = null
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                updateActiveRoom(target, generation) { state ->
+                    state.copy(
+                        isSending = false,
+                        errorMessage = error.message ?: error.javaClass.simpleName
+                    )
+                }
+            }
+        }
+        return true
+    }
+
+    private inline fun updateActiveRoom(
+        target: ChatComposerSendTarget,
+        generation: Long,
+        transform: (ChatComposerState) -> ChatComposerState
+    ) {
+        if (activeTarget == target && roomGeneration == generation) {
+            setState(transform(currentState))
+        }
     }
 
     private suspend fun enqueueText(request: ChatComposerSendRequest.Text) {
@@ -421,12 +586,14 @@ internal class ChatComposerStore(
 }
 
 internal fun createChatComposerStore(
+    scope: CoroutineScope,
     matrixClientService: MatrixClientService,
     localCacheRepository: LocalCacheRepository,
     outgoingOutboxService: OutgoingOutboxService,
     nextId: () -> String = { UUID.randomUUID().toString() }
 ): ChatComposerStore {
     return ChatComposerStore(
+        scope = scope,
         sendDriver = ChatComposerSendDriver(
             nextId = nextId,
             prepareTransactionId = matrixClientService::prepareTransactionId,
@@ -508,6 +675,7 @@ internal fun createChatComposerStore(
                 )
             },
             kickOutbox = outgoingOutboxService::kick
-        )
+        ),
+        sendFailures = outgoingOutboxService.sendFailures
     )
 }

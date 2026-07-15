@@ -28,6 +28,7 @@ import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.CallsScreenView
 import com.zyna.app.ui.calls.CallsScreenViewActions
 import com.zyna.app.ui.calls.CallsScreenViewState
+import com.zyna.app.ui.chat.ChatCallInfoState
 import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
@@ -95,6 +96,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var latestChatComposer: ChatComposerState? = null
     private var latestCallHistory: CallHistoryState? = null
     private var latestChatTimeline: ChatTimelineState? = null
+    private var latestChatCallInfo: ChatCallInfoState? = null
     private var latestActions: ZynaAppActions? = null
     private var latestPreferences: ZynaRootPreferences? = null
     private var renderSequence = 0L
@@ -216,6 +218,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         chatComposer: ChatComposerState,
         callHistory: CallHistoryState,
         chatTimeline: ChatTimelineState,
+        chatCallInfo: ChatCallInfoState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ) {
@@ -230,6 +233,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         latestChatComposer = chatComposer
         latestCallHistory = callHistory
         latestChatTimeline = chatTimeline
+        latestChatCallInfo = chatCallInfo
         latestActions = actions
         latestPreferences = preferences
 
@@ -547,6 +551,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val chatComposer = latestChatComposer ?: return
         val callHistory = latestCallHistory ?: return
         val chatTimeline = latestChatTimeline ?: return
+        val chatCallInfo = latestChatCallInfo ?: return
         val actions = latestActions ?: return
         val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
@@ -558,6 +563,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             chatComposer,
             callHistory,
             chatTimeline,
+            chatCallInfo,
             actions,
             preferences
         )
@@ -658,6 +664,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         chatComposer: ChatComposerState,
         callHistory: CallHistoryState,
         chatTimeline: ChatTimelineState,
+        chatCallInfo: ChatCallInfoState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
@@ -694,6 +701,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state,
                     chatComposer,
                     chatTimeline,
+                    chatCallInfo,
                     actions,
                     preferences,
                     route
@@ -1045,6 +1053,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         chatComposer: ChatComposerState,
         chatTimeline: ChatTimelineState,
+        chatCallInfo: ChatCallInfoState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences,
         route: AppRoute.Chat
@@ -1057,6 +1066,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             )
         val composer = chatComposer.takeIf { it.roomId == route.roomId }
             ?: ChatComposerState(roomId = route.roomId)
+        val callInfo = chatCallInfo.takeIf { it.roomId == route.roomId }
+            ?: ChatCallInfoState(roomId = route.roomId)
         return ZynaScreenEntry(
             key = "chat:${route.roomId}",
             rootGlassOwnerKey = chatGlassOwnerKey(),
@@ -1105,7 +1116,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         audioPlaybackController = actions.audioPlaybackController,
                         voiceRecorderController = actions.voiceRecorderController,
                         jumpTargetEventId = timeline.jumpTargetEventId,
-                        callBanner = state.chatCallBanner,
+                        callBanner = callInfo.banner,
                         chatBubbleTheme = preferences.chatBubbleTheme
                     ),
                     actions = ChatScreenViewActions(

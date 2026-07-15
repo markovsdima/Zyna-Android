@@ -338,27 +338,54 @@ internal fun createChatCallInfoCoordinator(
     scope: CoroutineScope,
     matrixClientService: MatrixClientService,
     nativeMatrixRtcCallService: NativeMatrixRtcCallService,
-    onCallInfo: (ChatCallInfoTarget, MatrixRoomCallInfo) -> Unit,
     onObservationError: (ChatCallInfoTarget, Throwable) -> Unit,
     onWarning: (String, Throwable) -> Unit,
     onLog: (String) -> Unit
 ): ChatCallInfoCoordinator {
-    val observerSession = ChatCallInfoObserverSession(
-        driver = ChatCallInfoObserverDriver(
-            roomCallInfoUpdates = matrixClientService::roomCallInfoUpdates,
-            nativeCallStateUpdates = nativeMatrixRtcCallService.state.map { Unit },
-            incomingCallNotifications = matrixClientService.incomingMatrixRtcCallNotifications,
-            loadRoomCallInfo = matrixClientService::loadRoomCallInfo,
-            hasActiveMembership = matrixClientService::hasActiveMatrixRtcMembership
-        ),
-        onCallInfo = onCallInfo,
-        onObservationError = onObservationError,
-        onWarning = onWarning,
-        onLog = onLog
+    val observerDriver = ChatCallInfoObserverDriver(
+        roomCallInfoUpdates = matrixClientService::roomCallInfoUpdates,
+        nativeCallStateUpdates = nativeMatrixRtcCallService.state.map { Unit },
+        incomingCallNotifications = matrixClientService.incomingMatrixRtcCallNotifications,
+        loadRoomCallInfo = matrixClientService::loadRoomCallInfo,
+        hasActiveMembership = matrixClientService::hasActiveMatrixRtcMembership
     )
     return ChatCallInfoCoordinator(
         scope = scope,
-        observeTarget = observerSession::observe,
+        observeTarget = { target, onCallInfo, onError ->
+            ChatCallInfoObserverSession(
+                driver = observerDriver,
+                onCallInfo = { observedTarget, callInfo ->
+                    if (observedTarget == target) {
+                        onCallInfo(callInfo)
+                    }
+                },
+                onObservationError = { observedTarget, error ->
+                    if (observedTarget == target) {
+                        onError(error)
+                    }
+                },
+                onWarning = onWarning,
+                onLog = onLog
+            ).observe(target)
+        },
+        projectBanner = { target, callInfo ->
+            val localCallRoomId = nativeMatrixRtcCallService.currentRoomId()
+            ChatCallBannerPolicy.projectBanner(
+                roomId = target.roomId,
+                localCallRoomId = localCallRoomId,
+                callInfo = callInfo
+            ).also { banner ->
+                onLog(
+                    "chatCallBanner roomId=${target.roomId} " +
+                        "localCallRoomId=$localCallRoomId " +
+                        "hasRoomCall=${callInfo.hasRoomCall} " +
+                        "isAudioCall=${callInfo.isAudioCall} " +
+                        "participants=${callInfo.activeParticipantCount} " +
+                        "banner=${banner?.actionLabel ?: "null"}"
+                )
+            }
+        },
+        onObservationError = onObservationError,
         onLog = onLog
     )
 }

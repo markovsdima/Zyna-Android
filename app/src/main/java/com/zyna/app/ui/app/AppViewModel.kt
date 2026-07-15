@@ -19,7 +19,6 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixOwnProfile
-import com.zyna.app.data.matrix.MatrixRoomCallInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.outgoing.OutgoingOutboxService
@@ -33,8 +32,7 @@ import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
-import com.zyna.app.ui.chat.ChatCallBannerPolicy
-import com.zyna.app.ui.chat.ChatCallBannerState
+import com.zyna.app.ui.chat.ChatCallInfoState
 import com.zyna.app.ui.chat.ChatCallInfoTarget
 import com.zyna.app.ui.chat.ChatMessageActionRequest
 import com.zyna.app.ui.chat.ChatMessageActionResult
@@ -132,8 +130,7 @@ data class AppUiState(
     val isLoggingOut: Boolean = false,
     val logoutErrorMessage: String? = null,
     val logoutConfirmation: LogoutConfirmationState? = null,
-    val sessionSecurity: MatrixSessionSecurityState = MatrixSessionSecurityState(),
-    val chatCallBanner: ChatCallBannerState? = null
+    val sessionSecurity: MatrixSessionSecurityState = MatrixSessionSecurityState()
 ) {
     val route: AppRoute
         get() = navState.top
@@ -288,15 +285,13 @@ class AppViewModel(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
         nativeMatrixRtcCallService = nativeMatrixRtcCallService,
-        onCallInfo = { target, callInfo ->
-            updateChatCallBanner(target.userId, target.roomId, callInfo)
-        },
-        onObservationError = { target, error ->
-            failChatCallInfoObservation(target, error)
+        onObservationError = { _, error ->
+            Log.w(TAG, "Failed to observe MatrixRTC room call info", error)
         },
         onWarning = { message, error -> Log.w(TAG, message, error) },
         onLog = ::logChatCall
     )
+    val chatCallInfoState: StateFlow<ChatCallInfoState> = chatCallInfoCoordinator.state
     private var visibleRoomRefreshRequestCount = 0
     private var roomCacheJob: Job? = null
     private var roomListLiveJob: Job? = null
@@ -462,8 +457,7 @@ class AppViewModel(
                             null
                         } else {
                             current.logoutConfirmation
-                        },
-                        chatCallBanner = if (shouldClearChat) null else current.chatCallBanner
+                        }
                     )
                 }
 
@@ -860,7 +854,6 @@ class AppViewModel(
         _uiState.update {
             it.copy(
                 navState = it.navState.closeChat(),
-                chatCallBanner = null,
                 pendingNativeMatrixRtcCallLaunch = null
             )
         }
@@ -1984,53 +1977,8 @@ class AppViewModel(
 
     private fun stopChatTimeline() {
         chatTimelineStore.deactivate()
-        clearChatCallInfoObserver()
-        chatReadReceiptCoordinator.reset()
-    }
-
-    private fun clearChatCallInfoObserver() {
         chatCallInfoCoordinator.clear()
-        _uiState.update { it.copy(chatCallBanner = null) }
-    }
-
-    private fun failChatCallInfoObservation(
-        target: ChatCallInfoTarget,
-        error: Throwable
-    ) {
-        Log.w(TAG, "Failed to observe MatrixRTC room call info", error)
-        _uiState.update {
-            if (it.isRouteForRoom(target.userId, target.roomId)) {
-                it.copy(chatCallBanner = null)
-            } else {
-                it
-            }
-        }
-    }
-
-    private fun updateChatCallBanner(
-        userId: String,
-        roomId: String,
-        callInfo: MatrixRoomCallInfo
-    ) {
-        val localCallRoomId = nativeMatrixRtcCallService.currentRoomId()
-        val banner = ChatCallBannerPolicy.projectBanner(
-            roomId = roomId,
-            localCallRoomId = localCallRoomId,
-            callInfo = callInfo
-        )
-        logChatCall(
-            "chatCallBanner roomId=$roomId localCallRoomId=$localCallRoomId " +
-                "hasRoomCall=${callInfo.hasRoomCall} isAudioCall=${callInfo.isAudioCall} " +
-                "participants=${callInfo.activeParticipantCount} " +
-                "banner=${banner?.actionLabel ?: "null"}"
-        )
-        _uiState.update {
-            if (!it.isRouteForRoom(userId, roomId)) {
-                it
-            } else {
-                it.copy(chatCallBanner = banner)
-            }
-        }
+        chatReadReceiptCoordinator.reset()
     }
 
     private fun startRoomCache(userId: String) {
@@ -2165,8 +2113,7 @@ class AppViewModel(
             navState = navState.openChat(
                 roomId = room.id,
                 displayName = room.displayName
-            ),
-            chatCallBanner = null
+            )
         )
     }
 

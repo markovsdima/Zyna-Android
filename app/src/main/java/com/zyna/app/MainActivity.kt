@@ -48,6 +48,7 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallController
 import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
 import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
+import com.zyna.app.ui.chat.ChatCallInfoState
 import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatTimelineState
 import com.zyna.app.ui.glass.GlassInputBarView
@@ -71,7 +72,8 @@ class MainActivity : AppCompatActivity() {
         val state: AppUiState,
         val chatComposer: ChatComposerState,
         val callHistory: CallHistoryState,
-        val chatTimeline: ChatTimelineState
+        val chatTimeline: ChatTimelineState,
+        val chatCallInfo: ChatCallInfoState
     )
 
     private data class RootRenderInput(
@@ -79,6 +81,7 @@ class MainActivity : AppCompatActivity() {
         val chatComposer: ChatComposerState,
         val callHistory: CallHistoryState,
         val chatTimeline: ChatTimelineState,
+        val chatCallInfo: ChatCallInfoState,
         val preferences: ZynaRootPreferences
     )
 
@@ -332,13 +335,15 @@ class MainActivity : AppCompatActivity() {
                         appViewModel.uiState,
                         appViewModel.chatComposerState,
                         appViewModel.callHistoryState,
-                        appViewModel.chatTimelineState
-                    ) { state, chatComposer, callHistory, chatTimeline ->
+                        appViewModel.chatTimelineState,
+                        appViewModel.chatCallInfoState
+                    ) { state, chatComposer, callHistory, chatTimeline, chatCallInfo ->
                         RootFeatureInput(
                             state = state,
                             chatComposer = chatComposer,
                             callHistory = callHistory,
-                            chatTimeline = chatTimeline
+                            chatTimeline = chatTimeline,
+                            chatCallInfo = chatCallInfo
                         )
                     },
                     appContainer.chatBubbleThemeStore.selectedTheme,
@@ -350,6 +355,7 @@ class MainActivity : AppCompatActivity() {
                         chatComposer = feature.chatComposer,
                         callHistory = feature.callHistory,
                         chatTimeline = feature.chatTimeline,
+                        chatCallInfo = feature.chatCallInfo,
                         preferences = ZynaRootPreferences(
                             chatBubbleTheme = chatBubbleTheme,
                             appThemeMode = appThemeMode,
@@ -374,6 +380,7 @@ class MainActivity : AppCompatActivity() {
                         chatComposer = input.chatComposer,
                         callHistory = input.callHistory,
                         chatTimeline = input.chatTimeline,
+                        chatCallInfo = input.chatCallInfo,
                         actions = actions,
                         preferences = input.preferences
                     )

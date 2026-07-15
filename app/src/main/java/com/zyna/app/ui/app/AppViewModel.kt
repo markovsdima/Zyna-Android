@@ -42,6 +42,7 @@ import com.zyna.app.data.security.MatrixSessionSecurityAction
 import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
+import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
@@ -249,11 +250,6 @@ data class ChatCallBannerState(
     val remoteMembershipCount: Int = 0
 )
 
-private data class VisibleReadReceiptTarget(
-    val roomId: String,
-    val eventId: String
-)
-
 private data class ChatMatrixRtcRingOverride(
     val eventId: String,
     val senderId: String,
@@ -266,18 +262,6 @@ private data class ChatCallInfoSnapshot(
     val observed: MatrixRoomCallInfo,
     val ringOverride: ChatMatrixRtcRingOverride?
 )
-
-private sealed interface PendingReadReceiptSend {
-    val target: VisibleReadReceiptTarget
-
-    data class Bootstrap(
-        override val target: VisibleReadReceiptTarget
-    ) : PendingReadReceiptSend
-
-    data class Advance(
-        override val target: VisibleReadReceiptTarget
-    ) : PendingReadReceiptSend
-}
 
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
@@ -292,6 +276,19 @@ class AppViewModel(
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
     }
+    private val chatReadReceiptCoordinator = ChatReadReceiptCoordinator(
+        scope = viewModelScope,
+        messageIndex = { eventId ->
+            _uiState.value.chatMessages.indexOfFirst { it.eventId == eventId }
+                .takeIf { it >= 0 }
+        },
+        sendReadReceipt = { roomId, eventId ->
+            matrixClientService.sendReadReceipt(roomId, eventId)
+        },
+        onSendFailure = { error ->
+            Log.w(TAG, "Failed to send read receipt", error)
+        }
+    )
     private var visibleRoomRefreshRequestCount = 0
     private var chatTimelineJob: Job? = null
     private var chatPaginationJob: Job? = null
@@ -317,9 +314,6 @@ class AppViewModel(
     private var contactActionJob: Job? = null
     private var contactActionGeneration = 0L
     private var pendingNativeMatrixRtcCallLaunchCounter = 0L
-    private var readReceiptJob: Job? = null
-    private var readReceiptBaselineTarget: VisibleReadReceiptTarget? = null
-    private var pendingReadReceiptSend: PendingReadReceiptSend? = null
     private val externalRouteCoordinator = ExternalRouteCoordinator()
     private var chatCallInfoJob: Job? = null
     private var chatCallInfoUserId: String? = null
@@ -2478,7 +2472,7 @@ class AppViewModel(
                     chatJumpTargetEventId = normalizedEventId
                 )
             }
-            resetReadReceiptTracking()
+            chatReadReceiptCoordinator.reset()
             return
         }
 
@@ -2491,7 +2485,7 @@ class AppViewModel(
                 chatJumpTargetEventId = normalizedEventId
             )
         }
-        resetReadReceiptTracking()
+        chatReadReceiptCoordinator.reset()
 
         chatPaginationJob = viewModelScope.launch {
             var hasReachedStart = false
@@ -2618,7 +2612,7 @@ class AppViewModel(
                 chatScrollToLiveEdgeRequested = true
             )
         }
-        resetReadReceiptTracking()
+        chatReadReceiptCoordinator.reset()
 
         chatPaginationJob = viewModelScope.launch {
             try {
@@ -2672,50 +2666,11 @@ class AppViewModel(
         eventId: String?,
         canEstablishBaseline: Boolean
     ) {
-        val route = _uiState.value.activeChatRoute ?: return
-        if (route.roomId != roomId) {
-            return
-        }
-        if (eventId.isNullOrBlank()) {
-            readReceiptJob?.cancel()
-            readReceiptJob = null
-            pendingReadReceiptSend = null
-            return
-        }
-
-        val target = VisibleReadReceiptTarget(
+        chatReadReceiptCoordinator.updateVisibleCandidate(
+            activeRoomId = _uiState.value.activeChatRoute?.roomId,
             roomId = roomId,
-            eventId = eventId
-        )
-
-        if (readReceiptBaselineTarget == null) {
-            if (!canEstablishBaseline) {
-                return
-            }
-            val pendingBootstrap = PendingReadReceiptSend.Bootstrap(target)
-            if (pendingReadReceiptSend == pendingBootstrap) {
-                return
-            }
-
-            scheduleReadReceiptSend(
-                target = target,
-                pending = pendingBootstrap
-            )
-            return
-        }
-
-        if (!shouldAdvanceReadReceipt(target = target)) {
-            return
-        }
-
-        val pendingAdvance = PendingReadReceiptSend.Advance(target)
-        if (pendingReadReceiptSend == pendingAdvance) {
-            return
-        }
-
-        scheduleReadReceiptSend(
-            target = target,
-            pending = pendingAdvance
+            eventId = eventId,
+            canEstablishBaseline = canEstablishBaseline
         )
     }
 
@@ -3013,7 +2968,7 @@ class AppViewModel(
         chatPaginationJob?.cancel()
         chatPaginationJob = null
         clearChatCallInfoObserver()
-        resetReadReceiptTracking()
+        chatReadReceiptCoordinator.reset()
     }
 
     private fun startChatCallInfoObserver(userId: String, roomId: String) {
@@ -3428,113 +3383,6 @@ class AppViewModel(
         }
     }
 
-    private fun scheduleReadReceiptSend(
-        target: VisibleReadReceiptTarget,
-        pending: PendingReadReceiptSend
-    ) {
-        readReceiptJob?.cancel()
-        pendingReadReceiptSend = pending
-        readReceiptJob = viewModelScope.launch {
-            delay(READ_RECEIPT_SEND_DELAY_MS)
-
-            val didSend = try {
-                matrixClientService.sendReadReceipt(
-                    roomId = target.roomId,
-                    eventId = target.eventId
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to send read receipt", error)
-                false
-            }
-
-            finishReadReceiptSend(pending, didSend = didSend)
-        }
-    }
-
-    private fun finishReadReceiptSend(
-        pending: PendingReadReceiptSend,
-        didSend: Boolean
-    ) {
-        if (pendingReadReceiptSend == pending) {
-            pendingReadReceiptSend = null
-        }
-
-        if (!didSend) {
-            return
-        }
-
-        when (pending) {
-            is PendingReadReceiptSend.Bootstrap -> {
-                establishReadReceiptBaseline(target = pending.target)
-            }
-            is PendingReadReceiptSend.Advance -> {
-                establishReadReceiptBaseline(target = pending.target)
-            }
-        }
-    }
-
-    private fun shouldAdvanceReadReceipt(target: VisibleReadReceiptTarget): Boolean {
-        val baselineTarget = readReceiptBaselineTarget
-        if (baselineTarget != null && !isReadReceiptTargetNewer(target, reference = baselineTarget)) {
-            return false
-        }
-
-        val pendingTarget = pendingReadReceiptSend?.target
-        if (pendingTarget != null && !isReadReceiptTargetNewer(target, reference = pendingTarget)) {
-            return false
-        }
-
-        return true
-    }
-
-    private fun isReadReceiptTargetNewer(
-        target: VisibleReadReceiptTarget,
-        reference: VisibleReadReceiptTarget
-    ): Boolean {
-        if (target.roomId != reference.roomId || target.eventId == reference.eventId) {
-            return false
-        }
-
-        val targetIndex = messageIndex(eventId = target.eventId)
-        val referenceIndex = messageIndex(eventId = reference.eventId)
-
-        return when {
-            targetIndex != null && referenceIndex != null -> targetIndex > referenceIndex
-            targetIndex != null && referenceIndex == null -> true
-            else -> false
-        }
-    }
-
-    private fun messageIndex(eventId: String): Int? {
-        return _uiState.value.chatMessages.indexOfFirst { it.eventId == eventId }
-            .takeIf { it >= 0 }
-    }
-
-    private fun establishReadReceiptBaseline(target: VisibleReadReceiptTarget) {
-        val currentBaseline = readReceiptBaselineTarget
-        if (currentBaseline != null && !isReadReceiptTargetNewer(target, reference = currentBaseline)) {
-            return
-        }
-
-        readReceiptBaselineTarget = target
-
-        val pendingTarget = pendingReadReceiptSend?.target
-        if (pendingTarget != null && !isReadReceiptTargetNewer(pendingTarget, reference = target)) {
-            readReceiptJob?.cancel()
-            readReceiptJob = null
-            pendingReadReceiptSend = null
-        }
-    }
-
-    private fun resetReadReceiptTracking() {
-        readReceiptJob?.cancel()
-        readReceiptJob = null
-        readReceiptBaselineTarget = null
-        pendingReadReceiptSend = null
-    }
-
     private fun startRoomCache(userId: String) {
         if (roomCacheUserId == userId && roomCacheJob?.isActive == true) {
             return
@@ -3880,7 +3728,6 @@ class AppViewModel(
     private companion object {
         const val TAG = "AppViewModel"
         const val TELEPORT_LOG_TAG = "ZynaChatTeleport"
-        const val READ_RECEIPT_SEND_DELAY_MS = 250L
         const val CONTACTS_SEARCH_MIN_LENGTH = 2
         const val CONTACTS_SEARCH_DEBOUNCE_MS = 250L
         const val CONTACTS_SEARCH_LIMIT = 30

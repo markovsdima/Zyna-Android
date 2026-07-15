@@ -320,6 +320,7 @@ class AppViewModel(
     private var readReceiptJob: Job? = null
     private var readReceiptBaselineTarget: VisibleReadReceiptTarget? = null
     private var pendingReadReceiptSend: PendingReadReceiptSend? = null
+    private val externalRouteCoordinator = ExternalRouteCoordinator()
     private var chatCallInfoJob: Job? = null
     private var chatCallInfoUserId: String? = null
     private var chatCallInfoRoomId: String? = null
@@ -342,6 +343,10 @@ class AppViewModel(
 
         viewModelScope.launch {
             observePresenceRegistrationInputs()
+        }
+
+        viewModelScope.launch {
+            uiState.collect(::consumePendingExternalRouteIfReady)
         }
 
         viewModelScope.launch {
@@ -841,9 +846,48 @@ class AppViewModel(
         openRoom(room, forwardTarget = null)
     }
 
+    fun handleExternalRoute(command: ExternalRouteCommand) {
+        if (externalRouteCoordinator.accept(command)) {
+            consumePendingExternalRouteIfReady(_uiState.value)
+        }
+    }
+
+    private fun consumePendingExternalRouteIfReady(state: AppUiState) {
+        if (!externalRouteCoordinator.hasPendingCommand()) {
+            return
+        }
+        val userId = state.matrixState.userIdOrNull()
+        val canOpenRooms = userId != null &&
+            state.navState.mode == AppNavMode.Main &&
+            state.sessionSecurity.userId == userId &&
+            state.sessionSecurity.gateComplete
+        val command = externalRouteCoordinator.takeIfReady(
+            canOpenRooms = canOpenRooms,
+            availableRoomIds = state.rooms.asSequence().map { it.id }.toSet()
+        ) ?: return
+
+        // External navigation never acknowledges messages. Read receipts remain
+        // driven exclusively by updateVisibleReadReceiptCandidate after rendering.
+        when (val route = command.route) {
+            is ExternalRoute.OpenRoom -> {
+                if (state.activeChatRoute?.roomId == route.roomId) {
+                    route.eventId?.let(::jumpToChatEvent)
+                    return
+                }
+                val room = state.rooms.firstOrNull { it.id == route.roomId } ?: return
+                openRoom(
+                    room = room,
+                    forwardTarget = null,
+                    initialEventId = route.eventId
+                )
+            }
+        }
+    }
+
     private fun openRoom(
         room: MatrixRoomSummary,
-        forwardTarget: MatrixForwardTarget?
+        forwardTarget: MatrixForwardTarget?,
+        initialEventId: String? = null
     ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         val requestStart = ZynaPerfLog.start()
@@ -922,6 +966,7 @@ class AppViewModel(
                     resetMessages = false,
                     timelineStore = timelineStore
                 )
+                initialEventId?.let(::jumpToChatEvent)
                 ZynaPerfLog.end(
                     startTimelineStart,
                     "openRoom.startTimeline"

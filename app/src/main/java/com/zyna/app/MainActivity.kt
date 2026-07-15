@@ -41,6 +41,8 @@ import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.app.AppViewModel
 import com.zyna.app.ui.app.AppViewModelFactory
+import com.zyna.app.ui.app.ExternalRouteDeliveryTracker
+import com.zyna.app.ui.app.ExternalRouteIntents
 import com.zyna.app.ui.calls.NativeMatrixRtcCallController
 import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
@@ -100,12 +102,18 @@ class MainActivity : AppCompatActivity() {
     private var rootOverlayOwner: RootOverlayOwner? = null
     private var nativeMatrixRtcCallController: NativeMatrixRtcCallController? = null
     private var nativeMatrixRtcCallRenderJob: Job? = null
+    private var externalRouteDeliveryTracker = ExternalRouteDeliveryTracker()
     private val notificationPermissionPreferences by lazy {
         getSharedPreferences(NOTIFICATION_PERMISSION_PREFERENCES, Context.MODE_PRIVATE)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        externalRouteDeliveryTracker = ExternalRouteDeliveryTracker(
+            savedInstanceState
+                ?.getStringArrayList(STATE_DELIVERED_EXTERNAL_COMMAND_IDS)
+                .orEmpty()
+        )
         enableEdgeToEdge()
         preferMaxRefreshRate()
         OutgoingOutboxDebugHooks.handleIntent(this, intent)
@@ -121,6 +129,7 @@ class MainActivity : AppCompatActivity() {
                 nativeMatrixRtcCallService = appContainer.nativeMatrixRtcCallService
             )
         )[AppViewModel::class.java]
+        handleExternalRouteIntent(intent)
         cleanupProfileAvatarTempFiles(
             excludedPath = appViewModel.uiState.value.ownProfile.editAvatarLocalPath
         )
@@ -816,6 +825,23 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         OutgoingOutboxDebugHooks.handleIntent(this, intent)
+        handleExternalRouteIntent(intent)
+    }
+
+    private fun handleExternalRouteIntent(intent: Intent?) {
+        val command = ExternalRouteIntents.consume(intent) ?: return
+        if (!externalRouteDeliveryTracker.markForDelivery(command.id)) {
+            return
+        }
+        appViewModel.handleExternalRoute(command)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putStringArrayList(
+            STATE_DELIVERED_EXTERNAL_COMMAND_IDS,
+            externalRouteDeliveryTracker.snapshot()
+        )
     }
 
     override fun onResume() {
@@ -1010,6 +1036,8 @@ class MainActivity : AppCompatActivity() {
 
 private const val NOTIFICATION_PERMISSION_PREFERENCES = "zyna_notification_permission"
 private const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permission_requested"
+private const val STATE_DELIVERED_EXTERNAL_COMMAND_IDS =
+    "zyna.state.deliveredExternalCommandIds"
 private const val PROFILE_AVATAR_DIRECTORY = "profile_avatars"
 
 private fun MotionEvent.isInsideView(view: View): Boolean {

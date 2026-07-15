@@ -76,8 +76,9 @@ class ChatMessageActionStoreTest {
         val store = ChatMessageActionStore(recorder.driver)
         val request = ChatMessageActionRequest.AddReaction(TARGET, EVENT_ID, REACTION_KEY)
 
-        store.execute(request)
+        val result = store.execute(request)
 
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
         assertEquals(
             listOf(PreparedReactionAdd(TARGET, EVENT_ID, REACTION_KEY, "transaction-1")),
             recorder.preparedAdds
@@ -93,8 +94,11 @@ class ChatMessageActionStoreTest {
         val recorder = RecordingMessageActionDriver(addResult = null)
         val store = ChatMessageActionStore(recorder.driver)
 
-        store.execute(ChatMessageActionRequest.AddReaction(TARGET, EVENT_ID, REACTION_KEY))
+        val result = store.execute(
+            ChatMessageActionRequest.AddReaction(TARGET, EVENT_ID, REACTION_KEY)
+        )
 
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
         assertEquals(listOf("transaction", "add"), recorder.events)
     }
 
@@ -174,10 +178,68 @@ class ChatMessageActionStoreTest {
         )
         val store = ChatMessageActionStore(recorder.driver)
 
-        store.execute(ChatMessageActionRequest.RemoveReaction(TARGET, EVENT_ID, REACTION_KEY))
+        val result = store.execute(
+            ChatMessageActionRequest.RemoveReaction(TARGET, EVENT_ID, REACTION_KEY)
+        )
 
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
         assertEquals(1, recorder.preparedRemovals.size)
         assertEquals(listOf("transaction", "remove:null", "find"), recorder.events)
+    }
+
+    @Test
+    fun successfulRetry_updatesEnvelopeBeforeKickingOutbox() = runBlocking {
+        val recorder = RecordingMessageActionDriver(retryResult = true)
+        val store = ChatMessageActionStore(recorder.driver)
+
+        val result = store.execute(
+            ChatMessageActionRequest.RetryOutgoing(TARGET, "envelope-id")
+        )
+
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
+        assertEquals(
+            listOf(OutgoingEnvelopeAction(TARGET, "envelope-id")),
+            recorder.retriedEnvelopes
+        )
+        assertEquals(
+            listOf("retry", "kick:manual-retry:envelope-id"),
+            recorder.events
+        )
+    }
+
+    @Test
+    fun rejectedRetry_returnsNotAppliedAndDoesNotKick() = runBlocking {
+        val recorder = RecordingMessageActionDriver(retryResult = false)
+        val store = ChatMessageActionStore(recorder.driver)
+
+        val result = store.execute(
+            ChatMessageActionRequest.RetryOutgoing(TARGET, "envelope-id")
+        )
+
+        assertEquals(ChatMessageActionResult.NOT_APPLIED, result)
+        assertEquals(listOf("retry"), recorder.events)
+    }
+
+    @Test
+    fun discard_reportsWhetherFailedEnvelopeWasDeleted() = runBlocking {
+        val appliedRecorder = RecordingMessageActionDriver(discardResult = true)
+        val rejectedRecorder = RecordingMessageActionDriver(discardResult = false)
+
+        val applied = ChatMessageActionStore(appliedRecorder.driver).execute(
+            ChatMessageActionRequest.DiscardOutgoing(TARGET, "applied-envelope")
+        )
+        val rejected = ChatMessageActionStore(rejectedRecorder.driver).execute(
+            ChatMessageActionRequest.DiscardOutgoing(TARGET, "missing-envelope")
+        )
+
+        assertEquals(ChatMessageActionResult.COMPLETED, applied)
+        assertEquals(ChatMessageActionResult.NOT_APPLIED, rejected)
+        assertEquals(
+            listOf(OutgoingEnvelopeAction(TARGET, "applied-envelope")),
+            appliedRecorder.discardedEnvelopes
+        )
+        assertEquals(listOf("discard"), appliedRecorder.events)
+        assertEquals(listOf("discard"), rejectedRecorder.events)
     }
 
     private companion object {
@@ -219,12 +281,16 @@ class ChatMessageActionStoreTest {
 private class RecordingMessageActionDriver(
     private val addResult: String? = "add-id",
     private val removalResults: List<String?> = listOf("remove-id"),
-    private val foundReactionEventId: String? = null
+    private val foundReactionEventId: String? = null,
+    private val retryResult: Boolean = true,
+    private val discardResult: Boolean = true
 ) {
     var transactionCallCount = 0
         private set
     val preparedAdds = mutableListOf<PreparedReactionAdd>()
     val preparedRemovals = mutableListOf<PreparedReactionRemoval>()
+    val retriedEnvelopes = mutableListOf<OutgoingEnvelopeAction>()
+    val discardedEnvelopes = mutableListOf<OutgoingEnvelopeAction>()
     val events = mutableListOf<String>()
 
     val driver = ChatMessageActionDriver(
@@ -259,6 +325,16 @@ private class RecordingMessageActionDriver(
             events += "find"
             foundReactionEventId
         },
+        retryOutgoing = { target, envelopeId ->
+            retriedEnvelopes += OutgoingEnvelopeAction(target, envelopeId)
+            events += "retry"
+            retryResult
+        },
+        discardOutgoing = { target, envelopeId ->
+            discardedEnvelopes += OutgoingEnvelopeAction(target, envelopeId)
+            events += "discard"
+            discardResult
+        },
         kickOutbox = { reason, envelopeId ->
             events += "kick:$reason:$envelopeId"
         }
@@ -278,4 +354,9 @@ private data class PreparedReactionRemoval(
     val reactionKey: String,
     val reactionEventId: String?,
     val transactionId: String
+)
+
+private data class OutgoingEnvelopeAction(
+    val target: ChatMessageActionTarget,
+    val envelopeId: String
 )

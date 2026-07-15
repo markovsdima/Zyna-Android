@@ -41,6 +41,8 @@ import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
+import com.zyna.app.ui.chat.ChatMessageActionRequest
+import com.zyna.app.ui.chat.ChatMessageActionResult
 import com.zyna.app.ui.chat.ChatMessageActionTarget
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
 import com.zyna.app.ui.chat.ChatTimelineNavigationRequest
@@ -1868,25 +1870,7 @@ class AppViewModel(
             message = message,
             reactionKey = reactionKey
         ) ?: return
-
-        viewModelScope.launch {
-            try {
-                chatMessageActionStore.execute(request)
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = null)
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
-                }
-            }
-        }
+        launchChatMessageAction(request)
     }
 
     fun setChatReplyTarget(replyInfo: MatrixReplyInfo) {
@@ -1943,54 +1927,34 @@ class AppViewModel(
     fun retryOutgoingEnvelope(envelopeId: String) {
         val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-
-        viewModelScope.launch {
-            try {
-                val didRetry = localCacheRepository.retryFailedOutgoingMessageEnvelope(
-                    userId = userId,
-                    roomId = route.roomId,
-                    envelopeId = envelopeId
-                )
-                if (!didRetry) {
-                    return@launch
-                }
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = null)
-                }
-                outgoingOutboxService.kick(
-                    reason = "manual-retry",
-                    envelopeId = envelopeId
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
-                }
-            }
-        }
+        launchChatMessageAction(
+            ChatMessageActionRequest.RetryOutgoing(
+                target = ChatMessageActionTarget(userId, route.roomId),
+                envelopeId = envelopeId
+            )
+        )
     }
 
     fun discardOutgoingEnvelope(envelopeId: String) {
         val route = _uiState.value.activeChatRoute ?: return
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        launchChatMessageAction(
+            ChatMessageActionRequest.DiscardOutgoing(
+                target = ChatMessageActionTarget(userId, route.roomId),
+                envelopeId = envelopeId
+            )
+        )
+    }
 
+    private fun launchChatMessageAction(request: ChatMessageActionRequest) {
         viewModelScope.launch {
             try {
-                val didDiscard = localCacheRepository.discardFailedOutgoingMessageEnvelope(
-                    userId = userId,
-                    roomId = route.roomId,
-                    envelopeId = envelopeId
-                )
-                if (!didDiscard) {
-                    return@launch
+                when (chatMessageActionStore.execute(request)) {
+                    ChatMessageActionResult.COMPLETED -> Unit
+                    ChatMessageActionResult.NOT_APPLIED -> return@launch
                 }
                 _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                    if (!it.isRouteForRoom(request.target.userId, request.target.roomId)) {
                         it
                     } else it.copy(chatSendErrorMessage = null)
                 }
@@ -1998,9 +1962,11 @@ class AppViewModel(
                 throw error
             } catch (error: Throwable) {
                 _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
+                    if (!it.isRouteForRoom(request.target.userId, request.target.roomId)) {
                         it
-                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
+                    } else it.copy(
+                        chatSendErrorMessage = error.message ?: error.javaClass.simpleName
+                    )
                 }
             }
         }

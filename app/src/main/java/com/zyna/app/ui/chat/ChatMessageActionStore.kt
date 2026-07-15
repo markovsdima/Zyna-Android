@@ -25,6 +25,21 @@ internal sealed interface ChatMessageActionRequest {
         val targetEventId: String,
         val reactionKey: String
     ) : ChatMessageActionRequest
+
+    data class RetryOutgoing(
+        override val target: ChatMessageActionTarget,
+        val envelopeId: String
+    ) : ChatMessageActionRequest
+
+    data class DiscardOutgoing(
+        override val target: ChatMessageActionTarget,
+        val envelopeId: String
+    ) : ChatMessageActionRequest
+}
+
+internal enum class ChatMessageActionResult {
+    COMPLETED,
+    NOT_APPLIED
 }
 
 internal class ChatMessageActionDriver(
@@ -47,14 +62,22 @@ internal class ChatMessageActionDriver(
         targetEventId: String,
         reactionKey: String
     ) -> String?,
+    val retryOutgoing: suspend (
+        target: ChatMessageActionTarget,
+        envelopeId: String
+    ) -> Boolean,
+    val discardOutgoing: suspend (
+        target: ChatMessageActionTarget,
+        envelopeId: String
+    ) -> Boolean,
     val kickOutbox: (reason: String, envelopeId: String?) -> Unit
 )
 
 /**
  * Owns validation and durable enqueue rules for actions on chat messages.
  *
- * Request creation is side-effect free. Execution writes an action to the
- * local outbox before asking the delivery coordinator to dispatch it.
+ * Request creation is side-effect free. Execution commits durable state
+ * before asking the delivery coordinator to dispatch when needed.
  */
 internal class ChatMessageActionStore(
     private val driver: ChatMessageActionDriver
@@ -83,10 +106,18 @@ internal class ChatMessageActionStore(
         }
     }
 
-    suspend fun execute(request: ChatMessageActionRequest) {
-        when (request) {
-            is ChatMessageActionRequest.AddReaction -> addReaction(request)
-            is ChatMessageActionRequest.RemoveReaction -> removeReaction(request)
+    suspend fun execute(request: ChatMessageActionRequest): ChatMessageActionResult {
+        return when (request) {
+            is ChatMessageActionRequest.AddReaction -> {
+                addReaction(request)
+                ChatMessageActionResult.COMPLETED
+            }
+            is ChatMessageActionRequest.RemoveReaction -> {
+                removeReaction(request)
+                ChatMessageActionResult.COMPLETED
+            }
+            is ChatMessageActionRequest.RetryOutgoing -> retryOutgoing(request)
+            is ChatMessageActionRequest.DiscardOutgoing -> discardOutgoing(request)
         }
     }
 
@@ -132,6 +163,26 @@ internal class ChatMessageActionStore(
             driver.kickOutbox("new-reaction-removal", reactionId)
         }
     }
+
+    private suspend fun retryOutgoing(
+        request: ChatMessageActionRequest.RetryOutgoing
+    ): ChatMessageActionResult {
+        if (!driver.retryOutgoing(request.target, request.envelopeId)) {
+            return ChatMessageActionResult.NOT_APPLIED
+        }
+        driver.kickOutbox("manual-retry", request.envelopeId)
+        return ChatMessageActionResult.COMPLETED
+    }
+
+    private suspend fun discardOutgoing(
+        request: ChatMessageActionRequest.DiscardOutgoing
+    ): ChatMessageActionResult {
+        return if (driver.discardOutgoing(request.target, request.envelopeId)) {
+            ChatMessageActionResult.COMPLETED
+        } else {
+            ChatMessageActionResult.NOT_APPLIED
+        }
+    }
 }
 
 internal fun createChatMessageActionStore(
@@ -168,6 +219,20 @@ internal fun createChatMessageActionStore(
                     targetEventId = targetEventId,
                     reactionKey = reactionKey,
                     userId = target.userId
+                )
+            },
+            retryOutgoing = { target, envelopeId ->
+                localCacheRepository.retryFailedOutgoingMessageEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId
+                )
+            },
+            discardOutgoing = { target, envelopeId ->
+                localCacheRepository.discardFailedOutgoingMessageEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId
                 )
             },
             kickOutbox = outgoingOutboxService::kick

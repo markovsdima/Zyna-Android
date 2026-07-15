@@ -22,6 +22,7 @@ internal data class ChatTimelineTarget(
 )
 
 internal data class ChatTimelineWindowState(
+    val canLoadOlder: Boolean,
     val canLoadNewer: Boolean,
     val isAtLiveEdge: Boolean
 )
@@ -41,6 +42,41 @@ internal class ChatTimelinePaginationDriver<WindowStore : Any>(
     val windowState: (WindowStore) -> ChatTimelineWindowState,
     val paginateBackwards: suspend (ChatTimelineTarget) -> Boolean,
     val paginateForwards: suspend (ChatTimelineTarget) -> Boolean
+)
+
+internal sealed interface ChatTimelineNavigationRequest {
+    data class EventJump(val eventId: String) : ChatTimelineNavigationRequest
+
+    data object LiveEdge : ChatTimelineNavigationRequest
+}
+
+internal sealed interface ChatTimelineNavigationResult {
+    data class EventJump(
+        val eventId: String,
+        val didJump: Boolean,
+        val canLoadOlder: Boolean?,
+        val canLoadNewer: Boolean?,
+        val isAtLiveEdge: Boolean
+    ) : ChatTimelineNavigationResult
+
+    data class LiveEdge(
+        val didJump: Boolean,
+        val canLoadOlder: Boolean,
+        val canLoadNewer: Boolean,
+        val isAtLiveEdge: Boolean
+    ) : ChatTimelineNavigationResult
+}
+
+internal class ChatTimelineNavigationDriver<WindowStore : Any>(
+    val jumpToEvent: suspend (WindowStore, eventId: String) -> Boolean,
+    val jumpToEventAfterMaterialization: suspend (
+        WindowStore,
+        eventId: String
+    ) -> Boolean,
+    val jumpToLiveEdge: suspend (WindowStore) -> Boolean,
+    val windowState: (WindowStore) -> ChatTimelineWindowState,
+    val paginateBackwards: suspend (ChatTimelineTarget) -> Boolean,
+    val maxPaginationAttempts: Int
 )
 
 /**
@@ -74,7 +110,18 @@ internal class ChatTimelineStore<WindowStore : Any>(
         ChatTimelineTarget,
         ChatTimelinePaginationResult
     ) -> Unit = { _, _ -> },
-    private val onPaginationError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> }
+    private val onPaginationError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> },
+    private val navigationDriver: ChatTimelineNavigationDriver<WindowStore>? = null,
+    private val onNavigationResult: (
+        ChatTimelineTarget,
+        ChatTimelineNavigationResult
+    ) -> Unit = { _, _ -> },
+    private val onNavigationError: (
+        ChatTimelineTarget,
+        ChatTimelineNavigationRequest,
+        Throwable
+    ) -> Unit = { _, _, _ -> },
+    private val onNavigationTrace: (String) -> Unit = {}
 ) {
     private var activeTimeline: ActiveTimeline<WindowStore>? = null
     private var timelineJob: Job? = null
@@ -286,10 +333,117 @@ internal class ChatTimelineStore<WindowStore : Any>(
     }
 
     @MainThread
-    fun windowStoreFor(userId: String, roomId: String): WindowStore? {
-        return activeTimeline
-            ?.takeIf { it.target.userId == userId && it.target.roomId == roomId }
-            ?.windowStore
+    fun jumpToEvent(
+        target: ChatTimelineTarget,
+        eventId: String
+    ): Boolean {
+        val driver = navigationDriver ?: return false
+        val activation = activeTimeline?.takeIf { it.target == target } ?: return false
+        val request = ChatTimelineNavigationRequest.EventJump(eventId)
+        return launchWindowOperation {
+            try {
+                val windowStore = activation.windowStore
+                var didJump = driver.jumpToEvent(windowStore, eventId)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                var state = driver.windowState(windowStore)
+                onNavigationTrace(
+                    "jump cache target=${eventId.shortLogId()} didJump=$didJump " +
+                        "canOlder=${state.canLoadOlder} canNewer=${state.canLoadNewer} " +
+                        "live=${state.isAtLiveEdge}"
+                )
+
+                var attempts = 0
+                var hasReachedStart = false
+                while (
+                    !didJump &&
+                    !hasReachedStart &&
+                    attempts < driver.maxPaginationAttempts
+                ) {
+                    attempts += 1
+                    hasReachedStart = driver.paginateBackwards(target)
+                    if (activeTimeline !== activation) {
+                        return@launchWindowOperation
+                    }
+                    didJump = driver.jumpToEventAfterMaterialization(windowStore, eventId)
+                    if (activeTimeline !== activation) {
+                        return@launchWindowOperation
+                    }
+                    onNavigationTrace(
+                        "jump attempt=$attempts target=${eventId.shortLogId()} " +
+                            "reachedStart=$hasReachedStart didJump=$didJump"
+                    )
+                }
+
+                state = driver.windowState(windowStore)
+                onNavigationTrace(
+                    "jump final target=${eventId.shortLogId()} didJump=$didJump " +
+                        "attempts=$attempts reachedStart=$hasReachedStart " +
+                        "canOlder=${state.canLoadOlder} canNewer=${state.canLoadNewer} " +
+                        "live=${state.isAtLiveEdge}"
+                )
+                onNavigationResult(
+                    target,
+                    ChatTimelineNavigationResult.EventJump(
+                        eventId = eventId,
+                        didJump = didJump,
+                        canLoadOlder = when {
+                            didJump -> state.canLoadOlder || !hasReachedStart
+                            hasReachedStart -> false
+                            else -> null
+                        },
+                        canLoadNewer = if (didJump) state.canLoadNewer else null,
+                        isAtLiveEdge = state.isAtLiveEdge
+                    )
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (activeTimeline === activation) {
+                    onNavigationError(target, request, error)
+                }
+            }
+        }
+    }
+
+    @MainThread
+    fun jumpToLiveEdge(target: ChatTimelineTarget): Boolean {
+        val driver = navigationDriver ?: return false
+        val activation = activeTimeline?.takeIf { it.target == target } ?: return false
+        return launchWindowOperation {
+            try {
+                val windowStore = activation.windowStore
+                val didJump = driver.jumpToLiveEdge(windowStore)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                val state = driver.windowState(windowStore)
+                onNavigationTrace(
+                    "live final didJump=$didJump canOlder=${state.canLoadOlder} " +
+                        "canNewer=${state.canLoadNewer} live=${state.isAtLiveEdge}"
+                )
+                onNavigationResult(
+                    target,
+                    ChatTimelineNavigationResult.LiveEdge(
+                        didJump = didJump,
+                        canLoadOlder = state.canLoadOlder,
+                        canLoadNewer = state.canLoadNewer,
+                        isAtLiveEdge = state.isAtLiveEdge
+                    )
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (activeTimeline === activation) {
+                    onNavigationError(
+                        target,
+                        ChatTimelineNavigationRequest.LiveEdge,
+                        error
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -310,7 +464,14 @@ internal fun createChatTimelineStore(
     onTimelineSettled: (ChatTimelineTarget, messageCount: Int) -> Unit,
     onTimelineError: (ChatTimelineTarget, Throwable) -> Unit,
     onPaginationResult: (ChatTimelineTarget, ChatTimelinePaginationResult) -> Unit,
-    onPaginationError: (ChatTimelineTarget, Throwable) -> Unit
+    onPaginationError: (ChatTimelineTarget, Throwable) -> Unit,
+    onNavigationResult: (ChatTimelineTarget, ChatTimelineNavigationResult) -> Unit,
+    onNavigationError: (
+        ChatTimelineTarget,
+        ChatTimelineNavigationRequest,
+        Throwable
+    ) -> Unit,
+    onNavigationTrace: (String) -> Unit
 ): ChatTimelineStore<RoomTimelineWindowStore> {
     return ChatTimelineStore(
         scope = scope,
@@ -391,6 +552,7 @@ internal fun createChatTimelineStore(
             },
             windowState = { windowStore ->
                 ChatTimelineWindowState(
+                    canLoadOlder = windowStore.canLoadOlderFromCache,
                     canLoadNewer = windowStore.canLoadNewerFromCache,
                     isAtLiveEdge = windowStore.isAtLiveEdge
                 )
@@ -403,6 +565,35 @@ internal fun createChatTimelineStore(
             }
         ),
         onPaginationResult = onPaginationResult,
-        onPaginationError = onPaginationError
+        onPaginationError = onPaginationError,
+        navigationDriver = ChatTimelineNavigationDriver(
+            jumpToEvent = { windowStore, eventId ->
+                windowStore.jumpToEvent(eventId)
+            },
+            jumpToEventAfterMaterialization = { windowStore, eventId ->
+                windowStore.jumpToEventAfterMaterialization(eventId)
+            },
+            jumpToLiveEdge = { windowStore ->
+                windowStore.jumpToLiveEdge()
+            },
+            windowState = { windowStore ->
+                ChatTimelineWindowState(
+                    canLoadOlder = windowStore.canLoadOlderFromCache,
+                    canLoadNewer = windowStore.canLoadNewerFromCache,
+                    isAtLiveEdge = windowStore.isAtLiveEdge
+                )
+            },
+            paginateBackwards = { target ->
+                matrixClientService.paginateRoomTimelineBackwards(target.roomId)
+            },
+            maxPaginationAttempts = MAX_JUMP_PAGINATION_ATTEMPTS
+        ),
+        onNavigationResult = onNavigationResult,
+        onNavigationError = onNavigationError,
+        onNavigationTrace = onNavigationTrace
     )
 }
+
+private fun String.shortLogId(): String = takeLast(10)
+
+private const val MAX_JUMP_PAGINATION_ATTEMPTS = 8

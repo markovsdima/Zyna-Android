@@ -16,8 +16,6 @@ import kotlinx.coroutines.flow.flow
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,7 +68,6 @@ class ChatTimelineStoreTest {
 
         assertEquals(1, windowDeliveries.size)
         assertEquals(listOf(target), settledTargets)
-        assertSame(windowStore, store.windowStoreFor(USER_A, ROOM_A))
     }
 
     @Test
@@ -90,8 +87,6 @@ class ChatTimelineStoreTest {
 
         assertEquals(listOf(latestTarget), windowDeliveries.map { it.target })
         assertEquals(listOf(latestTarget), settledTargets)
-        assertNull(store.windowStoreFor(USER_A, ROOM_A))
-        assertSame(latestWindow, store.windowStoreFor(USER_A, ROOM_B))
     }
 
     @Test
@@ -107,8 +102,6 @@ class ChatTimelineStoreTest {
         assertTrue(timelineFlow(latestTarget).tryEmit(timelineUpdate()))
 
         assertEquals(listOf(latestTarget), settledTargets)
-        assertNull(store.windowStoreFor(USER_A, ROOM_A))
-        assertSame(latestWindow, store.windowStoreFor(USER_B, ROOM_A))
     }
 
     @Test
@@ -124,7 +117,6 @@ class ChatTimelineStoreTest {
 
         assertTrue(windowDeliveries.isEmpty())
         assertTrue(settledTargets.isEmpty())
-        assertNull(store.windowStoreFor(USER_A, ROOM_A))
     }
 
     @Test

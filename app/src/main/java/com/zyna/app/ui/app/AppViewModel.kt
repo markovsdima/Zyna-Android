@@ -44,6 +44,8 @@ import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
+import com.zyna.app.ui.chat.ChatTimelineNavigationRequest
+import com.zyna.app.ui.chat.ChatTimelineNavigationResult
 import com.zyna.app.ui.chat.ChatTimelinePaginationResult
 import com.zyna.app.ui.chat.ChatTimelineTarget
 import com.zyna.app.ui.chat.createChatTimelineStore
@@ -305,7 +307,10 @@ class AppViewModel(
         onPaginationResult = ::applyChatTimelinePaginationResult,
         onPaginationError = { target, _ ->
             clearChatTimelinePaginationLoading(target)
-        }
+        },
+        onNavigationResult = ::applyChatTimelineNavigationResult,
+        onNavigationError = ::failChatTimelineNavigation,
+        onNavigationTrace = ::logTeleport
     )
     private var visibleRoomRefreshRequestCount = 0
     private var openRoomJob: Job? = null
@@ -2377,8 +2382,9 @@ class AppViewModel(
         val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
+        val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
         if (chatTimelineStore.hasActiveWindowOperation()) {
-            logTeleport("jump cancels activePagination target=${normalizedEventId.shortLogId()}")
+            logTeleport("jump cancels activeWindowOperation target=${normalizedEventId.shortLogId()}")
             chatTimelineStore.cancelWindowOperation()
         }
         logTeleport(
@@ -2418,97 +2424,9 @@ class AppViewModel(
         }
         chatReadReceiptCoordinator.reset()
 
-        chatTimelineStore.launchWindowOperation {
-            var hasReachedStart = false
-            var didJump = false
-            try {
-                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
-                if (timelineStore == null) {
-                    logTeleport("jump abort noStore target=${normalizedEventId.shortLogId()}")
-                    _uiState.update {
-                        if (!it.isRouteForRoom(userId, route.roomId)) {
-                            it
-                        } else it.copy(
-                            isLoadingOlderChatMessages = false,
-                            chatJumpTargetEventId = if (it.chatJumpTargetEventId == normalizedEventId) {
-                                null
-                            } else {
-                                it.chatJumpTargetEventId
-                            }
-                        )
-                    }
-                    return@launchWindowOperation
-                }
-
-                didJump = timelineStore.jumpToEvent(normalizedEventId)
-                logTeleport(
-                    "jump cache target=${normalizedEventId.shortLogId()} didJump=$didJump " +
-                        "canOlder=${timelineStore.canLoadOlderFromCache} " +
-                        "canNewer=${timelineStore.canLoadNewerFromCache} live=${timelineStore.isAtLiveEdge}"
-                )
-                var attempts = 0
-                while (
-                    !didJump &&
-                    !hasReachedStart &&
-                    attempts < JUMP_PAGINATION_ATTEMPTS
-                ) {
-                    attempts += 1
-                    hasReachedStart = matrixClientService.paginateRoomTimelineBackwards(route.roomId)
-                    didJump = timelineStore.jumpToEventAfterMaterialization(normalizedEventId)
-                    logTeleport(
-                        "jump attempt=$attempts target=${normalizedEventId.shortLogId()} " +
-                            "reachedStart=$hasReachedStart didJump=$didJump"
-                    )
-                }
-                logTeleport(
-                    "jump final target=${normalizedEventId.shortLogId()} didJump=$didJump " +
-                        "attempts=$attempts reachedStart=$hasReachedStart " +
-                        "canOlder=${timelineStore.canLoadOlderFromCache} " +
-                        "canNewer=${timelineStore.canLoadNewerFromCache} live=${timelineStore.isAtLiveEdge}"
-                )
-
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = when {
-                            didJump -> timelineStore.canLoadOlderFromCache || !hasReachedStart
-                            hasReachedStart -> false
-                            else -> it.canLoadOlderChatMessages
-                        },
-                        canLoadNewerChatMessages = if (didJump) {
-                            timelineStore.canLoadNewerFromCache
-                        } else {
-                            it.canLoadNewerChatMessages
-                        },
-                        isChatAtLiveEdge = timelineStore.isAtLiveEdge,
-                        chatJumpTargetEventId = if (didJump) {
-                            it.chatJumpTargetEventId
-                        } else if (it.chatJumpTargetEventId == normalizedEventId) {
-                            null
-                        } else {
-                            it.chatJumpTargetEventId
-                        }
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to jump to chat event", error)
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        chatJumpTargetEventId = if (it.chatJumpTargetEventId == normalizedEventId) {
-                            null
-                        } else {
-                            it.chatJumpTargetEventId
-                        }
-                    )
-                }
-            }
+        if (!chatTimelineStore.jumpToEvent(target, normalizedEventId)) {
+            logTeleport("jump abort unavailable target=${normalizedEventId.shortLogId()}")
+            clearChatTimelineEventJump(target, normalizedEventId)
         }
     }
 
@@ -2526,8 +2444,9 @@ class AppViewModel(
         val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
+        val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
         if (chatTimelineStore.hasActiveWindowOperation()) {
-            logTeleport("live cancels activePagination")
+            logTeleport("live cancels activeWindowOperation")
             chatTimelineStore.cancelWindowOperation()
         }
 
@@ -2543,39 +2462,9 @@ class AppViewModel(
         }
         chatReadReceiptCoordinator.reset()
 
-        chatTimelineStore.launchWindowOperation {
-            try {
-                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
-                val didJump = timelineStore?.jumpToLiveEdge() == true
-                logTeleport(
-                    "live final didJump=$didJump " +
-                        "canOlder=${timelineStore?.canLoadOlderFromCache} " +
-                        "canNewer=${timelineStore?.canLoadNewerFromCache} live=${timelineStore?.isAtLiveEdge}"
-                )
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = timelineStore?.canLoadOlderFromCache ?: true,
-                        canLoadNewerChatMessages = false,
-                        isChatAtLiveEdge = true,
-                        chatScrollToLiveEdgeRequested = didJump
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to jump to live edge", error)
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        chatScrollToLiveEdgeRequested = false
-                    )
-                }
-            }
+        if (!chatTimelineStore.jumpToLiveEdge(target)) {
+            logTeleport("live abort unavailable")
+            clearChatTimelineLiveEdgeJump(target)
         }
     }
 
@@ -2869,6 +2758,96 @@ class AppViewModel(
             } else {
                 it.copy(isLoadingOlderChatMessages = false)
             }
+        }
+    }
+
+    private fun applyChatTimelineNavigationResult(
+        target: ChatTimelineTarget,
+        result: ChatTimelineNavigationResult
+    ) {
+        when (result) {
+            is ChatTimelineNavigationResult.EventJump -> {
+                _uiState.update {
+                    if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        canLoadOlderChatMessages = result.canLoadOlder
+                            ?: it.canLoadOlderChatMessages,
+                        canLoadNewerChatMessages = result.canLoadNewer
+                            ?: it.canLoadNewerChatMessages,
+                        isChatAtLiveEdge = result.isAtLiveEdge,
+                        chatJumpTargetEventId = if (result.didJump) {
+                            it.chatJumpTargetEventId
+                        } else if (it.chatJumpTargetEventId == result.eventId) {
+                            null
+                        } else {
+                            it.chatJumpTargetEventId
+                        }
+                    )
+                }
+            }
+
+            is ChatTimelineNavigationResult.LiveEdge -> {
+                _uiState.update {
+                    if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                        it
+                    } else it.copy(
+                        isLoadingOlderChatMessages = false,
+                        canLoadOlderChatMessages = result.canLoadOlder,
+                        canLoadNewerChatMessages = result.canLoadNewer,
+                        isChatAtLiveEdge = result.isAtLiveEdge,
+                        chatScrollToLiveEdgeRequested = result.didJump
+                    )
+                }
+            }
+        }
+    }
+
+    private fun failChatTimelineNavigation(
+        target: ChatTimelineTarget,
+        request: ChatTimelineNavigationRequest,
+        error: Throwable
+    ) {
+        when (request) {
+            is ChatTimelineNavigationRequest.EventJump -> {
+                Log.w(TAG, "Failed to jump to chat event", error)
+                clearChatTimelineEventJump(target, request.eventId)
+            }
+
+            ChatTimelineNavigationRequest.LiveEdge -> {
+                Log.w(TAG, "Failed to jump to live edge", error)
+                clearChatTimelineLiveEdgeJump(target)
+            }
+        }
+    }
+
+    private fun clearChatTimelineEventJump(
+        target: ChatTimelineTarget,
+        eventId: String
+    ) {
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else it.copy(
+                isLoadingOlderChatMessages = false,
+                chatJumpTargetEventId = if (it.chatJumpTargetEventId == eventId) {
+                    null
+                } else {
+                    it.chatJumpTargetEventId
+                }
+            )
+        }
+    }
+
+    private fun clearChatTimelineLiveEdgeJump(target: ChatTimelineTarget) {
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else it.copy(
+                isLoadingOlderChatMessages = false,
+                chatScrollToLiveEdgeRequested = false
+            )
         }
     }
 
@@ -3642,7 +3621,6 @@ class AppViewModel(
         const val CONTACTS_SEARCH_LIMIT = 30
         const val MEMBERSHIP_FALLBACK_VALIDATION_DELAY_MS = 10_000L
         const val RING_OVERRIDE_MEMBERSHIP_CONFIRMATION_DELAY_MS = 2_500L
-        const val JUMP_PAGINATION_ATTEMPTS = 8
         const val CALL_HISTORY_LIMIT = 100
         const val CALL_HISTORY_EXPIRY_REFRESH_GRACE_MS = 250L
         const val PRESENCE_TAG_ROOMS = "rooms"

@@ -93,6 +93,7 @@ class ChatTimelinePaginationTest {
         val windowStore = FakeWindowStore(
             expandOlderResult = true,
             state = ChatTimelineWindowState(
+                canLoadOlder = false,
                 canLoadNewer = true,
                 isAtLiveEdge = false
             )
@@ -121,6 +122,7 @@ class ChatTimelinePaginationTest {
         val windowStore = FakeWindowStore(
             expandOlderAfterMaterializationResult = true,
             state = ChatTimelineWindowState(
+                canLoadOlder = true,
                 canLoadNewer = false,
                 isAtLiveEdge = false
             )
@@ -151,6 +153,7 @@ class ChatTimelinePaginationTest {
         val windowStore = FakeWindowStore(
             expandNewerResult = true,
             state = ChatTimelineWindowState(
+                canLoadOlder = true,
                 canLoadNewer = true,
                 isAtLiveEdge = false
             )
@@ -175,6 +178,7 @@ class ChatTimelinePaginationTest {
         hasReachedEnd = true
         val windowStore = FakeWindowStore(
             state = ChatTimelineWindowState(
+                canLoadOlder = true,
                 canLoadNewer = true,
                 isAtLiveEdge = false
             )
@@ -198,6 +202,7 @@ class ChatTimelinePaginationTest {
     fun newerPagination_remainsAvailableBeforeConfirmedEnd() {
         val windowStore = FakeWindowStore(
             state = ChatTimelineWindowState(
+                canLoadOlder = true,
                 canLoadNewer = false,
                 isAtLiveEdge = false
             )
@@ -236,6 +241,7 @@ class ChatTimelinePaginationTest {
         var expandNewerResult: Boolean = false,
         var expandNewerAfterMaterializationResult: Boolean = false,
         var state: ChatTimelineWindowState = ChatTimelineWindowState(
+            canLoadOlder = true,
             canLoadNewer = false,
             isAtLiveEdge = true
         ),

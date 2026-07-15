@@ -18,6 +18,9 @@ import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
 import java.util.UUID
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 data class ChatComposerState(
     val replyTarget: MatrixReplyInfo? = null,
@@ -115,22 +118,25 @@ internal class ChatComposerSendDriver(
  * Owns target selection and durable enqueue rules for the chat composer.
  *
  * Target selection and request creation are main-thread confined. [state] is
- * mirrored into AppUiState by AppViewModel until composer state becomes
- * directly observable. Durable enqueue may suspend, but does not mutate state.
+ * the single source of truth projected into AppUiState by AppViewModel.
+ * Durable enqueue may suspend, but does not mutate state.
  */
 internal class ChatComposerStore(
     private val sendDriver: ChatComposerSendDriver,
     initialState: ChatComposerState = ChatComposerState()
 ) {
-    var state: ChatComposerState = initialState
-        private set
+    private val _state = MutableStateFlow(initialState)
+    val state: StateFlow<ChatComposerState> = _state.asStateFlow()
+
+    private val currentState: ChatComposerState
+        get() = _state.value
 
     @MainThread
     fun selectReply(target: MatrixReplyInfo): ChatComposerState? {
         if (target.eventId.isBlank()) {
             return null
         }
-        return state.copy(
+        return currentState.copy(
             replyTarget = target,
             editTarget = null,
             forwardTarget = null
@@ -142,7 +148,7 @@ internal class ChatComposerStore(
         if (target.eventId.isBlank() || target.body.isBlank()) {
             return null
         }
-        return state.copy(
+        return currentState.copy(
             replyTarget = null,
             editTarget = target,
             forwardTarget = null
@@ -154,7 +160,7 @@ internal class ChatComposerStore(
         if (target.body.isBlank() && target.imageItems.isEmpty()) {
             return null
         }
-        return state.copy(
+        return currentState.copy(
             replyTarget = null,
             editTarget = null,
             forwardTarget = null,
@@ -168,7 +174,7 @@ internal class ChatComposerStore(
         body: String,
         isSending: Boolean
     ): ChatComposerSendRequest? {
-        val forwardTarget = state.forwardTarget
+        val forwardTarget = currentState.forwardTarget
         val isForwardingMedia = forwardTarget?.imageItems?.isNotEmpty() == true
         val text = if (isForwardingMedia) {
             forwardTarget?.body?.trim().orEmpty().ifBlank { "Photo" }
@@ -181,7 +187,7 @@ internal class ChatComposerStore(
 
         val envelopeId = "text:${sendDriver.nextId()}"
         val transactionId = sendDriver.prepareTransactionId()
-        val editTarget = if (forwardTarget == null) state.editTarget else null
+        val editTarget = if (forwardTarget == null) currentState.editTarget else null
 
         return when {
             editTarget != null -> ChatComposerSendRequest.Edit(
@@ -199,7 +205,7 @@ internal class ChatComposerStore(
                 envelopeId = envelopeId,
                 transactionId = transactionId,
                 body = text,
-                replyInfo = if (forwardTarget == null) state.replyTarget else null,
+                replyInfo = if (forwardTarget == null) currentState.replyTarget else null,
                 forwardedFrom = forwardTarget?.forwardedFrom
             )
         }
@@ -234,7 +240,7 @@ internal class ChatComposerStore(
         return ChatComposerSendRequest.Voice(
             target = target,
             draft = draft,
-            replyInfo = state.replyTarget
+            replyInfo = currentState.replyTarget
         )
     }
 
@@ -250,7 +256,7 @@ internal class ChatComposerStore(
 
     @MainThread
     fun cancelForwardPicker(): ChatComposerState {
-        return state.copy(pendingForwardTarget = null).also(::setState)
+        return currentState.copy(pendingForwardTarget = null).also(::setState)
     }
 
     @MainThread
@@ -260,22 +266,22 @@ internal class ChatComposerStore(
 
     @MainThread
     fun clearReply(): ChatComposerState {
-        return state.copy(replyTarget = null).also(::setState)
+        return currentState.copy(replyTarget = null).also(::setState)
     }
 
     @MainThread
     fun clearEdit(): ChatComposerState {
-        return state.copy(editTarget = null).also(::setState)
+        return currentState.copy(editTarget = null).also(::setState)
     }
 
     @MainThread
     fun clearForward(): ChatComposerState {
-        return state.copy(forwardTarget = null).also(::setState)
+        return currentState.copy(forwardTarget = null).also(::setState)
     }
 
     @MainThread
     fun clearActiveTargets(): ChatComposerState {
-        return state.copy(
+        return currentState.copy(
             replyTarget = null,
             editTarget = null,
             forwardTarget = null
@@ -410,7 +416,7 @@ internal class ChatComposerStore(
     }
 
     private fun setState(nextState: ChatComposerState) {
-        state = nextState
+        _state.value = nextState
     }
 }
 

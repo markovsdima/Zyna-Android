@@ -12,6 +12,20 @@ class ChatComposerStoreTest {
     private val store = ChatComposerStore(noOpSendDriver())
 
     @Test
+    fun stateFlow_exposesLatestTargetState() {
+        assertEquals(ChatComposerState(), store.state.value)
+
+        val replyState = requireNotNull(store.selectReply(REPLY))
+        assertEquals(replyState, store.state.value)
+
+        val editState = requireNotNull(store.selectEdit(EDIT))
+        assertEquals(editState, store.state.value)
+
+        val pickerState = requireNotNull(store.startForwardPicker(FORWARD))
+        assertEquals(pickerState, store.state.value)
+    }
+
+    @Test
     fun replyEditAndForwardTargets_areMutuallyExclusive() {
         assertEquals(REPLY, store.selectReply(REPLY)?.replyTarget)
 
@@ -35,13 +49,13 @@ class ChatComposerStoreTest {
     @Test
     fun invalidTargets_areRejectedWithoutChangingState() {
         store.selectReply(REPLY)
-        val previous = store.state
+        val previous = store.state.value
 
         assertNull(store.selectReply(REPLY.copy(eventId = "")))
         assertNull(store.selectEdit(EDIT.copy(eventId = "")))
         assertNull(store.selectEdit(EDIT.copy(body = "")))
         assertNull(store.startForwardPicker(MatrixForwardTarget(body = "", forwardedFrom = null)))
-        assertEquals(previous, store.state)
+        assertEquals(previous, store.state.value)
     }
 
     @Test

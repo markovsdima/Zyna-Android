@@ -57,10 +57,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -148,6 +149,7 @@ data class AppUiState(
     val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
     val chatSendErrorMessage: String? = null,
+    // Derived from ChatComposerStore in AppViewModel.uiState.
     val chatComposer: ChatComposerState = ChatComposerState(),
     val chatJumpTargetEventId: String? = null,
     val chatScrollToLiveEdgeRequested: Boolean = false,
@@ -286,11 +288,26 @@ class AppViewModel(
     private val nativeMatrixRtcCallService: NativeMatrixRtcCallService
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
-    val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
     private val chatComposerStore = createChatComposerStore(
         matrixClientService = matrixClientService,
         localCacheRepository = localCacheRepository,
         outgoingOutboxService = outgoingOutboxService
+    )
+    val uiState: StateFlow<AppUiState> = combine(
+        _uiState,
+        chatComposerStore.state
+    ) { state, chatComposer ->
+        if (state.chatComposer == chatComposer) {
+            state
+        } else {
+            state.copy(chatComposer = chatComposer)
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = _uiState.value.copy(
+            chatComposer = chatComposerStore.state.value
+        )
     )
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
@@ -372,7 +389,7 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
-            uiState.collect(::consumePendingExternalRouteIfReady)
+            _uiState.collect(::consumePendingExternalRouteIfReady)
         }
 
         viewModelScope.launch {
@@ -414,11 +431,15 @@ class AppViewModel(
                     stopContactJobs(clearState = true)
                 }
 
-                _uiState.update { current ->
-                    val shouldClearSessionData = nextUserId == null || didChangeUser
-                    val shouldClearChat = shouldClearSessionData ||
-                        matrixState is MatrixClientState.Error
+                val shouldClearSessionData = nextUserId == null || didChangeUser
+                val shouldClearChat = shouldClearSessionData ||
+                    matrixState is MatrixClientState.Error
+                when {
+                    shouldClearSessionData -> chatComposerStore.clearAll()
+                    shouldClearChat -> chatComposerStore.clearActiveTargets()
+                }
 
+                _uiState.update { current ->
                     val nextNavState = navStateForState(
                         matrixState,
                         if (didChangeUser) AppNavState() else current.navState,
@@ -542,11 +563,6 @@ class AppViewModel(
                         chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
-                        chatComposer = when {
-                            shouldClearSessionData -> chatComposerStore.clearAll()
-                            shouldClearChat -> chatComposerStore.clearActiveTargets()
-                            else -> current.chatComposer
-                        },
                         chatJumpTargetEventId = if (shouldClearChat) {
                             null
                         } else {
@@ -935,14 +951,16 @@ class AppViewModel(
         ZynaPerfLog.end(storeStart, "openRoom.createStore") { "roomId=${room.id}" }
 
         val routeUpdateStart = ZynaPerfLog.start()
+        if (_uiState.value.matrixState.userIdOrNull() == userId) {
+            chatComposerStore.enterRoom(forwardTarget)
+        }
         _uiState.update {
             if (it.matrixState.userIdOrNull() != userId) {
                 it
             } else {
                 it.enterChatLoadingState(
                     userId = userId,
-                    room = room,
-                    chatComposer = chatComposerStore.enterRoom(forwardTarget)
+                    room = room
                 )
             }
         }
@@ -1022,6 +1040,7 @@ class AppViewModel(
 
     fun closeChat() {
         stopChatTimeline()
+        chatComposerStore.clearAll()
         _uiState.update {
             it.copy(
                 navState = it.navState.closeChat(),
@@ -1036,7 +1055,6 @@ class AppViewModel(
                 chatErrorMessage = null,
                 isSendingChatMessage = false,
                 chatSendErrorMessage = null,
-                chatComposer = chatComposerStore.clearAll(),
                 chatJumpTargetEventId = null,
                 chatScrollToLiveEdgeRequested = false,
                 chatCallBanner = null,
@@ -1733,13 +1751,15 @@ class AppViewModel(
         viewModelScope.launch {
             try {
                 chatComposerStore.enqueue(request)
+                if (_uiState.value.isRouteForRoom(route.roomId)) {
+                    chatComposerStore.clearActiveTargets()
+                }
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it
                     } else it.copy(
                         isSendingChatMessage = false,
-                        chatSendErrorMessage = null,
-                        chatComposer = chatComposerStore.clearActiveTargets()
+                        chatSendErrorMessage = null
                     )
                 }
             } catch (error: CancellationException) {
@@ -1832,13 +1852,15 @@ class AppViewModel(
             try {
                 chatComposerStore.enqueue(request)
                 onEnqueued()
+                if (_uiState.value.isRouteForRoom(route.roomId)) {
+                    chatComposerStore.clearActiveTargets()
+                }
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it
                     } else it.copy(
                         isSendingChatMessage = false,
-                        chatSendErrorMessage = null,
-                        chatComposer = chatComposerStore.clearActiveTargets()
+                        chatSendErrorMessage = null
                     )
                 }
             } catch (error: CancellationException) {
@@ -1946,83 +1968,53 @@ class AppViewModel(
     }
 
     fun setChatReplyTarget(replyInfo: MatrixReplyInfo) {
-        val route = _uiState.value.activeChatRoute ?: return
-        _uiState.update {
-            if (!it.isRouteForRoom(route.roomId)) {
-                it
-            } else {
-                val chatComposer = chatComposerStore.selectReply(replyInfo)
-                    ?: return@update it
-                it.copy(chatComposer = chatComposer)
-            }
-        }
+        _uiState.value.activeChatRoute ?: return
+        chatComposerStore.selectReply(replyInfo)
     }
 
     fun setChatEditTarget(editTarget: MatrixEditTarget) {
-        val route = _uiState.value.activeChatRoute ?: return
-        _uiState.update {
-            if (!it.isRouteForRoom(route.roomId)) {
-                it
-            } else {
-                val chatComposer = chatComposerStore.selectEdit(editTarget)
-                    ?: return@update it
-                it.copy(chatComposer = chatComposer)
-            }
-        }
+        _uiState.value.activeChatRoute ?: return
+        chatComposerStore.selectEdit(editTarget)
     }
 
     fun startForwardMessage(target: MatrixForwardTarget) {
+        chatComposerStore.startForwardPicker(target) ?: return
         _uiState.update { current ->
-            val chatComposer = chatComposerStore.startForwardPicker(target)
-                ?: return@update current
             current.copy(
-                navState = current.navState.openForwardPicker(),
-                chatComposer = chatComposer
+                navState = current.navState.openForwardPicker()
             )
         }
     }
 
     fun cancelForwardPicker() {
+        chatComposerStore.cancelForwardPicker()
         _uiState.update { current ->
             current.copy(
-                navState = current.navState.closeForwardPicker(),
-                chatComposer = chatComposerStore.cancelForwardPicker()
+                navState = current.navState.closeForwardPicker()
             )
         }
     }
 
     fun selectForwardRoom(room: MatrixRoomSummary) {
-        val target = _uiState.value.pendingForwardTarget ?: return
+        val target = chatComposerStore.state.value.pendingForwardTarget ?: return
         openRoom(room, forwardTarget = target)
     }
 
     fun clearChatForwardTarget() {
-        _uiState.update {
-            if (it.chatForwardTarget == null) {
-                it
-            } else {
-                it.copy(chatComposer = chatComposerStore.clearForward())
-            }
+        if (chatComposerStore.state.value.forwardTarget != null) {
+            chatComposerStore.clearForward()
         }
     }
 
     fun clearChatReplyTarget() {
-        _uiState.update {
-            if (it.chatReplyTarget == null) {
-                it
-            } else {
-                it.copy(chatComposer = chatComposerStore.clearReply())
-            }
+        if (chatComposerStore.state.value.replyTarget != null) {
+            chatComposerStore.clearReply()
         }
     }
 
     fun clearChatEditTarget() {
-        _uiState.update {
-            if (it.chatEditTarget == null) {
-                it
-            } else {
-                it.copy(chatComposer = chatComposerStore.clearEdit())
-            }
+        if (chatComposerStore.state.value.editTarget != null) {
+            chatComposerStore.clearEdit()
         }
     }
 
@@ -3377,8 +3369,7 @@ class AppViewModel(
 
     private fun AppUiState.enterChatLoadingState(
         userId: String,
-        room: MatrixRoomSummary,
-        chatComposer: ChatComposerState
+        room: MatrixRoomSummary
     ): AppUiState {
         if (matrixState.userIdOrNull() != userId) {
             return this
@@ -3399,7 +3390,6 @@ class AppViewModel(
             chatErrorMessage = null,
             isSendingChatMessage = false,
             chatSendErrorMessage = null,
-            chatComposer = chatComposer,
             chatJumpTargetEventId = null,
             chatScrollToLiveEdgeRequested = false,
             chatCallBanner = null

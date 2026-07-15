@@ -136,6 +136,7 @@ private fun noOpSendDriver(): ChatComposerSendDriver {
         createTextEnvelope = { _, _, _, _, _, _ -> },
         createForwardedImageEnvelope = { _, _, _, _, _, _ -> },
         createImageEnvelope = { _, _, _, _, _, _ -> },
+        createVoiceEnvelope = { _, _, _, _, _ -> },
         kickOutbox = { _, _ -> }
     )
 }

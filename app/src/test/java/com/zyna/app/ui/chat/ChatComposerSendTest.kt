@@ -10,6 +10,7 @@ import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
+import com.zyna.app.data.outgoing.OutgoingVoiceDraft
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -179,6 +180,47 @@ class ChatComposerSendTest {
     }
 
     @Test
+    fun blankOrBusyVoiceRequest_isRejectedBeforeIdentifiersAreAllocated() {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+
+        assertNull(
+            store.createVoiceSendRequest(
+                target = TARGET,
+                draft = VOICE.copy(localPath = " "),
+                isSending = false
+            )
+        )
+        assertNull(
+            store.createVoiceSendRequest(
+                target = TARGET,
+                draft = VOICE,
+                isSending = true
+            )
+        )
+
+        assertEquals(0, recorder.idCallCount)
+        assertEquals(0, recorder.transactionCallCount)
+    }
+
+    @Test
+    fun voiceRequest_capturesReplyWithoutAllocatingIdentifiers() {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+        store.selectReply(REPLY)
+
+        val request = store.createVoiceSendRequest(
+            target = TARGET,
+            draft = VOICE,
+            isSending = false
+        )
+
+        assertEquals(ChatComposerSendRequest.Voice(TARGET, VOICE, REPLY), request)
+        assertEquals(0, recorder.idCallCount)
+        assertEquals(0, recorder.transactionCallCount)
+    }
+
+    @Test
     fun enqueueText_createsDurableEnvelopeBeforeKickingOutbox() = runBlocking {
         val recorder = RecordingSendDriver()
         val store = ChatComposerStore(recorder.driver)
@@ -342,6 +384,33 @@ class ChatComposerSendTest {
         assertEquals(listOf("photo", "kick:new-images:null"), recorder.events)
     }
 
+    @Test
+    fun enqueueVoice_usesCapturedReplyBeforeKickingOutbox() = runBlocking {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+        store.selectReply(REPLY)
+        val request = requireNotNull(
+            store.createVoiceSendRequest(TARGET, VOICE, isSending = false)
+        )
+        store.clearReply()
+
+        store.enqueue(request)
+
+        assertEquals(
+            listOf(
+                VoiceEnvelope(
+                    target = TARGET,
+                    envelopeId = "voice:id-1",
+                    transactionId = "transaction-1",
+                    draft = VOICE,
+                    replyInfo = REPLY
+                )
+            ),
+            recorder.voiceEnvelopes
+        )
+        assertEquals(listOf("voice", "kick:new-voice:voice:id-1"), recorder.events)
+    }
+
     private companion object {
         val TARGET = ChatComposerSendTarget(
             userId = "@me:example.org",
@@ -390,6 +459,13 @@ class ChatComposerSendTest {
             thumbnailLocalPath = "/tmp/b-thumbnail.jpg",
             blurhash = "blur-b"
         )
+        val VOICE = OutgoingVoiceDraft(
+            localPath = "/tmp/voice.ogg",
+            mimeType = "audio/ogg",
+            sizeBytes = 2_000,
+            durationMillis = 1_500,
+            waveform = listOf(0.1f, 0.5f, 0.2f)
+        )
 
         fun photoDraft(
             items: List<OutgoingPhotoDraftItem>,
@@ -418,6 +494,7 @@ private class RecordingSendDriver(
     val textEnvelopes = mutableListOf<TextEnvelope>()
     val imageEnvelopes = mutableListOf<ImageEnvelope>()
     val photoEnvelopes = mutableListOf<PhotoEnvelope>()
+    val voiceEnvelopes = mutableListOf<VoiceEnvelope>()
     val events = mutableListOf<String>()
 
     val driver = ChatComposerSendDriver(
@@ -470,6 +547,17 @@ private class RecordingSendDriver(
             )
             events += "photo"
         },
+        createVoiceEnvelope = {
+                target, envelopeId, transactionId, draft, replyInfo ->
+            voiceEnvelopes += VoiceEnvelope(
+                target,
+                envelopeId,
+                transactionId,
+                draft,
+                replyInfo
+            )
+            events += "voice"
+        },
         kickOutbox = { reason, envelopeId ->
             events += "kick:$reason:$envelopeId"
         }
@@ -508,4 +596,12 @@ private data class PhotoEnvelope(
     val item: OutgoingPhotoDraftItem,
     val caption: String?,
     val attributes: ZynaMessageAttributes
+)
+
+private data class VoiceEnvelope(
+    val target: ChatComposerSendTarget,
+    val envelopeId: String,
+    val transactionId: String,
+    val draft: OutgoingVoiceDraft,
+    val replyInfo: MatrixReplyInfo?
 )

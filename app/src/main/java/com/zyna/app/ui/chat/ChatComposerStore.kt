@@ -16,6 +16,7 @@ import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
+import com.zyna.app.data.outgoing.OutgoingVoiceDraft
 import java.util.UUID
 
 data class ChatComposerState(
@@ -59,6 +60,12 @@ internal sealed interface ChatComposerSendRequest {
         val groupId: String,
         val draft: OutgoingPhotoDraft
     ) : ChatComposerSendRequest
+
+    data class Voice(
+        override val target: ChatComposerSendTarget,
+        val draft: OutgoingVoiceDraft,
+        val replyInfo: MatrixReplyInfo?
+    ) : ChatComposerSendRequest
 }
 
 internal class ChatComposerSendDriver(
@@ -93,6 +100,13 @@ internal class ChatComposerSendDriver(
         item: OutgoingPhotoDraftItem,
         caption: String?,
         attributes: ZynaMessageAttributes
+    ) -> Unit,
+    val createVoiceEnvelope: suspend (
+        target: ChatComposerSendTarget,
+        envelopeId: String,
+        transactionId: String,
+        draft: OutgoingVoiceDraft,
+        replyInfo: MatrixReplyInfo?
     ) -> Unit,
     val kickOutbox: (reason: String, envelopeId: String?) -> Unit
 )
@@ -208,12 +222,29 @@ internal class ChatComposerStore(
         )
     }
 
+    @MainThread
+    fun createVoiceSendRequest(
+        target: ChatComposerSendTarget,
+        draft: OutgoingVoiceDraft,
+        isSending: Boolean
+    ): ChatComposerSendRequest.Voice? {
+        if (draft.localPath.isBlank() || isSending) {
+            return null
+        }
+        return ChatComposerSendRequest.Voice(
+            target = target,
+            draft = draft,
+            replyInfo = state.replyTarget
+        )
+    }
+
     suspend fun enqueue(request: ChatComposerSendRequest) {
         when (request) {
             is ChatComposerSendRequest.Text -> enqueueText(request)
             is ChatComposerSendRequest.Edit -> enqueueEdit(request)
             is ChatComposerSendRequest.ForwardImages -> enqueueForwardedImages(request)
             is ChatComposerSendRequest.Photos -> enqueuePhotos(request)
+            is ChatComposerSendRequest.Voice -> enqueueVoice(request)
         }
     }
 
@@ -337,6 +368,19 @@ internal class ChatComposerStore(
         sendDriver.kickOutbox("new-images", null)
     }
 
+    private suspend fun enqueueVoice(request: ChatComposerSendRequest.Voice) {
+        val envelopeId = "voice:${sendDriver.nextId()}"
+        val transactionId = sendDriver.prepareTransactionId()
+        sendDriver.createVoiceEnvelope(
+            request.target,
+            envelopeId,
+            transactionId,
+            request.draft,
+            request.replyInfo
+        )
+        sendDriver.kickOutbox("new-voice", envelopeId)
+    }
+
     private fun createImageAttributes(
         forwardedFrom: String?,
         groupId: String,
@@ -440,6 +484,21 @@ internal fun createChatComposerStore(
                     blurhash = item.blurhash,
                     caption = caption,
                     zynaAttributes = attributes
+                )
+            },
+            createVoiceEnvelope = { target, envelopeId, transactionId, draft,
+                replyInfo ->
+                localCacheRepository.createOutgoingVoiceEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    localPath = draft.localPath,
+                    mimeType = draft.mimeType,
+                    sizeBytes = draft.sizeBytes,
+                    durationMillis = draft.durationMillis,
+                    waveform = draft.waveform,
+                    replyInfo = replyInfo
                 )
             },
             kickOutbox = outgoingOutboxService::kick

@@ -1813,10 +1813,11 @@ class AppViewModel(
         val state = _uiState.value
         val route = state.activeChatRoute ?: return false
         val userId = state.matrixState.userIdOrNull() ?: return false
-        if (draft.localPath.isBlank() || state.isSendingChatMessage) {
-            return false
-        }
-        val replyInfo = state.chatReplyTarget
+        val request = chatComposerStore.createVoiceSendRequest(
+            target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
+            draft = draft,
+            isSending = state.isSendingChatMessage
+        ) ?: return false
 
         _uiState.update {
             if (!it.isRouteForRoom(route.roomId)) {
@@ -1829,24 +1830,7 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                val envelopeId = "voice:${UUID.randomUUID()}"
-                val transactionId = matrixClientService.prepareTransactionId()
-                localCacheRepository.createOutgoingVoiceEnvelope(
-                    userId = userId,
-                    roomId = route.roomId,
-                    envelopeId = envelopeId,
-                    transactionId = transactionId,
-                    localPath = draft.localPath,
-                    mimeType = draft.mimeType,
-                    sizeBytes = draft.sizeBytes,
-                    durationMillis = draft.durationMillis,
-                    waveform = draft.waveform,
-                    replyInfo = replyInfo
-                )
-                outgoingOutboxService.kick(
-                    reason = "new-voice",
-                    envelopeId = envelopeId
-                )
+                chatComposerStore.enqueue(request)
                 onEnqueued()
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {

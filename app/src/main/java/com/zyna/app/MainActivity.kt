@@ -47,6 +47,7 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallController
 import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
 import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
+import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
@@ -64,6 +65,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
+    private data class RootRenderInput(
+        val state: AppUiState,
+        val chatComposer: ChatComposerState,
+        val preferences: ZynaRootPreferences
+    )
+
     private enum class RecordAudioPermissionRequest {
         VOICE_RECORDING,
         NATIVE_MATRIX_RTC_CALL
@@ -311,16 +318,22 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(
                     appViewModel.uiState,
+                    appViewModel.chatComposerState,
                     appContainer.chatBubbleThemeStore.selectedTheme,
                     appContainer.appThemeStore.selectedMode,
                     appContainer.presenceSettingsStore.selectedProvider
-                ) { state, chatBubbleTheme, appThemeMode, presenceProvider ->
-                    state to ZynaRootPreferences(
-                        chatBubbleTheme = chatBubbleTheme,
-                        appThemeMode = appThemeMode,
-                        presenceProvider = presenceProvider
+                ) { state, chatComposer, chatBubbleTheme, appThemeMode, presenceProvider ->
+                    RootRenderInput(
+                        state = state,
+                        chatComposer = chatComposer,
+                        preferences = ZynaRootPreferences(
+                            chatBubbleTheme = chatBubbleTheme,
+                            appThemeMode = appThemeMode,
+                            presenceProvider = presenceProvider
+                        )
                     )
-                }.collect { (state, preferences) ->
+                }.collect { input ->
+                    val state = input.state
                     val collectStart = ZynaPerfLog.start()
                     ZynaPerfLog.mark {
                         "activity.uiState.collect route=${state.route.perfName()} " +
@@ -331,7 +344,12 @@ class MainActivity : AppCompatActivity() {
                     }
                     latestState = state
                     hasRenderedState = true
-                    rootHost.render(state, actions, preferences)
+                    rootHost.render(
+                        state = state,
+                        chatComposer = input.chatComposer,
+                        actions = actions,
+                        preferences = input.preferences
+                    )
                     startPendingNativeMatrixRtcCallIfNeeded(state, actions)
                     requestNotificationPermissionIfNeeded(state)
                     restoreNativeMatrixRtcCallOverlayIfNeeded(state)

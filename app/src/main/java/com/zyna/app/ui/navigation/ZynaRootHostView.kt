@@ -27,6 +27,7 @@ import com.zyna.app.ui.auth.LoginScreen
 import com.zyna.app.ui.calls.CallsScreenView
 import com.zyna.app.ui.calls.CallsScreenViewActions
 import com.zyna.app.ui.calls.CallsScreenViewState
+import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
@@ -89,6 +90,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var bottomInset = 0
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
+    private var latestChatComposer: ChatComposerState? = null
     private var latestActions: ZynaAppActions? = null
     private var latestPreferences: ZynaRootPreferences? = null
     private var renderSequence = 0L
@@ -207,6 +209,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     fun render(
         state: AppUiState,
+        chatComposer: ChatComposerState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ) {
@@ -218,6 +221,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "messages=${state.chatMessages.size} loading=${state.isLoadingChat}"
         }
         latestState = state
+        latestChatComposer = chatComposer
         latestActions = actions
         latestPreferences = preferences
 
@@ -531,13 +535,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
+        val chatComposer = latestChatComposer ?: return
         val actions = latestActions ?: return
         val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
             roomsScrollAnchors.clear()
         }
         val entriesStart = ZynaPerfLog.start()
-        val entries = entriesFor(state, actions, preferences)
+        val entries = entriesFor(state, chatComposer, actions, preferences)
         ZynaPerfLog.end(
             entriesStart,
             "root.entriesFor"
@@ -632,6 +637,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun entriesFor(
         state: AppUiState,
+        chatComposer: ChatComposerState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
@@ -664,7 +670,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
-                is AppRoute.Chat -> chatEntry(state, actions, preferences, route)
+                is AppRoute.Chat -> chatEntry(
+                    state,
+                    chatComposer,
+                    actions,
+                    preferences,
+                    route
+                )
             }
         }
     }
@@ -1012,6 +1024,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun chatEntry(
         state: AppUiState,
+        chatComposer: ChatComposerState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences,
         route: AppRoute.Chat
@@ -1057,9 +1070,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         errorMessage = state.chatErrorMessage,
                         isSendingMessage = state.isSendingChatMessage,
                         sendErrorMessage = state.chatSendErrorMessage,
-                        replyTarget = state.chatReplyTarget,
-                        editTarget = state.chatEditTarget,
-                        forwardTarget = state.chatForwardTarget,
+                        replyTarget = chatComposer.replyTarget,
+                        editTarget = chatComposer.editTarget,
+                        forwardTarget = chatComposer.forwardTarget,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         audioPlaybackController = actions.audioPlaybackController,
                         voiceRecorderController = actions.voiceRecorderController,

@@ -57,11 +57,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -149,8 +148,6 @@ data class AppUiState(
     val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
     val chatSendErrorMessage: String? = null,
-    // Derived from ChatComposerStore in AppViewModel.uiState.
-    val chatComposer: ChatComposerState = ChatComposerState(),
     val chatJumpTargetEventId: String? = null,
     val chatScrollToLiveEdgeRequested: Boolean = false,
     val chatCallBanner: ChatCallBannerState? = null
@@ -166,18 +163,6 @@ data class AppUiState(
 
     val activeChatRoute: AppRoute.Chat?
         get() = navState.activeChatRoute
-
-    val chatReplyTarget: MatrixReplyInfo?
-        get() = chatComposer.replyTarget
-
-    val chatEditTarget: MatrixEditTarget?
-        get() = chatComposer.editTarget
-
-    val chatForwardTarget: MatrixForwardTarget?
-        get() = chatComposer.forwardTarget
-
-    val pendingForwardTarget: MatrixForwardTarget?
-        get() = chatComposer.pendingForwardTarget
 
     val activeChatDirectUserId: String?
         get() = activeChatRoute?.let { route ->
@@ -293,22 +278,8 @@ class AppViewModel(
         localCacheRepository = localCacheRepository,
         outgoingOutboxService = outgoingOutboxService
     )
-    val uiState: StateFlow<AppUiState> = combine(
-        _uiState,
-        chatComposerStore.state
-    ) { state, chatComposer ->
-        if (state.chatComposer == chatComposer) {
-            state
-        } else {
-            state.copy(chatComposer = chatComposer)
-        }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.Eagerly,
-        initialValue = _uiState.value.copy(
-            chatComposer = chatComposerStore.state.value
-        )
-    )
+    val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+    val chatComposerState: StateFlow<ChatComposerState> = chatComposerStore.state
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
     }

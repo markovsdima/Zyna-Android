@@ -30,6 +30,7 @@ import com.zyna.app.ui.calls.CallsScreenViewActions
 import com.zyna.app.ui.calls.CallsScreenViewState
 import com.zyna.app.ui.chat.ChatCallInfoState
 import com.zyna.app.ui.chat.ChatComposerState
+import com.zyna.app.ui.chat.ChatFeatureState
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
@@ -93,10 +94,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var bottomInset = 0
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
-    private var latestChatComposer: ChatComposerState? = null
     private var latestCallHistory: CallHistoryState? = null
-    private var latestChatTimeline: ChatTimelineState? = null
-    private var latestChatCallInfo: ChatCallInfoState? = null
+    private var latestChat: ChatFeatureState? = null
     private var latestActions: ZynaAppActions? = null
     private var latestPreferences: ZynaRootPreferences? = null
     private var renderSequence = 0L
@@ -215,10 +214,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     fun render(
         state: AppUiState,
-        chatComposer: ChatComposerState,
         callHistory: CallHistoryState,
-        chatTimeline: ChatTimelineState,
-        chatCallInfo: ChatCallInfoState,
+        chat: ChatFeatureState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ) {
@@ -227,13 +224,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val sequence = renderSequence
         ZynaPerfLog.mark {
             "root.render.begin seq=$sequence route=${state.route.perfName()} " +
-                "messages=${chatTimeline.messages.size} loading=${chatTimeline.isLoading}"
+                "messages=${chat.timeline.messages.size} loading=${chat.timeline.isLoading}"
         }
         latestState = state
-        latestChatComposer = chatComposer
         latestCallHistory = callHistory
-        latestChatTimeline = chatTimeline
-        latestChatCallInfo = chatCallInfo
+        latestChat = chat
         latestActions = actions
         latestPreferences = preferences
 
@@ -243,7 +238,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             "root.render.done"
         ) {
             "seq=$sequence route=${state.route.perfName()} " +
-                "messages=${chatTimeline.messages.size}"
+                "messages=${chat.timeline.messages.size}"
         }
     }
 
@@ -548,10 +543,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
-        val chatComposer = latestChatComposer ?: return
         val callHistory = latestCallHistory ?: return
-        val chatTimeline = latestChatTimeline ?: return
-        val chatCallInfo = latestChatCallInfo ?: return
+        val chat = latestChat ?: return
         val actions = latestActions ?: return
         val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
@@ -560,10 +553,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val entriesStart = ZynaPerfLog.start()
         val entries = entriesFor(
             state,
-            chatComposer,
             callHistory,
-            chatTimeline,
-            chatCallInfo,
+            chat,
             actions,
             preferences
         )
@@ -661,10 +652,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun entriesFor(
         state: AppUiState,
-        chatComposer: ChatComposerState,
         callHistory: CallHistoryState,
-        chatTimeline: ChatTimelineState,
-        chatCallInfo: ChatCallInfoState,
+        chat: ChatFeatureState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
@@ -699,9 +688,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
                 is AppRoute.Chat -> chatEntry(
                     state,
-                    chatComposer,
-                    chatTimeline,
-                    chatCallInfo,
+                    chat,
                     actions,
                     preferences,
                     route
@@ -1051,22 +1038,20 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun chatEntry(
         state: AppUiState,
-        chatComposer: ChatComposerState,
-        chatTimeline: ChatTimelineState,
-        chatCallInfo: ChatCallInfoState,
+        chat: ChatFeatureState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences,
         route: AppRoute.Chat
     ): ZynaScreenEntry {
-        val timeline = chatTimeline.takeIf { it.roomId == route.roomId }
+        val timeline = chat.timeline.takeIf { it.roomId == route.roomId }
             ?: ChatTimelineState(
                 roomId = route.roomId,
                 isLoading = true,
                 canLoadOlder = false
             )
-        val composer = chatComposer.takeIf { it.roomId == route.roomId }
+        val composer = chat.composer.takeIf { it.roomId == route.roomId }
             ?: ChatComposerState(roomId = route.roomId)
-        val callInfo = chatCallInfo.takeIf { it.roomId == route.roomId }
+        val callInfo = chat.callInfo.takeIf { it.roomId == route.roomId }
             ?: ChatCallInfoState(roomId = route.roomId)
         return ZynaScreenEntry(
             key = "chat:${route.roomId}",

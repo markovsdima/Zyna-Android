@@ -39,7 +39,6 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.messaging.CaptionPlacement
-import com.zyna.app.ui.app.ChatCallBannerState
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest

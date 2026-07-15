@@ -39,6 +39,9 @@ import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
+import com.zyna.app.ui.chat.ChatCallBannerPolicy
+import com.zyna.app.ui.chat.ChatCallBannerState
+import com.zyna.app.ui.chat.ChatMatrixRtcRingOverride
 import com.zyna.app.ui.chat.ChatMessageActionRequest
 import com.zyna.app.ui.chat.ChatMessageActionResult
 import com.zyna.app.ui.chat.ChatMessageActionTarget
@@ -244,20 +247,6 @@ data class AppUiState(
             userId.contains(query, ignoreCase = true)
     }
 }
-
-data class ChatCallBannerState(
-    val title: String,
-    val actionLabel: String,
-    val isLocalCall: Boolean,
-    val remoteMembershipCount: Int = 0
-)
-
-private data class ChatMatrixRtcRingOverride(
-    val eventId: String,
-    val senderId: String,
-    val expiresAtMillis: Long,
-    val hasObservedActiveCall: Boolean
-)
 
 private data class ChatCallInfoSnapshot(
     val roomInfo: MatrixRoomCallInfo,
@@ -2768,42 +2757,6 @@ class AppViewModel(
                 }
             }
 
-            fun mergeMembershipFallback(
-                roomInfo: MatrixRoomCallInfo,
-                fallback: MatrixRoomCallInfo?
-            ): MatrixRoomCallInfo {
-                if (roomInfo.hasRoomCall || fallback == null || !fallback.hasRoomCall || !fallback.isAudioCall) {
-                    return roomInfo
-                }
-                return roomInfo.copy(
-                    hasRoomCall = true,
-                    activeParticipantUserIds = fallback.activeParticipantUserIds,
-                    isAudioCall = true
-                )
-            }
-
-            fun effectiveCallInfo(
-                observed: MatrixRoomCallInfo,
-                override: ChatMatrixRtcRingOverride?
-            ): MatrixRoomCallInfo {
-                val currentOverride = override ?: return observed
-                if (
-                    currentOverride.expiresAtMillis <= System.currentTimeMillis() ||
-                    observed.hasRoomCall
-                ) {
-                    return observed
-                }
-
-                val participantUserIds = observed.activeParticipantUserIds
-                    .takeIf { it.isNotEmpty() }
-                    ?: listOf(currentOverride.senderId)
-                return observed.copy(
-                    hasRoomCall = true,
-                    activeParticipantUserIds = participantUserIds,
-                    isAudioCall = true
-                )
-            }
-
             val notificationJob = launch {
                 matrixClientService.incomingMatrixRtcCallNotifications.collect { notification ->
                     handleIncomingMatrixRtcCallNotification(
@@ -2829,7 +2782,10 @@ class AppViewModel(
                 ) { callInfo, _, override, fallback ->
                     ChatCallInfoSnapshot(
                         roomInfo = callInfo,
-                        observed = mergeMembershipFallback(callInfo, fallback),
+                        observed = ChatCallBannerPolicy.mergeMembershipFallback(
+                            callInfo,
+                            fallback
+                        ),
                         ringOverride = override
                     )
                 }
@@ -2838,9 +2794,10 @@ class AppViewModel(
                             observed = snapshot.roomInfo,
                             override = snapshot.ringOverride
                         )
-                        val callInfo = effectiveCallInfo(
+                        val callInfo = ChatCallBannerPolicy.applyRingOverride(
                             observed = snapshot.observed,
-                            override = snapshot.ringOverride
+                            override = snapshot.ringOverride,
+                            nowMillis = System.currentTimeMillis()
                         )
                         updateChatCallBanner(userId, roomId, callInfo)
                     }
@@ -2874,19 +2831,12 @@ class AppViewModel(
         scheduleExpiry: (ChatMatrixRtcRingOverride) -> Unit,
         scheduleValidation: (eventId: String, senderId: String, reason: String, delayMillis: Long) -> Unit
     ) {
-        if (notification.roomId != roomId || !notification.isAudioCall) {
-            return
-        }
-        if (notification.expiresAtMillis <= System.currentTimeMillis()) {
-            return
-        }
-
-        val override = ChatMatrixRtcRingOverride(
-            eventId = notification.eventId,
-            senderId = notification.senderId,
-            expiresAtMillis = notification.expiresAtMillis,
-            hasObservedActiveCall = lastObservedCallInfo?.hasRoomCall == true
-        )
+        val override = ChatCallBannerPolicy.ringOverrideForNotification(
+            notification = notification,
+            roomId = roomId,
+            hasObservedActiveCall = lastObservedCallInfo?.hasRoomCall == true,
+            nowMillis = System.currentTimeMillis()
+        ) ?: return
         ringOverride.value = override
         scheduleExpiry(override)
         if (!override.hasObservedActiveCall) {
@@ -2925,21 +2875,11 @@ class AppViewModel(
         callInfo: MatrixRoomCallInfo
     ) {
         val localCallRoomId = nativeMatrixRtcCallService.currentRoomId()
-        val banner = when {
-            localCallRoomId == roomId -> ChatCallBannerState(
-                title = "Call in progress",
-                actionLabel = "Return",
-                isLocalCall = true,
-                remoteMembershipCount = callInfo.activeParticipantCount
-            )
-            callInfo.hasRoomCall && callInfo.isAudioCall -> ChatCallBannerState(
-                title = "Call in progress",
-                actionLabel = "Join",
-                isLocalCall = false,
-                remoteMembershipCount = callInfo.activeParticipantCount
-            )
-            else -> null
-        }
+        val banner = ChatCallBannerPolicy.projectBanner(
+            roomId = roomId,
+            localCallRoomId = localCallRoomId,
+            callInfo = callInfo
+        )
         logChatCall(
             "chatCallBanner roomId=$roomId localCallRoomId=$localCallRoomId " +
                 "hasRoomCall=${callInfo.hasRoomCall} isAudioCall=${callInfo.isAudioCall} " +

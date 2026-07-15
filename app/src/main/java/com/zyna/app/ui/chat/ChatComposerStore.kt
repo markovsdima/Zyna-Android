@@ -11,8 +11,11 @@ import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.messaging.CaptionMode
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupInfo
+import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
+import com.zyna.app.data.outgoing.OutgoingPhotoDraft
+import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
 import java.util.UUID
 
 data class ChatComposerState(
@@ -50,6 +53,12 @@ internal sealed interface ChatComposerSendRequest {
         override val target: ChatComposerSendTarget,
         val forwardTarget: MatrixForwardTarget
     ) : ChatComposerSendRequest
+
+    data class Photos(
+        override val target: ChatComposerSendTarget,
+        val groupId: String,
+        val draft: OutgoingPhotoDraft
+    ) : ChatComposerSendRequest
 }
 
 internal class ChatComposerSendDriver(
@@ -74,6 +83,14 @@ internal class ChatComposerSendDriver(
         envelopeId: String,
         transactionId: String,
         image: MatrixForwardImageItem,
+        caption: String?,
+        attributes: ZynaMessageAttributes
+    ) -> Unit,
+    val createImageEnvelope: suspend (
+        target: ChatComposerSendTarget,
+        envelopeId: String,
+        transactionId: String,
+        item: OutgoingPhotoDraftItem,
         caption: String?,
         attributes: ZynaMessageAttributes
     ) -> Unit,
@@ -174,11 +191,29 @@ internal class ChatComposerStore(
         }
     }
 
+    @MainThread
+    fun createPhotoSendRequest(
+        target: ChatComposerSendTarget,
+        draft: OutgoingPhotoDraft,
+        isSending: Boolean
+    ): ChatComposerSendRequest.Photos? {
+        val items = draft.items.filter { it.localPath.isNotBlank() }
+        if (items.isEmpty() || isSending) {
+            return null
+        }
+        return ChatComposerSendRequest.Photos(
+            target = target,
+            groupId = "photo-group:${sendDriver.nextId()}",
+            draft = draft.copy(items = items)
+        )
+    }
+
     suspend fun enqueue(request: ChatComposerSendRequest) {
         when (request) {
             is ChatComposerSendRequest.Text -> enqueueText(request)
             is ChatComposerSendRequest.Edit -> enqueueEdit(request)
             is ChatComposerSendRequest.ForwardImages -> enqueueForwardedImages(request)
+            is ChatComposerSendRequest.Photos -> enqueuePhotos(request)
         }
     }
 
@@ -251,27 +286,17 @@ internal class ChatComposerStore(
         val forwardTarget = request.forwardTarget
         val items = forwardTarget.imageItems
         val groupId = "forwarded-photo-group:${sendDriver.nextId()}"
-        val shouldWriteMediaGroup = items.size > 1 ||
-            forwardTarget.captionPlacement != CaptionPlacement.BOTTOM ||
-            forwardTarget.layoutOverride != null
 
         items.forEachIndexed { index, item ->
             val envelopeId = "image:${sendDriver.nextId()}"
             val transactionId = sendDriver.prepareTransactionId()
-            val attributes = ZynaMessageAttributes(
+            val attributes = createImageAttributes(
                 forwardedFrom = forwardTarget.forwardedFrom,
-                mediaGroup = if (shouldWriteMediaGroup) {
-                    MediaGroupInfo(
-                        id = groupId,
-                        index = index,
-                        total = items.size,
-                        captionMode = CaptionMode.REPLICATED,
-                        captionPlacement = forwardTarget.captionPlacement,
-                        layoutOverride = forwardTarget.layoutOverride.takeIf { items.size > 1 }
-                    )
-                } else {
-                    null
-                }
+                groupId = groupId,
+                index = index,
+                total = items.size,
+                captionPlacement = forwardTarget.captionPlacement,
+                layoutOverride = forwardTarget.layoutOverride
             )
             sendDriver.createForwardedImageEnvelope(
                 request.target,
@@ -283,6 +308,61 @@ internal class ChatComposerStore(
             )
         }
         sendDriver.kickOutbox("new-forwarded-images", null)
+    }
+
+    private suspend fun enqueuePhotos(request: ChatComposerSendRequest.Photos) {
+        val draft = request.draft
+        val items = draft.items
+
+        items.forEachIndexed { index, item ->
+            val envelopeId = "image:${sendDriver.nextId()}"
+            val transactionId = sendDriver.prepareTransactionId()
+            val attributes = createImageAttributes(
+                forwardedFrom = null,
+                groupId = request.groupId,
+                index = index,
+                total = items.size,
+                captionPlacement = draft.captionPlacement,
+                layoutOverride = draft.layoutOverride
+            )
+            sendDriver.createImageEnvelope(
+                request.target,
+                envelopeId,
+                transactionId,
+                item,
+                draft.caption,
+                attributes
+            )
+        }
+        sendDriver.kickOutbox("new-images", null)
+    }
+
+    private fun createImageAttributes(
+        forwardedFrom: String?,
+        groupId: String,
+        index: Int,
+        total: Int,
+        captionPlacement: CaptionPlacement,
+        layoutOverride: MediaGroupLayoutOverride?
+    ): ZynaMessageAttributes {
+        val shouldWriteMediaGroup = total > 1 ||
+            captionPlacement != CaptionPlacement.BOTTOM ||
+            layoutOverride != null
+        return ZynaMessageAttributes(
+            forwardedFrom = forwardedFrom,
+            mediaGroup = if (shouldWriteMediaGroup) {
+                MediaGroupInfo(
+                    id = groupId,
+                    index = index,
+                    total = total,
+                    captionMode = CaptionMode.REPLICATED,
+                    captionPlacement = captionPlacement,
+                    layoutOverride = layoutOverride.takeIf { total > 1 }
+                )
+            } else {
+                null
+            }
+        )
     }
 
     private fun setState(nextState: ChatComposerState) {
@@ -336,6 +416,28 @@ internal fun createChatComposerStore(
                     envelopeId = envelopeId,
                     transactionId = transactionId,
                     image = image,
+                    caption = caption,
+                    zynaAttributes = attributes
+                )
+            },
+            createImageEnvelope = { target, envelopeId, transactionId, item,
+                caption, attributes ->
+                localCacheRepository.createOutgoingImageEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    localPath = item.localPath,
+                    mimeType = item.mimeType,
+                    width = item.width,
+                    height = item.height,
+                    sizeBytes = item.sizeBytes,
+                    thumbnailLocalPath = item.thumbnailLocalPath,
+                    thumbnailMimeType = item.thumbnailMimeType,
+                    thumbnailWidth = item.thumbnailWidth,
+                    thumbnailHeight = item.thumbnailHeight,
+                    thumbnailSizeBytes = item.thumbnailSizeBytes,
+                    blurhash = item.blurhash,
                     caption = caption,
                     zynaAttributes = attributes
                 )

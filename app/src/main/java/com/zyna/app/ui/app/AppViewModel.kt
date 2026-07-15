@@ -29,10 +29,6 @@ import com.zyna.app.data.matrix.MatrixOwnProfile
 import com.zyna.app.data.matrix.MatrixRoomCallInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixUserProfile
-import com.zyna.app.data.messaging.CaptionMode
-import com.zyna.app.data.messaging.CaptionPlacement
-import com.zyna.app.data.messaging.MediaGroupInfo
-import com.zyna.app.data.messaging.ZynaMessageAttributes
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
@@ -1764,17 +1760,14 @@ class AppViewModel(
     }
 
     fun sendPhotoMessages(draft: OutgoingPhotoDraft): Boolean {
-        val route = _uiState.value.activeChatRoute ?: return false
-        val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
-        val items = draft.items.filter { it.localPath.isNotBlank() }
-        if (items.isEmpty() || _uiState.value.isSendingChatMessage) {
-            return false
-        }
-
-        val groupId = "photo-group:${UUID.randomUUID()}"
-        val shouldWriteMediaGroup = items.size > 1 ||
-            draft.captionPlacement != CaptionPlacement.BOTTOM ||
-            draft.layoutOverride != null
+        val state = _uiState.value
+        val route = state.activeChatRoute ?: return false
+        val userId = state.matrixState.userIdOrNull() ?: return false
+        val request = chatComposerStore.createPhotoSendRequest(
+            target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
+            draft = draft,
+            isSending = state.isSendingChatMessage
+        ) ?: return false
 
         _uiState.update {
             if (!it.isRouteForRoom(route.roomId)) {
@@ -1787,44 +1780,7 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                items.forEachIndexed { index, item ->
-                    val envelopeId = "image:${UUID.randomUUID()}"
-                    val transactionId = matrixClientService.prepareTransactionId()
-                    val attributes = if (shouldWriteMediaGroup) {
-                        ZynaMessageAttributes(
-                            mediaGroup = MediaGroupInfo(
-                                id = groupId,
-                                index = index,
-                                total = items.size,
-                                captionMode = CaptionMode.REPLICATED,
-                                captionPlacement = draft.captionPlacement,
-                                layoutOverride = draft.layoutOverride.takeIf { items.size > 1 }
-                            )
-                        )
-                    } else {
-                        ZynaMessageAttributes()
-                    }
-                    localCacheRepository.createOutgoingImageEnvelope(
-                        userId = userId,
-                        roomId = route.roomId,
-                        envelopeId = envelopeId,
-                        transactionId = transactionId,
-                        localPath = item.localPath,
-                        mimeType = item.mimeType,
-                        width = item.width,
-                        height = item.height,
-                        sizeBytes = item.sizeBytes,
-                        thumbnailLocalPath = item.thumbnailLocalPath,
-                        thumbnailMimeType = item.thumbnailMimeType,
-                        thumbnailWidth = item.thumbnailWidth,
-                        thumbnailHeight = item.thumbnailHeight,
-                        thumbnailSizeBytes = item.thumbnailSizeBytes,
-                        blurhash = item.blurhash,
-                        caption = draft.caption,
-                        zynaAttributes = attributes
-                    )
-                }
-                outgoingOutboxService.kick(reason = "new-images")
+                chatComposerStore.enqueue(request)
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it

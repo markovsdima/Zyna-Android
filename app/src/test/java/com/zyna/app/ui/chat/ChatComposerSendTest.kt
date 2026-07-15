@@ -8,6 +8,8 @@ import com.zyna.app.data.messaging.CaptionMode
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.ZynaMessageAttributes
+import com.zyna.app.data.outgoing.OutgoingPhotoDraft
+import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -127,6 +129,56 @@ class ChatComposerSendTest {
     }
 
     @Test
+    fun photoRequest_filtersInvalidItemsAndReservesGroupId() {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+        val draft = photoDraft(
+            items = listOf(PHOTO_A.copy(localPath = ""), PHOTO_A)
+        )
+
+        val request = store.createPhotoSendRequest(
+            target = TARGET,
+            draft = draft,
+            isSending = false
+        )
+
+        assertEquals(
+            ChatComposerSendRequest.Photos(
+                target = TARGET,
+                groupId = "photo-group:id-1",
+                draft = draft.copy(items = listOf(PHOTO_A))
+            ),
+            request
+        )
+        assertEquals(1, recorder.idCallCount)
+        assertEquals(0, recorder.transactionCallCount)
+    }
+
+    @Test
+    fun emptyOrBusyPhotoRequest_isRejectedBeforeGroupIdIsAllocated() {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+
+        assertNull(
+            store.createPhotoSendRequest(
+                target = TARGET,
+                draft = photoDraft(items = listOf(PHOTO_A.copy(localPath = ""))),
+                isSending = false
+            )
+        )
+        assertNull(
+            store.createPhotoSendRequest(
+                target = TARGET,
+                draft = photoDraft(items = listOf(PHOTO_A)),
+                isSending = true
+            )
+        )
+
+        assertEquals(0, recorder.idCallCount)
+        assertEquals(0, recorder.transactionCallCount)
+    }
+
+    @Test
     fun enqueueText_createsDurableEnvelopeBeforeKickingOutbox() = runBlocking {
         val recorder = RecordingSendDriver()
         val store = ChatComposerStore(recorder.driver)
@@ -234,6 +286,62 @@ class ChatComposerSendTest {
         assertFalse(recorder.events.dropLast(1).any { it.startsWith("kick:") })
     }
 
+    @Test
+    fun enqueuePhotos_writesGroupMetadataBeforeSingleKick() = runBlocking {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+        val layout = MediaGroupLayoutOverride(primarySplitPermille = 640)
+        val draft = photoDraft(
+            items = listOf(PHOTO_A, PHOTO_B),
+            caption = "Caption",
+            captionPlacement = CaptionPlacement.TOP,
+            layoutOverride = layout
+        )
+        val request = requireNotNull(
+            store.createPhotoSendRequest(TARGET, draft, isSending = false)
+        )
+
+        store.enqueue(request)
+
+        assertEquals(2, recorder.photoEnvelopes.size)
+        recorder.photoEnvelopes.forEachIndexed { index, envelope ->
+            assertEquals(TARGET, envelope.target)
+            assertEquals("image:id-${index + 2}", envelope.envelopeId)
+            assertEquals("transaction-${index + 1}", envelope.transactionId)
+            assertEquals(draft.items[index], envelope.item)
+            assertEquals("Caption", envelope.caption)
+            assertNull(envelope.attributes.forwardedFrom)
+            assertEquals("photo-group:id-1", envelope.attributes.mediaGroup?.id)
+            assertEquals(index, envelope.attributes.mediaGroup?.index)
+            assertEquals(2, envelope.attributes.mediaGroup?.total)
+            assertEquals(CaptionMode.REPLICATED, envelope.attributes.mediaGroup?.captionMode)
+            assertEquals(CaptionPlacement.TOP, envelope.attributes.mediaGroup?.captionPlacement)
+            assertEquals(layout, envelope.attributes.mediaGroup?.layoutOverride)
+        }
+        assertEquals(
+            listOf("photo", "photo", "kick:new-images:null"),
+            recorder.events
+        )
+    }
+
+    @Test
+    fun enqueueSingleDefaultPhoto_doesNotWriteGroupMetadata() = runBlocking {
+        val recorder = RecordingSendDriver()
+        val store = ChatComposerStore(recorder.driver)
+        val request = requireNotNull(
+            store.createPhotoSendRequest(
+                target = TARGET,
+                draft = photoDraft(items = listOf(PHOTO_A)),
+                isSending = false
+            )
+        )
+
+        store.enqueue(request)
+
+        assertEquals(ZynaMessageAttributes(), recorder.photoEnvelopes.single().attributes)
+        assertEquals(listOf("photo", "kick:new-images:null"), recorder.events)
+    }
+
     private companion object {
         val TARGET = ChatComposerSendTarget(
             userId = "@me:example.org",
@@ -264,6 +372,38 @@ class ChatComposerSendTest {
             blurhash = null
         )
         val IMAGE_B = IMAGE_A.copy(sourceJson = "{\"url\":\"b\"}")
+        val PHOTO_A = OutgoingPhotoDraftItem(
+            localPath = "/tmp/a.jpg",
+            mimeType = "image/jpeg",
+            width = 100,
+            height = 80,
+            sizeBytes = 1_000,
+            thumbnailLocalPath = "/tmp/a-thumbnail.jpg",
+            thumbnailMimeType = "image/jpeg",
+            thumbnailWidth = 50,
+            thumbnailHeight = 40,
+            thumbnailSizeBytes = 250,
+            blurhash = "blur-a"
+        )
+        val PHOTO_B = PHOTO_A.copy(
+            localPath = "/tmp/b.jpg",
+            thumbnailLocalPath = "/tmp/b-thumbnail.jpg",
+            blurhash = "blur-b"
+        )
+
+        fun photoDraft(
+            items: List<OutgoingPhotoDraftItem>,
+            caption: String? = null,
+            captionPlacement: CaptionPlacement = CaptionPlacement.BOTTOM,
+            layoutOverride: MediaGroupLayoutOverride? = null
+        ): OutgoingPhotoDraft {
+            return OutgoingPhotoDraft(
+                items = items,
+                caption = caption,
+                captionPlacement = captionPlacement,
+                layoutOverride = layoutOverride
+            )
+        }
     }
 }
 
@@ -277,6 +417,7 @@ private class RecordingSendDriver(
     val preparedEdits = mutableListOf<PreparedEdit>()
     val textEnvelopes = mutableListOf<TextEnvelope>()
     val imageEnvelopes = mutableListOf<ImageEnvelope>()
+    val photoEnvelopes = mutableListOf<PhotoEnvelope>()
     val events = mutableListOf<String>()
 
     val driver = ChatComposerSendDriver(
@@ -317,6 +458,18 @@ private class RecordingSendDriver(
             )
             events += "image"
         },
+        createImageEnvelope = {
+                target, envelopeId, transactionId, item, caption, attributes ->
+            photoEnvelopes += PhotoEnvelope(
+                target,
+                envelopeId,
+                transactionId,
+                item,
+                caption,
+                attributes
+            )
+            events += "photo"
+        },
         kickOutbox = { reason, envelopeId ->
             events += "kick:$reason:$envelopeId"
         }
@@ -344,6 +497,15 @@ private data class ImageEnvelope(
     val envelopeId: String,
     val transactionId: String,
     val image: MatrixForwardImageItem,
+    val caption: String?,
+    val attributes: ZynaMessageAttributes
+)
+
+private data class PhotoEnvelope(
+    val target: ChatComposerSendTarget,
+    val envelopeId: String,
+    val transactionId: String,
+    val item: OutgoingPhotoDraftItem,
     val caption: String?,
     val attributes: ZynaMessageAttributes
 )

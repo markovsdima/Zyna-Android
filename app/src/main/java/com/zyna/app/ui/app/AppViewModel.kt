@@ -44,6 +44,7 @@ import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
+import com.zyna.app.ui.chat.ChatTimelinePaginationResult
 import com.zyna.app.ui.chat.ChatTimelineTarget
 import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.util.ZynaPerfLog
@@ -300,7 +301,11 @@ class AppViewModel(
             applyChatTimelineWindowUpdate(target, update, isAtLiveEdge)
         },
         onTimelineSettled = ::settleChatTimeline,
-        onTimelineError = ::failChatTimeline
+        onTimelineError = ::failChatTimeline,
+        onPaginationResult = ::applyChatTimelinePaginationResult,
+        onPaginationError = { target, _ ->
+            clearChatTimelinePaginationLoading(target)
+        }
     )
     private var visibleRoomRefreshRequestCount = 0
     private var openRoomJob: Job? = null
@@ -2321,6 +2326,7 @@ class AppViewModel(
         val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
+        val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
         if (
             state.isLoadingChat ||
             state.isLoadingOlderChatMessages ||
@@ -2336,47 +2342,8 @@ class AppViewModel(
             } else it.copy(isLoadingOlderChatMessages = true)
         }
 
-        chatTimelineStore.launchWindowOperation {
-            try {
-                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
-                val didLoadFromCache = timelineStore?.expandOlderFromCache() == true
-                if (didLoadFromCache) {
-                    _uiState.update {
-                        if (!it.isRouteForRoom(userId, route.roomId)) {
-                            it
-                        } else it.copy(
-                            isLoadingOlderChatMessages = false,
-                            canLoadOlderChatMessages = true,
-                            canLoadNewerChatMessages = timelineStore.canLoadNewerFromCache,
-                            isChatAtLiveEdge = timelineStore.isAtLiveEdge
-                        )
-                    }
-                    return@launchWindowOperation
-                }
-
-                val hasReachedStart = matrixClientService.paginateRoomTimelineBackwards(route.roomId)
-                val didLoadFromFreshCache =
-                    timelineStore?.expandOlderFromCacheAfterMaterialization() == true
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = !hasReachedStart || didLoadFromFreshCache,
-                        canLoadNewerChatMessages = timelineStore?.canLoadNewerFromCache
-                            ?: it.canLoadNewerChatMessages,
-                        isChatAtLiveEdge = timelineStore?.isAtLiveEdge ?: it.isChatAtLiveEdge
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(isLoadingOlderChatMessages = false)
-                }
-            }
+        if (!chatTimelineStore.loadOlder(target)) {
+            clearChatTimelinePaginationLoading(target)
         }
     }
 
@@ -2384,6 +2351,7 @@ class AppViewModel(
         val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
+        val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
         if (
             state.isLoadingChat ||
             state.isLoadingOlderChatMessages ||
@@ -2399,51 +2367,8 @@ class AppViewModel(
             } else it.copy(isLoadingOlderChatMessages = true)
         }
 
-        chatTimelineStore.launchWindowOperation {
-            try {
-                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
-                val didLoadFromCache = timelineStore?.expandNewerFromCache() == true
-                if (didLoadFromCache) {
-                    _uiState.update {
-                        if (!it.isRouteForRoom(userId, route.roomId)) {
-                            it
-                        } else it.copy(
-                            isLoadingOlderChatMessages = false,
-                            canLoadNewerChatMessages = timelineStore.canLoadNewerFromCache,
-                            isChatAtLiveEdge = timelineStore.isAtLiveEdge
-                        )
-                    }
-                    return@launchWindowOperation
-                }
-
-                val hasReachedEnd = matrixClientService.paginateRoomTimelineForwards(route.roomId)
-                val didLoadFromFreshCache =
-                    timelineStore?.expandNewerFromCacheAfterMaterialization() == true
-                if (hasReachedEnd && !didLoadFromFreshCache) {
-                    timelineStore?.markNewerFullyLoaded()
-                }
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        canLoadNewerChatMessages = if (hasReachedEnd && !didLoadFromFreshCache) {
-                            false
-                        } else {
-                            timelineStore?.canLoadNewerFromCache == true || !hasReachedEnd
-                        },
-                        isChatAtLiveEdge = timelineStore?.isAtLiveEdge ?: true
-                    )
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(isLoadingOlderChatMessages = false)
-                }
-            }
+        if (!chatTimelineStore.loadNewer(target)) {
+            clearChatTimelinePaginationLoading(target)
         }
     }
 
@@ -2916,6 +2841,34 @@ class AppViewModel(
                 isLoadingOlderChatMessages = false,
                 chatErrorMessage = error.message ?: error.javaClass.simpleName
             )
+        }
+    }
+
+    private fun applyChatTimelinePaginationResult(
+        target: ChatTimelineTarget,
+        result: ChatTimelinePaginationResult
+    ) {
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else it.copy(
+                isLoadingOlderChatMessages = false,
+                canLoadOlderChatMessages = result.canLoadOlder
+                    ?: it.canLoadOlderChatMessages,
+                canLoadNewerChatMessages = result.canLoadNewer
+                    ?: it.canLoadNewerChatMessages,
+                isChatAtLiveEdge = result.isAtLiveEdge ?: it.isChatAtLiveEdge
+            )
+        }
+    }
+
+    private fun clearChatTimelinePaginationLoading(target: ChatTimelineTarget) {
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else {
+                it.copy(isLoadingOlderChatMessages = false)
+            }
         }
     }
 

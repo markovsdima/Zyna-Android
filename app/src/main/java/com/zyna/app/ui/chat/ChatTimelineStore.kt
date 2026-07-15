@@ -21,6 +21,28 @@ internal data class ChatTimelineTarget(
     val roomId: String
 )
 
+internal data class ChatTimelineWindowState(
+    val canLoadNewer: Boolean,
+    val isAtLiveEdge: Boolean
+)
+
+internal data class ChatTimelinePaginationResult(
+    val canLoadOlder: Boolean? = null,
+    val canLoadNewer: Boolean? = null,
+    val isAtLiveEdge: Boolean? = null
+)
+
+internal class ChatTimelinePaginationDriver<WindowStore : Any>(
+    val expandOlderFromCache: suspend (WindowStore) -> Boolean,
+    val expandOlderAfterMaterialization: suspend (WindowStore) -> Boolean,
+    val expandNewerFromCache: suspend (WindowStore) -> Boolean,
+    val expandNewerAfterMaterialization: suspend (WindowStore) -> Boolean,
+    val markNewerFullyLoaded: (WindowStore) -> Unit,
+    val windowState: (WindowStore) -> ChatTimelineWindowState,
+    val paginateBackwards: suspend (ChatTimelineTarget) -> Boolean,
+    val paginateForwards: suspend (ChatTimelineTarget) -> Boolean
+)
+
 /**
  * Owns the subscriptions and window associated with one active chat timeline.
  *
@@ -46,7 +68,13 @@ internal class ChatTimelineStore<WindowStore : Any>(
         isAtLiveEdge: Boolean
     ) -> Unit,
     private val onTimelineSettled: (ChatTimelineTarget, messageCount: Int) -> Unit,
-    private val onTimelineError: (ChatTimelineTarget, Throwable) -> Unit
+    private val onTimelineError: (ChatTimelineTarget, Throwable) -> Unit,
+    private val paginationDriver: ChatTimelinePaginationDriver<WindowStore>? = null,
+    private val onPaginationResult: (
+        ChatTimelineTarget,
+        ChatTimelinePaginationResult
+    ) -> Unit = { _, _ -> },
+    private val onPaginationError: (ChatTimelineTarget, Throwable) -> Unit = { _, _ -> }
 ) {
     private var activeTimeline: ActiveTimeline<WindowStore>? = null
     private var timelineJob: Job? = null
@@ -149,6 +177,115 @@ internal class ChatTimelineStore<WindowStore : Any>(
     }
 
     @MainThread
+    fun loadOlder(target: ChatTimelineTarget): Boolean {
+        val driver = paginationDriver ?: return false
+        val activation = activeTimeline?.takeIf { it.target == target } ?: return false
+        return launchWindowOperation {
+            try {
+                val windowStore = activation.windowStore
+                val didLoadFromCache = driver.expandOlderFromCache(windowStore)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                if (didLoadFromCache) {
+                    val state = driver.windowState(windowStore)
+                    onPaginationResult(
+                        target,
+                        ChatTimelinePaginationResult(
+                            canLoadOlder = true,
+                            canLoadNewer = state.canLoadNewer,
+                            isAtLiveEdge = state.isAtLiveEdge
+                        )
+                    )
+                    return@launchWindowOperation
+                }
+
+                val hasReachedStart = driver.paginateBackwards(target)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                val didLoadFromFreshCache =
+                    driver.expandOlderAfterMaterialization(windowStore)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                val state = driver.windowState(windowStore)
+                onPaginationResult(
+                    target,
+                    ChatTimelinePaginationResult(
+                        canLoadOlder = !hasReachedStart || didLoadFromFreshCache,
+                        canLoadNewer = state.canLoadNewer,
+                        isAtLiveEdge = state.isAtLiveEdge
+                    )
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (activeTimeline === activation) {
+                    onPaginationError(target, error)
+                }
+            }
+        }
+    }
+
+    @MainThread
+    fun loadNewer(target: ChatTimelineTarget): Boolean {
+        val driver = paginationDriver ?: return false
+        val activation = activeTimeline?.takeIf { it.target == target } ?: return false
+        return launchWindowOperation {
+            try {
+                val windowStore = activation.windowStore
+                val didLoadFromCache = driver.expandNewerFromCache(windowStore)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                if (didLoadFromCache) {
+                    val state = driver.windowState(windowStore)
+                    onPaginationResult(
+                        target,
+                        ChatTimelinePaginationResult(
+                            canLoadNewer = state.canLoadNewer,
+                            isAtLiveEdge = state.isAtLiveEdge
+                        )
+                    )
+                    return@launchWindowOperation
+                }
+
+                val hasReachedEnd = driver.paginateForwards(target)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                val didLoadFromFreshCache =
+                    driver.expandNewerAfterMaterialization(windowStore)
+                if (activeTimeline !== activation) {
+                    return@launchWindowOperation
+                }
+                if (hasReachedEnd && !didLoadFromFreshCache) {
+                    driver.markNewerFullyLoaded(windowStore)
+                }
+                val state = driver.windowState(windowStore)
+                onPaginationResult(
+                    target,
+                    ChatTimelinePaginationResult(
+                        canLoadNewer = if (hasReachedEnd && !didLoadFromFreshCache) {
+                            false
+                        } else {
+                            state.canLoadNewer || !hasReachedEnd
+                        },
+                        isAtLiveEdge = state.isAtLiveEdge
+                    )
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (activeTimeline === activation) {
+                    onPaginationError(target, error)
+                }
+            }
+        }
+    }
+
+    @MainThread
     fun windowStoreFor(userId: String, roomId: String): WindowStore? {
         return activeTimeline
             ?.takeIf { it.target.userId == userId && it.target.roomId == roomId }
@@ -171,7 +308,9 @@ internal fun createChatTimelineStore(
         isAtLiveEdge: Boolean
     ) -> Unit,
     onTimelineSettled: (ChatTimelineTarget, messageCount: Int) -> Unit,
-    onTimelineError: (ChatTimelineTarget, Throwable) -> Unit
+    onTimelineError: (ChatTimelineTarget, Throwable) -> Unit,
+    onPaginationResult: (ChatTimelineTarget, ChatTimelinePaginationResult) -> Unit,
+    onPaginationError: (ChatTimelineTarget, Throwable) -> Unit
 ): ChatTimelineStore<RoomTimelineWindowStore> {
     return ChatTimelineStore(
         scope = scope,
@@ -233,6 +372,37 @@ internal fun createChatTimelineStore(
         },
         onWindowUpdate = onWindowUpdate,
         onTimelineSettled = onTimelineSettled,
-        onTimelineError = onTimelineError
+        onTimelineError = onTimelineError,
+        paginationDriver = ChatTimelinePaginationDriver(
+            expandOlderFromCache = { windowStore ->
+                windowStore.expandOlderFromCache()
+            },
+            expandOlderAfterMaterialization = { windowStore ->
+                windowStore.expandOlderFromCacheAfterMaterialization()
+            },
+            expandNewerFromCache = { windowStore ->
+                windowStore.expandNewerFromCache()
+            },
+            expandNewerAfterMaterialization = { windowStore ->
+                windowStore.expandNewerFromCacheAfterMaterialization()
+            },
+            markNewerFullyLoaded = { windowStore ->
+                windowStore.markNewerFullyLoaded()
+            },
+            windowState = { windowStore ->
+                ChatTimelineWindowState(
+                    canLoadNewer = windowStore.canLoadNewerFromCache,
+                    isAtLiveEdge = windowStore.isAtLiveEdge
+                )
+            },
+            paginateBackwards = { target ->
+                matrixClientService.paginateRoomTimelineBackwards(target.roomId)
+            },
+            paginateForwards = { target ->
+                matrixClientService.paginateRoomTimelineForwards(target.roomId)
+            }
+        ),
+        onPaginationResult = onPaginationResult,
+        onPaginationError = onPaginationError
     )
 }

@@ -1321,10 +1321,10 @@ private class ChatMessageAdapter(
     private var lastMediaPrefetchSignature: String? = null
     private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
     private var dateDividerByPosition: List<TimelineDateDividerModel?> = emptyList()
-    private val timelineSubmissionCoordinator = LatestListSubmissionCoordinator(
-        currentValue = { currentList },
-        submitValue = { timeline, onCommitted -> submitList(timeline, onCommitted) }
-    )
+    private val timelineSubmissionCoordinator =
+        LatestListSubmissionCoordinator<List<ChatTimelineItem>>(
+            submitValue = { timeline, onCommitted -> submitList(timeline, onCommitted) }
+        )
     var matrixMediaLoader: MatrixMediaLoader? = matrixMediaLoader
         set(value) {
             if (field !== value) {

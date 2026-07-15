@@ -8,10 +8,8 @@ import org.junit.Test
 class LatestListSubmissionCoordinatorTest {
     @Test
     fun samePendingValue_isSubmittedOnceAndUsesLatestCallback() {
-        var current: Any = Any()
         val pending = mutableListOf<() -> Unit>()
         val coordinator = LatestListSubmissionCoordinator<Any>(
-            currentValue = { current },
             submitValue = { _, onCommitted -> pending += onCommitted }
         )
         val target = Any()
@@ -22,23 +20,17 @@ class LatestListSubmissionCoordinatorTest {
         coordinator.submit(target) { secondCommittedNew = it }
 
         assertEquals(1, pending.size)
-        current = target
         pending.single().invoke()
         assertFalse(firstCalled)
         assertEquals(true, secondCommittedNew)
     }
 
     @Test
-    fun alreadyCurrentValue_completesImmediatelyWithoutNewCommit() {
+    fun alreadyCommittedValue_completesImmediatelyWithoutNewCommit() {
         val target = Any()
-        var current: Any = target
         val pending = mutableListOf<() -> Unit>()
         val coordinator = LatestListSubmissionCoordinator<Any>(
-            currentValue = { current },
-            submitValue = { value, onCommitted ->
-                current = value
-                pending += onCommitted
-            }
+            submitValue = { _, onCommitted -> pending += onCommitted }
         )
         coordinator.submit(target) {}
         pending.single().invoke()
@@ -52,10 +44,8 @@ class LatestListSubmissionCoordinatorTest {
 
     @Test
     fun supersededCommit_doesNotCompleteOldGeneration() {
-        var current: Any = Any()
         val pending = mutableListOf<Pair<Any, () -> Unit>>()
         val coordinator = LatestListSubmissionCoordinator<Any>(
-            currentValue = { current },
             submitValue = { value, onCommitted -> pending += value to onCommitted }
         )
         val first = Any()
@@ -65,9 +55,7 @@ class LatestListSubmissionCoordinatorTest {
 
         coordinator.submit(first) { firstCalled = true }
         coordinator.submit(second) { secondCalled = it }
-        current = first
         pending[0].second.invoke()
-        current = second
         pending[1].second.invoke()
 
         assertFalse(firstCalled)

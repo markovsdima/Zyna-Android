@@ -9,7 +9,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class ChatComposerStoreTest {
-    private val store = ChatComposerStore()
+    private val store = ChatComposerStore(noOpSendDriver())
 
     @Test
     fun replyEditAndForwardTargets_areMutuallyExclusive() {
@@ -126,4 +126,15 @@ class ChatComposerStoreTest {
             blurhash = null
         )
     }
+}
+
+private fun noOpSendDriver(): ChatComposerSendDriver {
+    return ChatComposerSendDriver(
+        nextId = { "id" },
+        prepareTransactionId = { "transaction" },
+        prepareTextEdit = { _, _, _, _ -> false },
+        createTextEnvelope = { _, _, _, _, _, _ -> },
+        createForwardedImageEnvelope = { _, _, _, _, _, _ -> },
+        kickOutbox = { _, _ -> }
+    )
 }

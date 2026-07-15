@@ -43,13 +43,14 @@ import com.zyna.app.data.security.MatrixSessionSecurityAction
 import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
+import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
-import com.zyna.app.ui.chat.ChatComposerStore
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
 import com.zyna.app.ui.chat.ChatTimelineNavigationRequest
 import com.zyna.app.ui.chat.ChatTimelineNavigationResult
 import com.zyna.app.ui.chat.ChatTimelinePaginationResult
 import com.zyna.app.ui.chat.ChatTimelineTarget
+import com.zyna.app.ui.chat.createChatComposerStore
 import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -290,7 +291,11 @@ class AppViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
-    private val chatComposerStore = ChatComposerStore()
+    private val chatComposerStore = createChatComposerStore(
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        outgoingOutboxService = outgoingOutboxService
+    )
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
     }
@@ -1711,23 +1716,14 @@ class AppViewModel(
     }
 
     fun sendChatMessage(body: String): Boolean {
-        val route = _uiState.value.activeChatRoute ?: return false
-        val userId = _uiState.value.matrixState.userIdOrNull() ?: return false
         val state = _uiState.value
-        val forwardTarget = state.chatForwardTarget
-        val isForwardingMedia = forwardTarget?.imageItems?.isNotEmpty() == true
-        val text = if (isForwardingMedia) {
-            forwardTarget?.body?.trim().orEmpty().ifBlank { "Photo" }
-        } else {
-            forwardTarget?.body?.trim() ?: body.trim()
-        }
-        if (text.isEmpty() || state.isSendingChatMessage) {
-            return false
-        }
-        val replyInfo = if (forwardTarget == null) state.chatReplyTarget else null
-        val editTarget = if (forwardTarget == null) state.chatEditTarget else null
-        val envelopeId = "text:${UUID.randomUUID()}"
-        val transactionId = matrixClientService.prepareTransactionId()
+        val route = state.activeChatRoute ?: return false
+        val userId = state.matrixState.userIdOrNull() ?: return false
+        val request = chatComposerStore.createSendRequest(
+            target = ChatComposerSendTarget(userId = userId, roomId = route.roomId),
+            body = body,
+            isSending = state.isSendingChatMessage
+        ) ?: return false
 
         _uiState.update {
             if (!it.isRouteForRoom(route.roomId)) {
@@ -1740,76 +1736,7 @@ class AppViewModel(
 
         viewModelScope.launch {
             try {
-                if (editTarget != null) {
-                    val didPrepare = localCacheRepository.prepareOutgoingTextEdit(
-                        userId = userId,
-                        roomId = route.roomId,
-                        targetMessage = MatrixChatMessage(
-                            id = editTarget.messageId,
-                            eventId = editTarget.eventId,
-                            sender = userId,
-                            body = editTarget.body,
-                            timestampMillis = 0L,
-                            isOwn = true
-                        ),
-                        body = text,
-                        transactionId = transactionId
-                    )
-                    if (didPrepare) {
-                        outgoingOutboxService.kick(reason = "new-edit")
-                    }
-                } else if (isForwardingMedia) {
-                    val mediaForwardTarget = forwardTarget ?: return@launch
-                    val items = mediaForwardTarget.imageItems
-                    val groupId = "forwarded-photo-group:${UUID.randomUUID()}"
-                    val shouldWriteMediaGroup = items.size > 1 ||
-                        mediaForwardTarget.captionPlacement != CaptionPlacement.BOTTOM ||
-                        mediaForwardTarget.layoutOverride != null
-                    items.forEachIndexed { index, item ->
-                        val envelopeId = "image:${UUID.randomUUID()}"
-                        val transactionId = matrixClientService.prepareTransactionId()
-                        val attributes = ZynaMessageAttributes(
-                            forwardedFrom = mediaForwardTarget.forwardedFrom,
-                            mediaGroup = if (shouldWriteMediaGroup) {
-                                MediaGroupInfo(
-                                    id = groupId,
-                                    index = index,
-                                    total = items.size,
-                                    captionMode = CaptionMode.REPLICATED,
-                                    captionPlacement = mediaForwardTarget.captionPlacement,
-                                    layoutOverride = mediaForwardTarget.layoutOverride
-                                        .takeIf { items.size > 1 }
-                                )
-                            } else {
-                                null
-                            }
-                        )
-                        localCacheRepository.createOutgoingForwardedImageEnvelope(
-                            userId = userId,
-                            roomId = route.roomId,
-                            envelopeId = envelopeId,
-                            transactionId = transactionId,
-                            image = item,
-                            caption = mediaForwardTarget.caption,
-                            zynaAttributes = attributes
-                        )
-                    }
-                    outgoingOutboxService.kick(reason = "new-forwarded-images")
-                } else {
-                    localCacheRepository.createOutgoingTextEnvelope(
-                        userId = userId,
-                        roomId = route.roomId,
-                        envelopeId = envelopeId,
-                        transactionId = transactionId,
-                        body = text,
-                        replyInfo = replyInfo,
-                        forwardedFrom = forwardTarget?.forwardedFrom
-                    )
-                    outgoingOutboxService.kick(
-                        reason = "new-envelope",
-                        envelopeId = envelopeId
-                    )
-                }
+                chatComposerStore.enqueue(request)
                 _uiState.update {
                     if (!it.isRouteForRoom(route.roomId)) {
                         it

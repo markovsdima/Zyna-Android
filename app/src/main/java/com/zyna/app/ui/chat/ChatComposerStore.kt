@@ -1,9 +1,19 @@
 package com.zyna.app.ui.chat
 
 import androidx.annotation.MainThread
+import com.zyna.app.data.local.LocalCacheRepository
+import com.zyna.app.data.matrix.MatrixChatMessage
+import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixEditTarget
+import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
+import com.zyna.app.data.messaging.CaptionMode
+import com.zyna.app.data.messaging.CaptionPlacement
+import com.zyna.app.data.messaging.MediaGroupInfo
+import com.zyna.app.data.messaging.ZynaMessageAttributes
+import com.zyna.app.data.outgoing.OutgoingOutboxService
+import java.util.UUID
 
 data class ChatComposerState(
     val replyTarget: MatrixReplyInfo? = null,
@@ -12,13 +22,73 @@ data class ChatComposerState(
     val pendingForwardTarget: MatrixForwardTarget? = null
 )
 
+internal data class ChatComposerSendTarget(
+    val userId: String,
+    val roomId: String
+)
+
+internal sealed interface ChatComposerSendRequest {
+    val target: ChatComposerSendTarget
+
+    data class Text(
+        override val target: ChatComposerSendTarget,
+        val envelopeId: String,
+        val transactionId: String,
+        val body: String,
+        val replyInfo: MatrixReplyInfo?,
+        val forwardedFrom: String?
+    ) : ChatComposerSendRequest
+
+    data class Edit(
+        override val target: ChatComposerSendTarget,
+        val transactionId: String,
+        val editTarget: MatrixEditTarget,
+        val body: String
+    ) : ChatComposerSendRequest
+
+    data class ForwardImages(
+        override val target: ChatComposerSendTarget,
+        val forwardTarget: MatrixForwardTarget
+    ) : ChatComposerSendRequest
+}
+
+internal class ChatComposerSendDriver(
+    val nextId: () -> String,
+    val prepareTransactionId: () -> String,
+    val prepareTextEdit: suspend (
+        target: ChatComposerSendTarget,
+        editTarget: MatrixEditTarget,
+        body: String,
+        transactionId: String
+    ) -> Boolean,
+    val createTextEnvelope: suspend (
+        target: ChatComposerSendTarget,
+        envelopeId: String,
+        transactionId: String,
+        body: String,
+        replyInfo: MatrixReplyInfo?,
+        forwardedFrom: String?
+    ) -> Unit,
+    val createForwardedImageEnvelope: suspend (
+        target: ChatComposerSendTarget,
+        envelopeId: String,
+        transactionId: String,
+        image: MatrixForwardImageItem,
+        caption: String?,
+        attributes: ZynaMessageAttributes
+    ) -> Unit,
+    val kickOutbox: (reason: String, envelopeId: String?) -> Unit
+)
+
 /**
- * Owns target-selection rules for the chat composer.
+ * Owns target selection and durable enqueue rules for the chat composer.
  *
- * This class is main-thread confined. [state] is mirrored into AppUiState by
- * AppViewModel while the send pipeline is extracted in later steps.
+ * Target selection and request creation are main-thread confined. [state] is
+ * mirrored into AppUiState by AppViewModel until composer state becomes
+ * directly observable. Durable enqueue may suspend, but does not mutate state.
  */
 internal class ChatComposerStore(
+    private val sendDriver: ChatComposerSendDriver,
     initialState: ChatComposerState = ChatComposerState()
 ) {
     var state: ChatComposerState = initialState
@@ -62,6 +132,57 @@ internal class ChatComposerStore(
     }
 
     @MainThread
+    fun createSendRequest(
+        target: ChatComposerSendTarget,
+        body: String,
+        isSending: Boolean
+    ): ChatComposerSendRequest? {
+        val forwardTarget = state.forwardTarget
+        val isForwardingMedia = forwardTarget?.imageItems?.isNotEmpty() == true
+        val text = if (isForwardingMedia) {
+            forwardTarget?.body?.trim().orEmpty().ifBlank { "Photo" }
+        } else {
+            forwardTarget?.body?.trim() ?: body.trim()
+        }
+        if (text.isEmpty() || isSending) {
+            return null
+        }
+
+        val envelopeId = "text:${sendDriver.nextId()}"
+        val transactionId = sendDriver.prepareTransactionId()
+        val editTarget = if (forwardTarget == null) state.editTarget else null
+
+        return when {
+            editTarget != null -> ChatComposerSendRequest.Edit(
+                target = target,
+                transactionId = transactionId,
+                editTarget = editTarget,
+                body = text
+            )
+            isForwardingMedia -> ChatComposerSendRequest.ForwardImages(
+                target = target,
+                forwardTarget = requireNotNull(forwardTarget)
+            )
+            else -> ChatComposerSendRequest.Text(
+                target = target,
+                envelopeId = envelopeId,
+                transactionId = transactionId,
+                body = text,
+                replyInfo = if (forwardTarget == null) state.replyTarget else null,
+                forwardedFrom = forwardTarget?.forwardedFrom
+            )
+        }
+    }
+
+    suspend fun enqueue(request: ChatComposerSendRequest) {
+        when (request) {
+            is ChatComposerSendRequest.Text -> enqueueText(request)
+            is ChatComposerSendRequest.Edit -> enqueueEdit(request)
+            is ChatComposerSendRequest.ForwardImages -> enqueueForwardedImages(request)
+        }
+    }
+
+    @MainThread
     fun cancelForwardPicker(): ChatComposerState {
         return state.copy(pendingForwardTarget = null).also(::setState)
     }
@@ -100,7 +221,126 @@ internal class ChatComposerStore(
         return ChatComposerState().also(::setState)
     }
 
+    private suspend fun enqueueText(request: ChatComposerSendRequest.Text) {
+        sendDriver.createTextEnvelope(
+            request.target,
+            request.envelopeId,
+            request.transactionId,
+            request.body,
+            request.replyInfo,
+            request.forwardedFrom
+        )
+        sendDriver.kickOutbox("new-envelope", request.envelopeId)
+    }
+
+    private suspend fun enqueueEdit(request: ChatComposerSendRequest.Edit) {
+        val didPrepare = sendDriver.prepareTextEdit(
+            request.target,
+            request.editTarget,
+            request.body,
+            request.transactionId
+        )
+        if (didPrepare) {
+            sendDriver.kickOutbox("new-edit", null)
+        }
+    }
+
+    private suspend fun enqueueForwardedImages(
+        request: ChatComposerSendRequest.ForwardImages
+    ) {
+        val forwardTarget = request.forwardTarget
+        val items = forwardTarget.imageItems
+        val groupId = "forwarded-photo-group:${sendDriver.nextId()}"
+        val shouldWriteMediaGroup = items.size > 1 ||
+            forwardTarget.captionPlacement != CaptionPlacement.BOTTOM ||
+            forwardTarget.layoutOverride != null
+
+        items.forEachIndexed { index, item ->
+            val envelopeId = "image:${sendDriver.nextId()}"
+            val transactionId = sendDriver.prepareTransactionId()
+            val attributes = ZynaMessageAttributes(
+                forwardedFrom = forwardTarget.forwardedFrom,
+                mediaGroup = if (shouldWriteMediaGroup) {
+                    MediaGroupInfo(
+                        id = groupId,
+                        index = index,
+                        total = items.size,
+                        captionMode = CaptionMode.REPLICATED,
+                        captionPlacement = forwardTarget.captionPlacement,
+                        layoutOverride = forwardTarget.layoutOverride.takeIf { items.size > 1 }
+                    )
+                } else {
+                    null
+                }
+            )
+            sendDriver.createForwardedImageEnvelope(
+                request.target,
+                envelopeId,
+                transactionId,
+                item,
+                forwardTarget.caption,
+                attributes
+            )
+        }
+        sendDriver.kickOutbox("new-forwarded-images", null)
+    }
+
     private fun setState(nextState: ChatComposerState) {
         state = nextState
     }
+}
+
+internal fun createChatComposerStore(
+    matrixClientService: MatrixClientService,
+    localCacheRepository: LocalCacheRepository,
+    outgoingOutboxService: OutgoingOutboxService,
+    nextId: () -> String = { UUID.randomUUID().toString() }
+): ChatComposerStore {
+    return ChatComposerStore(
+        sendDriver = ChatComposerSendDriver(
+            nextId = nextId,
+            prepareTransactionId = matrixClientService::prepareTransactionId,
+            prepareTextEdit = { target, editTarget, body, transactionId ->
+                localCacheRepository.prepareOutgoingTextEdit(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    targetMessage = MatrixChatMessage(
+                        id = editTarget.messageId,
+                        eventId = editTarget.eventId,
+                        sender = target.userId,
+                        body = editTarget.body,
+                        timestampMillis = 0L,
+                        isOwn = true
+                    ),
+                    body = body,
+                    transactionId = transactionId
+                )
+            },
+            createTextEnvelope = { target, envelopeId, transactionId, body,
+                replyInfo, forwardedFrom ->
+                localCacheRepository.createOutgoingTextEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    body = body,
+                    replyInfo = replyInfo,
+                    forwardedFrom = forwardedFrom
+                )
+            },
+            createForwardedImageEnvelope = { target, envelopeId, transactionId, image,
+                caption, attributes ->
+                localCacheRepository.createOutgoingForwardedImageEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    image = image,
+                    caption = caption,
+                    zynaAttributes = attributes
+                )
+            },
+            kickOutbox = outgoingOutboxService::kick
+        )
+    )
 }

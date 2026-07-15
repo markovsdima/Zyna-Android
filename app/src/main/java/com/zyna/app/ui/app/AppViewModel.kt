@@ -22,7 +22,6 @@ import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
-import com.zyna.app.data.matrix.MatrixIncomingRtcCallNotification
 import com.zyna.app.data.matrix.MatrixOwnProfile
 import com.zyna.app.data.matrix.MatrixRoomCallInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
@@ -41,9 +40,7 @@ import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatCallBannerPolicy
 import com.zyna.app.ui.chat.ChatCallBannerState
-import com.zyna.app.ui.chat.ChatCallInfoCoordinator
 import com.zyna.app.ui.chat.ChatCallInfoTarget
-import com.zyna.app.ui.chat.ChatMatrixRtcRingOverride
 import com.zyna.app.ui.chat.ChatMessageActionRequest
 import com.zyna.app.ui.chat.ChatMessageActionResult
 import com.zyna.app.ui.chat.ChatMessageActionTarget
@@ -53,6 +50,7 @@ import com.zyna.app.ui.chat.ChatTimelineNavigationResult
 import com.zyna.app.ui.chat.ChatTimelinePaginationResult
 import com.zyna.app.ui.chat.ChatTimelineTarget
 import com.zyna.app.ui.chat.createChatComposerStore
+import com.zyna.app.ui.chat.createChatCallInfoCoordinator
 import com.zyna.app.ui.chat.createChatMessageActionStore
 import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.util.ZynaPerfLog
@@ -61,13 +59,11 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -251,12 +247,6 @@ data class AppUiState(
     }
 }
 
-private data class ChatCallInfoSnapshot(
-    val roomInfo: MatrixRoomCallInfo,
-    val observed: MatrixRoomCallInfo,
-    val ringOverride: ChatMatrixRtcRingOverride?
-)
-
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
     private val localCacheRepository: LocalCacheRepository,
@@ -311,9 +301,17 @@ class AppViewModel(
         onNavigationError = ::failChatTimelineNavigation,
         onNavigationTrace = ::logTeleport
     )
-    private val chatCallInfoCoordinator = ChatCallInfoCoordinator(
+    private val chatCallInfoCoordinator = createChatCallInfoCoordinator(
         scope = viewModelScope,
-        observeTarget = ::observeChatCallInfo,
+        matrixClientService = matrixClientService,
+        nativeMatrixRtcCallService = nativeMatrixRtcCallService,
+        onCallInfo = { target, callInfo ->
+            updateChatCallBanner(target.userId, target.roomId, callInfo)
+        },
+        onObservationError = { target, error ->
+            failChatCallInfoObservation(target, error)
+        },
+        onWarning = { message, error -> Log.w(TAG, message, error) },
         onLog = ::logChatCall
     )
     private var visibleRoomRefreshRequestCount = 0
@@ -2529,311 +2527,23 @@ class AppViewModel(
         chatReadReceiptCoordinator.reset()
     }
 
-    private suspend fun observeChatCallInfo(target: ChatCallInfoTarget) {
-        val userId = target.userId
-        val roomId = target.roomId
-        coroutineScope {
-            val ringOverride = MutableStateFlow<ChatMatrixRtcRingOverride?>(null)
-            val membershipFallback = MutableStateFlow<MatrixRoomCallInfo?>(null)
-            var lastObservedCallInfo: MatrixRoomCallInfo? = null
-            var lastRoomInfoHasCall = false
-            var hasObservedRoomInfoActiveCall = false
-            var membershipFallbackRefreshJob: Job? = null
-            var membershipFallbackValidationJob: Job? = null
-            var ringExpiryJob: Job? = null
-            var ringValidationJob: Job? = null
-            var ringValidationEventId: String? = null
-            var refreshMembershipFallback: ((String) -> Unit)? = null
-
-            fun scheduleMembershipFallbackValidation() {
-                if (membershipFallbackValidationJob?.isActive == true) {
-                    return
-                }
-                membershipFallbackValidationJob = launch {
-                    delay(MEMBERSHIP_FALLBACK_VALIDATION_DELAY_MS)
-                    membershipFallbackValidationJob = null
-                    refreshMembershipFallback?.invoke("activeFallbackValidation")
-                }
-            }
-
-            fun applyMembershipFallbackSnapshot(
-                fallback: MatrixRoomCallInfo?,
-                reason: String
-            ) {
-                if (lastRoomInfoHasCall || hasObservedRoomInfoActiveCall) {
-                    membershipFallback.value = null
-                    return
-                }
-
-                membershipFallback.value = fallback
-                if (fallback?.hasRoomCall == true && fallback.isAudioCall) {
-                    logChatCall(
-                        "chatCallMembershipFallback active roomId=$roomId " +
-                            "participants=${fallback.activeParticipantCount} reason=$reason"
-                    )
-                    scheduleMembershipFallbackValidation()
-                }
-            }
-
-            refreshMembershipFallback = refresh@ { reason ->
-                if (membershipFallbackRefreshJob?.isActive == true) {
-                    return@refresh
-                }
-                membershipFallbackRefreshJob = launch {
-                    val fallback = try {
-                        matrixClientService.loadRoomCallInfo(roomId)
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Throwable) {
-                        Log.w(
-                            TAG,
-                            "Failed loading MatrixRTC membership fallback roomId=$roomId reason=$reason",
-                            error
-                        )
-                        null
-                    }
-
-                    membershipFallbackRefreshJob = null
-                    applyMembershipFallbackSnapshot(fallback, reason)
-                }
-            }
-
-            fun handleRoomInfoForMembershipFallback(callInfo: MatrixRoomCallInfo) {
-                lastRoomInfoHasCall = callInfo.hasRoomCall
-                if (callInfo.hasRoomCall) {
-                    hasObservedRoomInfoActiveCall = true
-                    membershipFallback.value = null
-                    membershipFallbackRefreshJob?.cancel()
-                    membershipFallbackRefreshJob = null
-                    membershipFallbackValidationJob?.cancel()
-                    membershipFallbackValidationJob = null
-                    return
-                }
-
-                if (hasObservedRoomInfoActiveCall) {
-                    membershipFallback.value = null
-                    membershipFallbackRefreshJob?.cancel()
-                    membershipFallbackRefreshJob = null
-                    membershipFallbackValidationJob?.cancel()
-                    membershipFallbackValidationJob = null
-                    return
-                }
-
-                if (membershipFallback.value == null) {
-                    refreshMembershipFallback?.invoke("roomInfoInactive")
-                }
-            }
-
-            fun clearRingOverride(reason: String, eventId: String) {
-                if (ringOverride.value?.eventId != eventId) {
-                    return
-                }
-                ringExpiryJob?.cancel()
-                ringExpiryJob = null
-                ringValidationJob?.cancel()
-                ringValidationJob = null
-                ringValidationEventId = null
-                ringOverride.value = null
-                logChatCall("chatCallRingOverride cleared roomId=$roomId eventId=$eventId reason=$reason")
-            }
-
-            fun scheduleRingOverrideExpiry(override: ChatMatrixRtcRingOverride) {
-                ringExpiryJob?.cancel()
-                ringExpiryJob = launch {
-                    delay(maxOf(0L, override.expiresAtMillis - System.currentTimeMillis()))
-                    clearRingOverride(reason = "expired", eventId = override.eventId)
-                }
-            }
-
-            fun scheduleRingOverrideValidation(
-                eventId: String,
-                senderId: String,
-                reason: String,
-                delayMillis: Long
-            ) {
-                if (ringValidationJob?.isActive == true && ringValidationEventId == eventId) {
-                    return
-                }
-                ringValidationJob?.cancel()
-                ringValidationEventId = eventId
-                ringValidationJob = launch {
-                    delay(delayMillis)
-                    val hasActiveMembership = try {
-                        matrixClientService.hasActiveMatrixRtcMembership(
-                            roomId = roomId,
-                            senderId = senderId
-                        )
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Throwable) {
-                        Log.w(
-                            TAG,
-                            "Failed validating MatrixRTC ring membership roomId=$roomId " +
-                                "eventId=$eventId reason=$reason",
-                            error
-                        )
-                        null
-                    }
-
-                    if (ringOverride.value?.eventId != eventId) {
-                        if (ringValidationEventId == eventId) {
-                            ringValidationJob = null
-                            ringValidationEventId = null
-                        }
-                        return@launch
-                    }
-
-                    ringValidationJob = null
-                    ringValidationEventId = null
-                    when (hasActiveMembership) {
-                        true -> {
-                            ringOverride.update { current ->
-                                if (current?.eventId == eventId) {
-                                    current.copy(hasObservedActiveCall = true)
-                                } else {
-                                    current
-                                }
-                            }
-                            logChatCall(
-                                "chatCallRingOverride validated roomId=$roomId eventId=$eventId reason=$reason"
-                            )
-                        }
-                        false -> clearRingOverride(reason = reason, eventId = eventId)
-                        null -> Unit
-                    }
-                }
-            }
-
-            fun handleRingOverrideSideEffects(
-                observed: MatrixRoomCallInfo,
-                override: ChatMatrixRtcRingOverride?
-            ) {
-                lastObservedCallInfo = observed
-                val currentOverride = override ?: return
-                if (currentOverride.expiresAtMillis <= System.currentTimeMillis()) {
-                    clearRingOverride(reason = "expired", eventId = currentOverride.eventId)
-                    return
-                }
-
-                if (observed.hasRoomCall) {
-                    if (!currentOverride.hasObservedActiveCall) {
-                        ringValidationJob?.cancel()
-                        ringValidationJob = null
-                        ringValidationEventId = null
-                        ringOverride.value = currentOverride.copy(hasObservedActiveCall = true)
-                        logChatCall(
-                            "chatCallRingOverride observedActive roomId=$roomId " +
-                                "eventId=${currentOverride.eventId}"
-                        )
-                    }
-                    return
-                }
-
-                if (currentOverride.hasObservedActiveCall) {
-                    clearRingOverride(reason = "roomCallEnded", eventId = currentOverride.eventId)
-                }
-            }
-
-            val notificationJob = launch {
-                matrixClientService.incomingMatrixRtcCallNotifications.collect { notification ->
-                    handleIncomingMatrixRtcCallNotification(
-                        notification = notification,
-                        roomId = roomId,
-                        ringOverride = ringOverride,
-                        lastObservedCallInfo = lastObservedCallInfo,
-                        scheduleExpiry = ::scheduleRingOverrideExpiry,
-                        scheduleValidation = ::scheduleRingOverrideValidation
-                    )
-                }
-            }
-
-            try {
-                combine(
-                    matrixClientService.roomCallInfoUpdates(roomId)
-                        .onEach { callInfo ->
-                            handleRoomInfoForMembershipFallback(callInfo)
-                        },
-                    nativeMatrixRtcCallService.state,
-                    ringOverride,
-                    membershipFallback
-                ) { callInfo, _, override, fallback ->
-                    ChatCallInfoSnapshot(
-                        roomInfo = callInfo,
-                        observed = ChatCallBannerPolicy.mergeMembershipFallback(
-                            callInfo,
-                            fallback
-                        ),
-                        ringOverride = override
-                    )
-                }
-                    .collect { snapshot ->
-                        handleRingOverrideSideEffects(
-                            observed = snapshot.roomInfo,
-                            override = snapshot.ringOverride
-                        )
-                        val callInfo = ChatCallBannerPolicy.applyRingOverride(
-                            observed = snapshot.observed,
-                            override = snapshot.ringOverride,
-                            nowMillis = System.currentTimeMillis()
-                        )
-                        updateChatCallBanner(userId, roomId, callInfo)
-                    }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to observe MatrixRTC room call info", error)
-                _uiState.update {
-                    if (it.isRouteForRoom(userId, roomId)) {
-                        it.copy(chatCallBanner = null)
-                    } else {
-                        it
-                    }
-                }
-            } finally {
-                notificationJob.cancel()
-                membershipFallbackRefreshJob?.cancel()
-                membershipFallbackValidationJob?.cancel()
-                ringExpiryJob?.cancel()
-                ringValidationJob?.cancel()
-                ringValidationEventId = null
-            }
-        }
-    }
-
-    private fun handleIncomingMatrixRtcCallNotification(
-        notification: MatrixIncomingRtcCallNotification,
-        roomId: String,
-        ringOverride: MutableStateFlow<ChatMatrixRtcRingOverride?>,
-        lastObservedCallInfo: MatrixRoomCallInfo?,
-        scheduleExpiry: (ChatMatrixRtcRingOverride) -> Unit,
-        scheduleValidation: (eventId: String, senderId: String, reason: String, delayMillis: Long) -> Unit
-    ) {
-        val override = ChatCallBannerPolicy.ringOverrideForNotification(
-            notification = notification,
-            roomId = roomId,
-            hasObservedActiveCall = lastObservedCallInfo?.hasRoomCall == true,
-            nowMillis = System.currentTimeMillis()
-        ) ?: return
-        ringOverride.value = override
-        scheduleExpiry(override)
-        if (!override.hasObservedActiveCall) {
-            scheduleValidation(
-                notification.eventId,
-                notification.senderId,
-                "membershipNotObserved",
-                RING_OVERRIDE_MEMBERSHIP_CONFIRMATION_DELAY_MS
-            )
-        }
-        logChatCall(
-            "chatCallRingOverride received roomId=$roomId eventId=${notification.eventId} " +
-                "sender=${notification.senderId} kind=${notification.kind} " +
-                "observed=${override.hasObservedActiveCall}"
-        )
-    }
-
     private fun clearChatCallInfoObserver() {
         chatCallInfoCoordinator.clear()
         _uiState.update { it.copy(chatCallBanner = null) }
+    }
+
+    private fun failChatCallInfoObservation(
+        target: ChatCallInfoTarget,
+        error: Throwable
+    ) {
+        Log.w(TAG, "Failed to observe MatrixRTC room call info", error)
+        _uiState.update {
+            if (it.isRouteForRoom(target.userId, target.roomId)) {
+                it.copy(chatCallBanner = null)
+            } else {
+                it
+            }
+        }
     }
 
     private fun updateChatCallBanner(
@@ -3205,8 +2915,6 @@ class AppViewModel(
         const val CONTACTS_SEARCH_MIN_LENGTH = 2
         const val CONTACTS_SEARCH_DEBOUNCE_MS = 250L
         const val CONTACTS_SEARCH_LIMIT = 30
-        const val MEMBERSHIP_FALLBACK_VALIDATION_DELAY_MS = 10_000L
-        const val RING_OVERRIDE_MEMBERSHIP_CONFIRMATION_DELAY_MS = 2_500L
         const val CALL_HISTORY_LIMIT = 100
         const val CALL_HISTORY_EXPIRY_REFRESH_GRACE_MS = 250L
         const val PRESENCE_TAG_ROOMS = "rooms"

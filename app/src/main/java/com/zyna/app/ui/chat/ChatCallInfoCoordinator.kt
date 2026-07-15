@@ -14,7 +14,7 @@ internal data class ChatCallInfoTarget(
  * Owns the enabled/target/job lifecycle for chat call info observation.
  *
  * All methods are main-thread confined. The observer session itself is
- * supplied by AppViewModel until its MatrixRTC workflow is extracted.
+ * supplied separately so its flow reconciliation can be tested independently.
  */
 internal class ChatCallInfoCoordinator(
     private val scope: CoroutineScope,

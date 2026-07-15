@@ -24,6 +24,7 @@ import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.app.UserProfileUiState
 import com.zyna.app.ui.auth.LoginScreen
+import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.CallsScreenView
 import com.zyna.app.ui.calls.CallsScreenViewActions
 import com.zyna.app.ui.calls.CallsScreenViewState
@@ -91,6 +92,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
     private var latestChatComposer: ChatComposerState? = null
+    private var latestCallHistory: CallHistoryState? = null
     private var latestActions: ZynaAppActions? = null
     private var latestPreferences: ZynaRootPreferences? = null
     private var renderSequence = 0L
@@ -210,6 +212,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     fun render(
         state: AppUiState,
         chatComposer: ChatComposerState,
+        callHistory: CallHistoryState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ) {
@@ -222,6 +225,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
         latestState = state
         latestChatComposer = chatComposer
+        latestCallHistory = callHistory
         latestActions = actions
         latestPreferences = preferences
 
@@ -536,13 +540,20 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val chatComposer = latestChatComposer ?: return
+        val callHistory = latestCallHistory ?: return
         val actions = latestActions ?: return
         val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
             roomsScrollAnchors.clear()
         }
         val entriesStart = ZynaPerfLog.start()
-        val entries = entriesFor(state, chatComposer, actions, preferences)
+        val entries = entriesFor(
+            state,
+            chatComposer,
+            callHistory,
+            actions,
+            preferences
+        )
         ZynaPerfLog.end(
             entriesStart,
             "root.entriesFor"
@@ -638,6 +649,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun entriesFor(
         state: AppUiState,
         chatComposer: ChatComposerState,
+        callHistory: CallHistoryState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
@@ -650,7 +662,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 is AppRoute.SessionSecurity -> sessionSecurityEntry(state, actions, route)
                 AppRoute.Contacts -> contactsEntry(state, actions)
                 is AppRoute.UserProfile -> userProfileEntry(state, actions, route)
-                AppRoute.Calls -> callsEntry(state, actions)
+                AppRoute.Calls -> callsEntry(callHistory, actions)
                 AppRoute.Rooms -> roomsEntry(
                     state = state,
                     actions = actions,
@@ -756,7 +768,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     private fun callsEntry(
-        state: AppUiState,
+        callHistory: CallHistoryState,
         actions: ZynaAppActions
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -765,9 +777,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             updateView = { view ->
                 (view as CallsScreenView).render(
                     state = CallsScreenViewState(
-                        calls = state.callHistory,
-                        isRefreshing = state.isRefreshingCallHistory,
-                        errorMessage = state.callHistoryErrorMessage,
+                        calls = callHistory.calls,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),

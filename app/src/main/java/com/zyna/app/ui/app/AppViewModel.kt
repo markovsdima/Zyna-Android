@@ -7,8 +7,6 @@ import androidx.lifecycle.viewmodel.CreationExtras
 import androidx.lifecycle.viewModelScope
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryItem
-import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryOutcome
-import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallNotificationType
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.TimelineFlushSummary
@@ -53,6 +51,8 @@ import com.zyna.app.ui.chat.createChatComposerStore
 import com.zyna.app.ui.chat.createChatCallInfoCoordinator
 import com.zyna.app.ui.chat.createChatMessageActionStore
 import com.zyna.app.ui.chat.createChatTimelineStore
+import com.zyna.app.ui.calls.CallHistoryState
+import com.zyna.app.ui.calls.createCallHistoryStore
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
@@ -131,9 +131,6 @@ data class AppUiState(
     val userProfile: UserProfileUiState = UserProfileUiState(),
     val contactActionUserId: String? = null,
     val contactActionErrorMessage: String? = null,
-    val callHistory: List<MatrixRtcCallHistoryItem> = emptyList(),
-    val isRefreshingCallHistory: Boolean = false,
-    val callHistoryErrorMessage: String? = null,
     val pendingNativeMatrixRtcCallLaunch: PendingNativeMatrixRtcCallLaunch? = null,
     val isRefreshingRooms: Boolean = false,
     val isLoggingOut: Boolean = false,
@@ -268,6 +265,12 @@ class AppViewModel(
     )
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
     val chatComposerState: StateFlow<ChatComposerState> = chatComposerStore.state
+    private val callHistoryStore = createCallHistoryStore(
+        scope = viewModelScope,
+        localCacheRepository = localCacheRepository,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val callHistoryState: StateFlow<CallHistoryState> = callHistoryStore.state
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
     }
@@ -318,12 +321,8 @@ class AppViewModel(
     private var openRoomJob: Job? = null
     private var roomCacheJob: Job? = null
     private var roomListLiveJob: Job? = null
-    private var callHistoryCacheJob: Job? = null
-    private var callHistoryRefreshJob: Job? = null
-    private var callHistoryExpiryRefreshJob: Job? = null
     private var roomCacheUserId: String? = null
     private var roomListLiveUserId: String? = null
-    private var callHistoryCacheUserId: String? = null
     private var ownProfileLoadJob: Job? = null
     private var ownProfileUserId: String? = null
     private var ownProfileLoadGeneration = 0L
@@ -374,6 +373,9 @@ class AppViewModel(
                 val didChangeUser = previousUserId != null &&
                     nextUserId != null &&
                     previousUserId != nextUserId
+                val shouldClearSessionData = nextUserId == null || didChangeUser
+                val shouldClearChat = shouldClearSessionData ||
+                    matrixState is MatrixClientState.Error
                 if (
                     nextUserId == null ||
                     didChangeUser ||
@@ -393,15 +395,12 @@ class AppViewModel(
                 }
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     stopRoomCache()
-                    stopCallHistoryCache()
+                    callHistoryStore.deactivate(clearState = shouldClearSessionData)
                     stopRoomListLiveRefresh()
                     stopOwnProfileLoad(clearState = true)
                     stopContactJobs(clearState = true)
                 }
 
-                val shouldClearSessionData = nextUserId == null || didChangeUser
-                val shouldClearChat = shouldClearSessionData ||
-                    matrixState is MatrixClientState.Error
                 when {
                     shouldClearSessionData -> chatComposerStore.clearAll()
                     shouldClearChat -> chatComposerStore.clearActiveTargets()
@@ -469,21 +468,6 @@ class AppViewModel(
                         } else {
                             current.contactActionErrorMessage
                         },
-                        callHistory = if (shouldClearSessionData) {
-                            emptyList()
-                        } else {
-                            current.callHistory
-                        },
-                        isRefreshingCallHistory = if (shouldClearSessionData) {
-                            false
-                        } else {
-                            current.isRefreshingCallHistory
-                        },
-                        callHistoryErrorMessage = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.callHistoryErrorMessage
-                        },
                         pendingNativeMatrixRtcCallLaunch = if (shouldClearSessionData || shouldClearChat) {
                             null
                         } else {
@@ -547,7 +531,7 @@ class AppViewModel(
 
                 if (nextUserId != null) {
                     startRoomCache(nextUserId)
-                    startCallHistoryCache(nextUserId)
+                    callHistoryStore.activate(nextUserId)
                     startOwnProfileLoad(nextUserId)
                 }
 
@@ -1466,7 +1450,6 @@ class AppViewModel(
                 current
             } else {
                 current.copy(
-                    callHistoryErrorMessage = null,
                     pendingNativeMatrixRtcCallLaunch = if (startCall) {
                         PendingNativeMatrixRtcCallLaunch(
                             requestId = nextPendingNativeMatrixRtcCallLaunchId(),
@@ -2598,130 +2581,6 @@ class AppViewModel(
         roomCacheUserId = null
     }
 
-    private fun startCallHistoryCache(userId: String) {
-        if (callHistoryCacheUserId == userId && callHistoryCacheJob?.isActive == true) {
-            return
-        }
-
-        callHistoryCacheJob?.cancel()
-        callHistoryCacheUserId = userId
-        callHistoryCacheJob = viewModelScope.launch {
-            localCacheRepository.observeMatrixRtcCallHistory(
-                userId = userId,
-                limit = CALL_HISTORY_LIMIT
-            ).collect { calls ->
-                _uiState.update {
-                    if (it.matrixState.userIdOrNull() == userId) {
-                        it.copy(callHistory = calls)
-                    } else {
-                        it
-                    }
-                }
-                scheduleCallHistoryExpiryRefresh(userId, calls)
-            }
-        }
-        startCallHistoryRefresh(userId = userId, showRefreshing = false)
-    }
-
-    private fun stopCallHistoryCache() {
-        callHistoryCacheJob?.cancel()
-        callHistoryCacheJob = null
-        callHistoryRefreshJob?.cancel()
-        callHistoryRefreshJob = null
-        callHistoryExpiryRefreshJob?.cancel()
-        callHistoryExpiryRefreshJob = null
-        callHistoryCacheUserId = null
-        _uiState.update {
-            it.copy(isRefreshingCallHistory = false)
-        }
-    }
-
-    private fun startCallHistoryRefresh(userId: String, showRefreshing: Boolean) {
-        callHistoryRefreshJob?.cancel()
-        val refreshJob = viewModelScope.launch {
-            if (showRefreshing) {
-                _uiState.update {
-                    if (it.matrixState.userIdOrNull() == userId) {
-                        it.copy(
-                            isRefreshingCallHistory = true,
-                            callHistoryErrorMessage = null
-                        )
-                    } else {
-                        it
-                    }
-                }
-            }
-            try {
-                localCacheRepository.refreshMatrixRtcCallHistory(
-                    userId = userId,
-                    limit = CALL_HISTORY_LIMIT
-                )
-                _uiState.update {
-                    if (it.matrixState.userIdOrNull() == userId) {
-                        it.copy(
-                            isRefreshingCallHistory = false,
-                            callHistoryErrorMessage = null
-                        )
-                    } else {
-                        it
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to refresh MatrixRTC call history", error)
-                _uiState.update {
-                    if (it.matrixState.userIdOrNull() == userId) {
-                        it.copy(
-                            isRefreshingCallHistory = false,
-                            callHistoryErrorMessage = if (showRefreshing) {
-                                error.message ?: error.javaClass.simpleName
-                            } else {
-                                it.callHistoryErrorMessage
-                            }
-                        )
-                    } else {
-                        it
-                    }
-                }
-            }
-        }
-        callHistoryRefreshJob = refreshJob
-        refreshJob.invokeOnCompletion {
-            if (callHistoryRefreshJob === refreshJob) {
-                callHistoryRefreshJob = null
-            }
-        }
-    }
-
-    private fun scheduleCallHistoryExpiryRefresh(
-        userId: String,
-        calls: List<MatrixRtcCallHistoryItem>
-    ) {
-        val now = System.currentTimeMillis()
-        val nextExpiry = calls.asSequence()
-            .filter { call ->
-                call.notificationType == MatrixRtcCallNotificationType.RING &&
-                    call.outcome == MatrixRtcCallHistoryOutcome.STARTED
-            }
-            .mapNotNull { call -> call.expiresAtMillis }
-            .filter { expiresAtMillis -> expiresAtMillis > now }
-            .minOrNull()
-
-        callHistoryExpiryRefreshJob?.cancel()
-        if (nextExpiry == null) {
-            callHistoryExpiryRefreshJob = null
-            return
-        }
-
-        callHistoryExpiryRefreshJob = viewModelScope.launch {
-            delay((nextExpiry - now + CALL_HISTORY_EXPIRY_REFRESH_GRACE_MS).coerceAtLeast(1L))
-            if (_uiState.value.matrixState.userIdOrNull() == userId) {
-                startCallHistoryRefresh(userId = userId, showRefreshing = false)
-            }
-        }
-    }
-
     private fun startRoomListLiveRefresh(userId: String) {
         if (roomListLiveUserId == userId && roomListLiveJob?.isActive == true) {
             return
@@ -2915,8 +2774,6 @@ class AppViewModel(
         const val CONTACTS_SEARCH_MIN_LENGTH = 2
         const val CONTACTS_SEARCH_DEBOUNCE_MS = 250L
         const val CONTACTS_SEARCH_LIMIT = 30
-        const val CALL_HISTORY_LIMIT = 100
-        const val CALL_HISTORY_EXPIRY_REFRESH_GRACE_MS = 250L
         const val PRESENCE_TAG_ROOMS = "rooms"
         const val PRESENCE_TAG_CHAT = "chat"
         const val PRESENCE_TAG_PROFILE = "profile"

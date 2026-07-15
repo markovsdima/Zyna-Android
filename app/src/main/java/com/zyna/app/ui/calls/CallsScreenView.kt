@@ -30,8 +30,6 @@ import kotlin.math.roundToInt
 
 internal data class CallsScreenViewState(
     val calls: List<MatrixRtcCallHistoryItem>,
-    val isRefreshing: Boolean,
-    val errorMessage: String?,
     val matrixMediaLoader: MatrixMediaLoader?,
     val bottomContentPaddingPx: Int
 )
@@ -141,11 +139,10 @@ internal class CallsScreenView(context: Context) : FrameLayout(context) {
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.palette = palette
 
-        statusText.text = when {
-            state.errorMessage != null -> state.errorMessage
-            state.isRefreshing && state.calls.isEmpty() -> context.getString(R.string.calls_refreshing)
-            state.calls.isEmpty() -> context.getString(R.string.calls_empty)
-            else -> ""
+        statusText.text = if (state.calls.isEmpty()) {
+            context.getString(R.string.calls_empty)
+        } else {
+            ""
         }
         statusText.visibility = if (statusText.text.isNullOrBlank()) GONE else VISIBLE
 

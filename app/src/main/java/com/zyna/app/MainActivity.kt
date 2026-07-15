@@ -43,6 +43,7 @@ import com.zyna.app.ui.app.AppViewModel
 import com.zyna.app.ui.app.AppViewModelFactory
 import com.zyna.app.ui.app.ExternalRouteDeliveryTracker
 import com.zyna.app.ui.app.ExternalRouteIntents
+import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.NativeMatrixRtcCallController
 import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
@@ -65,9 +66,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
+    private data class RootFeatureInput(
+        val state: AppUiState,
+        val chatComposer: ChatComposerState,
+        val callHistory: CallHistoryState
+    )
+
     private data class RootRenderInput(
         val state: AppUiState,
         val chatComposer: ChatComposerState,
+        val callHistory: CallHistoryState,
         val preferences: ZynaRootPreferences
     )
 
@@ -317,15 +325,25 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(
-                    appViewModel.uiState,
-                    appViewModel.chatComposerState,
+                    combine(
+                        appViewModel.uiState,
+                        appViewModel.chatComposerState,
+                        appViewModel.callHistoryState
+                    ) { state, chatComposer, callHistory ->
+                        RootFeatureInput(
+                            state = state,
+                            chatComposer = chatComposer,
+                            callHistory = callHistory
+                        )
+                    },
                     appContainer.chatBubbleThemeStore.selectedTheme,
                     appContainer.appThemeStore.selectedMode,
                     appContainer.presenceSettingsStore.selectedProvider
-                ) { state, chatComposer, chatBubbleTheme, appThemeMode, presenceProvider ->
+                ) { feature, chatBubbleTheme, appThemeMode, presenceProvider ->
                     RootRenderInput(
-                        state = state,
-                        chatComposer = chatComposer,
+                        state = feature.state,
+                        chatComposer = feature.chatComposer,
+                        callHistory = feature.callHistory,
                         preferences = ZynaRootPreferences(
                             chatBubbleTheme = chatBubbleTheme,
                             appThemeMode = appThemeMode,
@@ -347,6 +365,7 @@ class MainActivity : AppCompatActivity() {
                     rootHost.render(
                         state = state,
                         chatComposer = input.chatComposer,
+                        callHistory = input.callHistory,
                         actions = actions,
                         preferences = input.preferences
                     )

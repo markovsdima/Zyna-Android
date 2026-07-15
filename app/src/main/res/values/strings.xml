@@ -50,7 +50,6 @@
     <string name="contacts_message">Message</string>
     <string name="contacts_call">Call</string>
     <string name="calls_title">Calls</string>
-    <string name="calls_refreshing">Refreshing...</string>
     <string name="calls_empty">No calls yet</string>
     <string name="calls_call">Call</string>
     <string name="calls_incoming">Incoming</string>

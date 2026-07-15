@@ -43,6 +43,7 @@ import com.zyna.app.ui.glass.VulkanChatOverlayView
 import com.zyna.app.ui.profile.EditProfileScreenView
 import com.zyna.app.ui.profile.EditProfileScreenViewActions
 import com.zyna.app.ui.profile.EditProfileScreenViewState
+import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.profile.ProfileScreenView
 import com.zyna.app.ui.profile.ProfileScreenViewActions
 import com.zyna.app.ui.profile.ProfileScreenViewState
@@ -94,6 +95,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var bottomInset = 0
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
+    private var latestOwnProfile: OwnProfileState? = null
     private var latestCallHistory: CallHistoryState? = null
     private var latestChat: ChatFeatureState? = null
     private var latestActions: ZynaAppActions? = null
@@ -214,6 +216,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     fun render(
         state: AppUiState,
+        ownProfile: OwnProfileState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
         actions: ZynaAppActions,
@@ -227,6 +230,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "messages=${chat.timeline.messages.size} loading=${chat.timeline.isLoading}"
         }
         latestState = state
+        latestOwnProfile = ownProfile
         latestCallHistory = callHistory
         latestChat = chat
         latestActions = actions
@@ -493,7 +497,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         if (!navigationStack.canStartInteractivePop()) {
             return false
         }
-        if (state.route == AppRoute.EditProfile && state.ownProfile.isSaving) {
+        if (state.route == AppRoute.EditProfile && latestOwnProfile?.isSaving == true) {
             return false
         }
         if (
@@ -543,6 +547,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
+        val ownProfile = latestOwnProfile ?: return
         val callHistory = latestCallHistory ?: return
         val chat = latestChat ?: return
         val actions = latestActions ?: return
@@ -553,6 +558,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val entriesStart = ZynaPerfLog.start()
         val entries = entriesFor(
             state,
+            ownProfile,
             callHistory,
             chat,
             actions,
@@ -652,6 +658,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun entriesFor(
         state: AppUiState,
+        ownProfile: OwnProfileState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
         actions: ZynaAppActions,
@@ -681,8 +688,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     onBack = { actions.onNavigateBack() },
                     withBottomPadding = false
                 )
-                AppRoute.Profile -> profileEntry(state, actions)
-                AppRoute.EditProfile -> editProfileEntry(state, actions)
+                AppRoute.Profile -> profileEntry(ownProfile, actions)
+                AppRoute.EditProfile -> editProfileEntry(ownProfile, actions)
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
@@ -899,7 +906,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     private fun profileEntry(
-        state: AppUiState,
+        ownProfile: OwnProfileState,
         actions: ZynaAppActions
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -908,7 +915,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             updateView = { view ->
                 (view as ProfileScreenView).render(
                     state = ProfileScreenViewState(
-                        profile = state.ownProfile,
+                        profile = ownProfile,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
@@ -923,7 +930,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     private fun editProfileEntry(
-        state: AppUiState,
+        ownProfile: OwnProfileState,
         actions: ZynaAppActions
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -932,7 +939,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             updateView = { view ->
                 (view as EditProfileScreenView).render(
                     state = EditProfileScreenViewState(
-                        profile = state.ownProfile,
+                        profile = ownProfile,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),

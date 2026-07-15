@@ -54,6 +54,7 @@ import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
+import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -68,12 +69,14 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
     private data class RootFeatureInput(
         val state: AppUiState,
+        val ownProfile: OwnProfileState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState
     )
 
     private data class RootRenderInput(
         val state: AppUiState,
+        val ownProfile: OwnProfileState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState,
         val preferences: ZynaRootPreferences
@@ -146,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         )[AppViewModel::class.java]
         handleExternalRouteIntent(intent)
         cleanupProfileAvatarTempFiles(
-            excludedPath = appViewModel.uiState.value.ownProfile.editAvatarLocalPath
+            excludedPath = appViewModel.ownProfileState.value.editAvatarLocalPath
         )
 
         photoPickerLauncher = registerForActivityResult(
@@ -327,6 +330,7 @@ class MainActivity : AppCompatActivity() {
                 combine(
                     combine(
                         appViewModel.uiState,
+                        appViewModel.ownProfileState,
                         appViewModel.callHistoryState,
                         combine(
                             appViewModel.chatComposerState,
@@ -339,9 +343,10 @@ class MainActivity : AppCompatActivity() {
                                 callInfo = callInfo
                             )
                         }
-                    ) { state, callHistory, chat ->
+                    ) { state, ownProfile, callHistory, chat ->
                         RootFeatureInput(
                             state = state,
+                            ownProfile = ownProfile,
                             callHistory = callHistory,
                             chat = chat
                         )
@@ -352,6 +357,7 @@ class MainActivity : AppCompatActivity() {
                 ) { feature, chatBubbleTheme, appThemeMode, presenceProvider ->
                     RootRenderInput(
                         state = feature.state,
+                        ownProfile = feature.ownProfile,
                         callHistory = feature.callHistory,
                         chat = feature.chat,
                         preferences = ZynaRootPreferences(
@@ -375,6 +381,7 @@ class MainActivity : AppCompatActivity() {
                     hasRenderedState = true
                     rootHost.render(
                         state = state,
+                        ownProfile = input.ownProfile,
                         callHistory = input.callHistory,
                         chat = input.chat,
                         actions = actions,

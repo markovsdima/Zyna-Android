@@ -19,13 +19,11 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import com.zyna.app.data.media.MatrixMediaLoader
-import com.zyna.app.ui.app.OwnProfileAvatarChange
-import com.zyna.app.ui.app.OwnProfileUiState
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
 internal data class EditProfileScreenViewState(
-    val profile: OwnProfileUiState,
+    val profile: OwnProfileState,
     val matrixMediaLoader: MatrixMediaLoader?,
     val bottomContentPaddingPx: Int
 )

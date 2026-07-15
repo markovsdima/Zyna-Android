@@ -41,6 +41,8 @@ import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatCallBannerPolicy
 import com.zyna.app.ui.chat.ChatCallBannerState
+import com.zyna.app.ui.chat.ChatCallInfoCoordinator
+import com.zyna.app.ui.chat.ChatCallInfoTarget
 import com.zyna.app.ui.chat.ChatMatrixRtcRingOverride
 import com.zyna.app.ui.chat.ChatMessageActionRequest
 import com.zyna.app.ui.chat.ChatMessageActionResult
@@ -59,6 +61,7 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -308,6 +311,11 @@ class AppViewModel(
         onNavigationError = ::failChatTimelineNavigation,
         onNavigationTrace = ::logTeleport
     )
+    private val chatCallInfoCoordinator = ChatCallInfoCoordinator(
+        scope = viewModelScope,
+        observeTarget = ::observeChatCallInfo,
+        onLog = ::logChatCall
+    )
     private var visibleRoomRefreshRequestCount = 0
     private var openRoomJob: Job? = null
     private var roomCacheJob: Job? = null
@@ -330,10 +338,6 @@ class AppViewModel(
     private var contactActionGeneration = 0L
     private var pendingNativeMatrixRtcCallLaunchCounter = 0L
     private val externalRouteCoordinator = ExternalRouteCoordinator()
-    private var chatCallInfoJob: Job? = null
-    private var chatCallInfoUserId: String? = null
-    private var chatCallInfoRoomId: String? = null
-    private var chatCallInfoObserverEnabled: Boolean = false
 
     init {
         presenceRepository.start(viewModelScope)
@@ -930,7 +934,9 @@ class AppViewModel(
                 )
             }
         }
-        startChatCallInfoObserver(userId, room.id)
+        chatCallInfoCoordinator.activate(
+            ChatCallInfoTarget(userId = userId, roomId = room.id)
+        )
         ZynaPerfLog.end(routeUpdateStart, "openRoom.routeUpdate") {
             "roomId=${room.id}"
         }
@@ -1683,16 +1689,7 @@ class AppViewModel(
     }
 
     fun setChatCallInfoObserverEnabled(enabled: Boolean) {
-        if (chatCallInfoObserverEnabled == enabled) {
-            return
-        }
-        logChatCall("chatCallInfoObserver enabled=$enabled")
-        chatCallInfoObserverEnabled = enabled
-        if (enabled) {
-            startChatCallInfoObserverJobForTarget()
-        } else {
-            pauseChatCallInfoObserver()
-        }
+        chatCallInfoCoordinator.setEnabled(enabled)
     }
 
     fun sendChatMessage(body: String): Boolean {
@@ -2532,30 +2529,10 @@ class AppViewModel(
         chatReadReceiptCoordinator.reset()
     }
 
-    private fun startChatCallInfoObserver(userId: String, roomId: String) {
-        if (
-            chatCallInfoUserId == userId &&
-            chatCallInfoRoomId == roomId &&
-            chatCallInfoJob?.isActive == true
-        ) {
-            return
-        }
-
-        pauseChatCallInfoObserver()
-        chatCallInfoUserId = userId
-        chatCallInfoRoomId = roomId
-        logChatCall("chatCallInfoObserver target roomId=$roomId")
-        startChatCallInfoObserverJobForTarget()
-    }
-
-    private fun startChatCallInfoObserverJobForTarget() {
-        if (!chatCallInfoObserverEnabled || chatCallInfoJob?.isActive == true) {
-            return
-        }
-        val userId = chatCallInfoUserId ?: return
-        val roomId = chatCallInfoRoomId ?: return
-        logChatCall("chatCallInfoObserver start roomId=$roomId")
-        chatCallInfoJob = viewModelScope.launch {
+    private suspend fun observeChatCallInfo(target: ChatCallInfoTarget) {
+        val userId = target.userId
+        val roomId = target.roomId
+        coroutineScope {
             val ringOverride = MutableStateFlow<ChatMatrixRtcRingOverride?>(null)
             val membershipFallback = MutableStateFlow<MatrixRoomCallInfo?>(null)
             var lastObservedCallInfo: MatrixRoomCallInfo? = null
@@ -2854,18 +2831,8 @@ class AppViewModel(
         )
     }
 
-    private fun pauseChatCallInfoObserver() {
-        if (chatCallInfoJob != null) {
-            logChatCall("chatCallInfoObserver pause")
-        }
-        chatCallInfoJob?.cancel()
-        chatCallInfoJob = null
-    }
-
     private fun clearChatCallInfoObserver() {
-        pauseChatCallInfoObserver()
-        chatCallInfoUserId = null
-        chatCallInfoRoomId = null
+        chatCallInfoCoordinator.clear()
         _uiState.update { it.copy(chatCallBanner = null) }
     }
 

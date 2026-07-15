@@ -303,7 +303,6 @@ class AppViewModel(
         onTimelineError = ::failChatTimeline
     )
     private var visibleRoomRefreshRequestCount = 0
-    private var chatPaginationJob: Job? = null
     private var openRoomJob: Job? = null
     private var roomCacheJob: Job? = null
     private var roomListLiveJob: Job? = null
@@ -2326,7 +2325,7 @@ class AppViewModel(
             state.isLoadingChat ||
             state.isLoadingOlderChatMessages ||
             !state.canLoadOlderChatMessages ||
-            chatPaginationJob?.isActive == true
+            chatTimelineStore.hasActiveWindowOperation()
         ) {
             return
         }
@@ -2337,7 +2336,7 @@ class AppViewModel(
             } else it.copy(isLoadingOlderChatMessages = true)
         }
 
-        chatPaginationJob = viewModelScope.launch {
+        chatTimelineStore.launchWindowOperation {
             try {
                 val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 val didLoadFromCache = timelineStore?.expandOlderFromCache() == true
@@ -2352,7 +2351,7 @@ class AppViewModel(
                             isChatAtLiveEdge = timelineStore.isAtLiveEdge
                         )
                     }
-                    return@launch
+                    return@launchWindowOperation
                 }
 
                 val hasReachedStart = matrixClientService.paginateRoomTimelineBackwards(route.roomId)
@@ -2389,7 +2388,7 @@ class AppViewModel(
             state.isLoadingChat ||
             state.isLoadingOlderChatMessages ||
             !state.canLoadNewerChatMessages ||
-            chatPaginationJob?.isActive == true
+            chatTimelineStore.hasActiveWindowOperation()
         ) {
             return
         }
@@ -2400,7 +2399,7 @@ class AppViewModel(
             } else it.copy(isLoadingOlderChatMessages = true)
         }
 
-        chatPaginationJob = viewModelScope.launch {
+        chatTimelineStore.launchWindowOperation {
             try {
                 val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 val didLoadFromCache = timelineStore?.expandNewerFromCache() == true
@@ -2414,7 +2413,7 @@ class AppViewModel(
                             isChatAtLiveEdge = timelineStore.isAtLiveEdge
                         )
                     }
-                    return@launch
+                    return@launchWindowOperation
                 }
 
                 val hasReachedEnd = matrixClientService.paginateRoomTimelineForwards(route.roomId)
@@ -2453,10 +2452,9 @@ class AppViewModel(
         val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
-        if (chatPaginationJob?.isActive == true) {
+        if (chatTimelineStore.hasActiveWindowOperation()) {
             logTeleport("jump cancels activePagination target=${normalizedEventId.shortLogId()}")
-            chatPaginationJob?.cancel()
-            chatPaginationJob = null
+            chatTimelineStore.cancelWindowOperation()
         }
         logTeleport(
             "jump request target=${normalizedEventId.shortLogId()} " +
@@ -2495,7 +2493,7 @@ class AppViewModel(
         }
         chatReadReceiptCoordinator.reset()
 
-        chatPaginationJob = viewModelScope.launch {
+        chatTimelineStore.launchWindowOperation {
             var hasReachedStart = false
             var didJump = false
             try {
@@ -2514,7 +2512,7 @@ class AppViewModel(
                             }
                         )
                     }
-                    return@launch
+                    return@launchWindowOperation
                 }
 
                 didJump = timelineStore.jumpToEvent(normalizedEventId)
@@ -2603,10 +2601,9 @@ class AppViewModel(
         val route = _uiState.value.activeChatRoute ?: return
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
-        if (chatPaginationJob?.isActive == true) {
+        if (chatTimelineStore.hasActiveWindowOperation()) {
             logTeleport("live cancels activePagination")
-            chatPaginationJob?.cancel()
-            chatPaginationJob = null
+            chatTimelineStore.cancelWindowOperation()
         }
 
         _uiState.update {
@@ -2621,7 +2618,7 @@ class AppViewModel(
         }
         chatReadReceiptCoordinator.reset()
 
-        chatPaginationJob = viewModelScope.launch {
+        chatTimelineStore.launchWindowOperation {
             try {
                 val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 val didJump = timelineStore?.jumpToLiveEdge() == true
@@ -2817,8 +2814,6 @@ class AppViewModel(
         )
     ) {
         chatTimelineStore.deactivate()
-        chatPaginationJob?.cancel()
-        chatPaginationJob = null
         ZynaPerfLog.mark {
             "startChatTimeline.begin roomId=$roomId reset=$resetMessages " +
                 "currentMessages=${_uiState.value.chatMessages.size}"
@@ -2928,8 +2923,6 @@ class AppViewModel(
         openRoomJob?.cancel()
         openRoomJob = null
         chatTimelineStore.deactivate()
-        chatPaginationJob?.cancel()
-        chatPaginationJob = null
         clearChatCallInfoObserver()
         chatReadReceiptCoordinator.reset()
     }

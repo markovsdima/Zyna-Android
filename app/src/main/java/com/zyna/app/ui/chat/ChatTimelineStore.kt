@@ -25,7 +25,7 @@ internal data class ChatTimelineTarget(
  * Owns the subscriptions and window associated with one active chat timeline.
  *
  * This class is main-thread confined. [scope] must dispatch onto the same main
- * thread from which [activate], [deactivate], and [windowStoreFor] are called.
+ * thread from which its public methods are called.
  */
 internal class ChatTimelineStore<WindowStore : Any>(
     private val scope: CoroutineScope,
@@ -51,6 +51,7 @@ internal class ChatTimelineStore<WindowStore : Any>(
     private var activeTimeline: ActiveTimeline<WindowStore>? = null
     private var timelineJob: Job? = null
     private var windowJob: Job? = null
+    private var windowOperationJob: Job? = null
 
     @MainThread
     fun activate(
@@ -124,6 +125,27 @@ internal class ChatTimelineStore<WindowStore : Any>(
         timelineJob = null
         windowJob?.cancel()
         windowJob = null
+        cancelWindowOperation()
+    }
+
+    @MainThread
+    fun hasActiveWindowOperation(): Boolean = windowOperationJob?.isActive == true
+
+    @MainThread
+    fun launchWindowOperation(operation: suspend () -> Unit): Boolean {
+        if (hasActiveWindowOperation()) {
+            return false
+        }
+        windowOperationJob = scope.launch {
+            operation()
+        }
+        return true
+    }
+
+    @MainThread
+    fun cancelWindowOperation() {
+        windowOperationJob?.cancel()
+        windowOperationJob = null
     }
 
     @MainThread

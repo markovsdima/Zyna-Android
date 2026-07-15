@@ -5,6 +5,7 @@ import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixTimelineUpdate
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -167,6 +168,60 @@ class ChatTimelineStoreTest {
         store.activate(target, FakeWindowStore())
 
         assertEquals(listOf(target to expected), errors)
+    }
+
+    @Test
+    fun windowOperations_areMutuallyExclusiveAndCanBeCancelled() {
+        val gate = CompletableDeferred<Unit>()
+        var firstCompleted = false
+        var rejectedOperationStarted = false
+        var replacementStarted = false
+
+        assertTrue(
+            store.launchWindowOperation {
+                gate.await()
+                firstCompleted = true
+            }
+        )
+        assertTrue(store.hasActiveWindowOperation())
+        assertFalse(
+            store.launchWindowOperation {
+                rejectedOperationStarted = true
+            }
+        )
+
+        store.cancelWindowOperation()
+
+        assertFalse(store.hasActiveWindowOperation())
+        assertFalse(firstCompleted)
+        assertFalse(rejectedOperationStarted)
+        assertTrue(
+            store.launchWindowOperation {
+                replacementStarted = true
+            }
+        )
+        assertTrue(replacementStarted)
+        assertFalse(store.hasActiveWindowOperation())
+    }
+
+    @Test
+    fun timelineReplacement_cancelsActiveWindowOperation() {
+        val gate = CompletableDeferred<Unit>()
+        var operationCompleted = false
+
+        store.activate(target(roomId = ROOM_A), FakeWindowStore())
+        assertTrue(
+            store.launchWindowOperation {
+                gate.await()
+                operationCompleted = true
+            }
+        )
+
+        store.activate(target(roomId = ROOM_B), FakeWindowStore())
+        gate.complete(Unit)
+
+        assertFalse(operationCompleted)
+        assertFalse(store.hasActiveWindowOperation())
     }
 
     private fun timelineFlow(

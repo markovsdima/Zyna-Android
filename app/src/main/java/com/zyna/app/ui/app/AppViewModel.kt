@@ -21,8 +21,6 @@ import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
-import com.zyna.app.data.matrix.MatrixMessageContentType
-import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixIncomingRtcCallNotification
 import com.zyna.app.data.matrix.MatrixOwnProfile
@@ -55,7 +53,6 @@ import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
-import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1977,67 +1974,15 @@ class AppViewModel(
     }
 
     fun redactMessages(messageIds: List<String>) {
-        val route = _uiState.value.activeChatRoute ?: return
-        val userId = _uiState.value.matrixState.userIdOrNull() ?: return
-        val distinctMessageIds = messageIds
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-        if (distinctMessageIds.isEmpty()) {
-            return
-        }
-        val targetMessagesById = _uiState.value.chatMessages.associateBy { it.id }
-        val targetMessages = distinctMessageIds
-            .mapNotNull { targetMessagesById[it] }
-            .filter { targetMessage ->
-                targetMessage.isOwn &&
-                    targetMessage.eventId != null &&
-                    targetMessage.contentType != MatrixMessageContentType.REDACTED &&
-                    targetMessage.deliveryState == MatrixMessageDeliveryState.SENT
-            }
-        if (targetMessages.isEmpty()) {
-            return
-        }
-
-        viewModelScope.launch {
-            try {
-                val createdEnvelopeIds = mutableListOf<String>()
-                for (targetMessage in targetMessages) {
-                    val envelopeId = "redaction:${UUID.randomUUID()}"
-                    val transactionId = matrixClientService.prepareTransactionId()
-                    val didCreate = localCacheRepository.createOutgoingRedactionEnvelope(
-                        userId = userId,
-                        roomId = route.roomId,
-                        envelopeId = envelopeId,
-                        transactionId = transactionId,
-                        targetMessage = targetMessage
-                    )
-                    if (didCreate) {
-                        createdEnvelopeIds += envelopeId
-                    }
-                }
-                if (createdEnvelopeIds.isEmpty()) {
-                    return@launch
-                }
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = null)
-                }
-                outgoingOutboxService.kick(
-                    reason = if (createdEnvelopeIds.size == 1) "new-redaction" else "new-redactions",
-                    envelopeId = createdEnvelopeIds.singleOrNull()
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, route.roomId)) {
-                        it
-                    } else it.copy(chatSendErrorMessage = error.message ?: error.javaClass.simpleName)
-                }
-            }
-        }
+        val state = _uiState.value
+        val route = state.activeChatRoute ?: return
+        val userId = state.matrixState.userIdOrNull() ?: return
+        val request = chatMessageActionStore.createRedactionRequest(
+            target = ChatMessageActionTarget(userId, route.roomId),
+            messageIds = messageIds,
+            availableMessages = state.chatMessages
+        ) ?: return
+        launchChatMessageAction(request)
     }
 
     fun debugMarkOutgoingEnvelopeFailed(envelopeId: String) {

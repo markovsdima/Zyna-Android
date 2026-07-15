@@ -2,9 +2,11 @@ package com.zyna.app.ui.chat
 
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixMessageContentType
+import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixMessageReaction
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -242,6 +244,161 @@ class ChatMessageActionStoreTest {
         assertEquals(listOf("discard"), rejectedRecorder.events)
     }
 
+    @Test
+    fun redactionRequest_normalizesIdsAndKeepsOnlyEligibleMessages() {
+        val recorder = RecordingMessageActionDriver()
+        val store = ChatMessageActionStore(recorder.driver)
+        val eligible = message(id = "eligible", isOwn = true)
+        val blankEvent = message(id = "blank-event", eventId = "", isOwn = true)
+        val notOwn = message(id = "not-own", isOwn = false)
+        val noEvent = message(id = "no-event", eventId = null, isOwn = true)
+        val redacted = message(
+            id = "redacted",
+            isOwn = true,
+            contentType = MatrixMessageContentType.REDACTED
+        )
+        val failed = message(
+            id = "failed",
+            isOwn = true,
+            deliveryState = MatrixMessageDeliveryState.FAILED
+        )
+        val available = listOf(eligible, blankEvent, notOwn, noEvent, redacted, failed)
+
+        val request = store.createRedactionRequest(
+            target = TARGET,
+            messageIds = listOf(
+                " eligible ",
+                "eligible",
+                "",
+                "missing",
+                "not-own",
+                "no-event",
+                "redacted",
+                "failed",
+                "blank-event"
+            ),
+            availableMessages = available
+        )
+
+        assertEquals(
+            ChatMessageActionRequest.RedactMessages(
+                TARGET,
+                listOf(eligible, blankEvent)
+            ),
+            request
+        )
+        assertNull(
+            store.createRedactionRequest(
+                target = TARGET,
+                messageIds = listOf(" ", "missing", "not-own"),
+                availableMessages = available
+            )
+        )
+        assertEquals(0, recorder.idCallCount)
+        assertEquals(0, recorder.transactionCallCount)
+    }
+
+    @Test
+    fun singleRedaction_writesEnvelopeBeforeTargetedKick() = runBlocking {
+        val recorder = RecordingMessageActionDriver(redactionResults = listOf(true))
+        val store = ChatMessageActionStore(recorder.driver)
+        val targetMessage = message(id = "message-a", isOwn = true)
+
+        val result = store.execute(
+            ChatMessageActionRequest.RedactMessages(TARGET, listOf(targetMessage))
+        )
+
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
+        assertEquals(
+            listOf(
+                RedactionAttempt(
+                    target = TARGET,
+                    envelopeId = "redaction:id-1",
+                    transactionId = "transaction-1",
+                    targetMessage = targetMessage
+                )
+            ),
+            recorder.redactionAttempts
+        )
+        assertEquals(
+            listOf(
+                "id",
+                "transaction",
+                "redaction:redaction:id-1:message-a",
+                "kick:new-redaction:redaction:id-1"
+            ),
+            recorder.events
+        )
+    }
+
+    @Test
+    fun batchRedaction_kicksOnceWithoutEnvelopeFilter() = runBlocking {
+        val recorder = RecordingMessageActionDriver(
+            redactionResults = listOf(true, true)
+        )
+        val store = ChatMessageActionStore(recorder.driver)
+
+        val result = store.execute(
+            ChatMessageActionRequest.RedactMessages(
+                TARGET,
+                listOf(
+                    message(id = "message-a", isOwn = true),
+                    message(id = "message-b", isOwn = true)
+                )
+            )
+        )
+
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
+        assertEquals(2, recorder.redactionAttempts.size)
+        assertEquals("kick:new-redactions:null", recorder.events.last())
+    }
+
+    @Test
+    fun partialRedaction_targetsOnlyCreatedEnvelope() = runBlocking {
+        val recorder = RecordingMessageActionDriver(
+            redactionResults = listOf(false, true)
+        )
+        val store = ChatMessageActionStore(recorder.driver)
+
+        val result = store.execute(
+            ChatMessageActionRequest.RedactMessages(
+                TARGET,
+                listOf(
+                    message(id = "rejected", isOwn = true),
+                    message(id = "created", isOwn = true)
+                )
+            )
+        )
+
+        assertEquals(ChatMessageActionResult.COMPLETED, result)
+        assertEquals(
+            "kick:new-redaction:redaction:id-2",
+            recorder.events.last()
+        )
+    }
+
+    @Test
+    fun rejectedRedactions_returnNotAppliedWithoutKick() = runBlocking {
+        val recorder = RecordingMessageActionDriver(
+            redactionResults = listOf(false, false)
+        )
+        val store = ChatMessageActionStore(recorder.driver)
+
+        val result = store.execute(
+            ChatMessageActionRequest.RedactMessages(
+                TARGET,
+                listOf(
+                    message(id = "message-a", isOwn = true),
+                    message(id = "message-b", isOwn = true)
+                )
+            )
+        )
+
+        assertEquals(ChatMessageActionResult.NOT_APPLIED, result)
+        assertEquals(2, recorder.redactionAttempts.size)
+        assertFalse(recorder.events.any { it.startsWith("kick:") })
+    }
+
     private companion object {
         val TARGET = ChatMessageActionTarget(
             userId = "@me:example.org",
@@ -251,15 +408,22 @@ class ChatMessageActionStoreTest {
         const val REACTION_KEY = "👍"
 
         fun message(
+            id: String = "message-id",
+            eventId: String? = EVENT_ID,
+            isOwn: Boolean = false,
+            contentType: MatrixMessageContentType = MatrixMessageContentType.TEXT,
+            deliveryState: MatrixMessageDeliveryState = MatrixMessageDeliveryState.SENT,
             reactions: List<MatrixMessageReaction> = emptyList()
         ): MatrixChatMessage {
             return MatrixChatMessage(
-                id = "message-id",
-                eventId = EVENT_ID,
+                id = id,
+                eventId = eventId,
                 sender = "@alice:example.org",
                 body = "Hello",
                 timestampMillis = 1L,
-                isOwn = false,
+                isOwn = isOwn,
+                contentType = contentType,
+                deliveryState = deliveryState,
                 reactions = reactions
             )
         }
@@ -283,17 +447,26 @@ private class RecordingMessageActionDriver(
     private val removalResults: List<String?> = listOf("remove-id"),
     private val foundReactionEventId: String? = null,
     private val retryResult: Boolean = true,
-    private val discardResult: Boolean = true
+    private val discardResult: Boolean = true,
+    private val redactionResults: List<Boolean> = listOf(true)
 ) {
+    var idCallCount = 0
+        private set
     var transactionCallCount = 0
         private set
     val preparedAdds = mutableListOf<PreparedReactionAdd>()
     val preparedRemovals = mutableListOf<PreparedReactionRemoval>()
     val retriedEnvelopes = mutableListOf<OutgoingEnvelopeAction>()
     val discardedEnvelopes = mutableListOf<OutgoingEnvelopeAction>()
+    val redactionAttempts = mutableListOf<RedactionAttempt>()
     val events = mutableListOf<String>()
 
     val driver = ChatMessageActionDriver(
+        nextId = {
+            idCallCount += 1
+            events += "id"
+            "id-$idCallCount"
+        },
         prepareTransactionId = {
             transactionCallCount += 1
             events += "transaction"
@@ -335,6 +508,17 @@ private class RecordingMessageActionDriver(
             events += "discard"
             discardResult
         },
+        createRedactionEnvelope = {
+                target, envelopeId, transactionId, targetMessage ->
+            redactionAttempts += RedactionAttempt(
+                target,
+                envelopeId,
+                transactionId,
+                targetMessage
+            )
+            events += "redaction:$envelopeId:${targetMessage.id}"
+            redactionResults.getOrNull(redactionAttempts.lastIndex) ?: false
+        },
         kickOutbox = { reason, envelopeId ->
             events += "kick:$reason:$envelopeId"
         }
@@ -359,4 +543,11 @@ private data class PreparedReactionRemoval(
 private data class OutgoingEnvelopeAction(
     val target: ChatMessageActionTarget,
     val envelopeId: String
+)
+
+private data class RedactionAttempt(
+    val target: ChatMessageActionTarget,
+    val envelopeId: String,
+    val transactionId: String,
+    val targetMessage: MatrixChatMessage
 )

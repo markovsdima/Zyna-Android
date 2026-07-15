@@ -4,7 +4,9 @@ import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixMessageContentType
+import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.outgoing.OutgoingOutboxService
+import java.util.UUID
 
 internal data class ChatMessageActionTarget(
     val userId: String,
@@ -35,6 +37,11 @@ internal sealed interface ChatMessageActionRequest {
         override val target: ChatMessageActionTarget,
         val envelopeId: String
     ) : ChatMessageActionRequest
+
+    data class RedactMessages(
+        override val target: ChatMessageActionTarget,
+        val targetMessages: List<MatrixChatMessage>
+    ) : ChatMessageActionRequest
 }
 
 internal enum class ChatMessageActionResult {
@@ -43,6 +50,7 @@ internal enum class ChatMessageActionResult {
 }
 
 internal class ChatMessageActionDriver(
+    val nextId: () -> String,
     val prepareTransactionId: () -> String,
     val prepareReactionAdd: suspend (
         target: ChatMessageActionTarget,
@@ -69,6 +77,12 @@ internal class ChatMessageActionDriver(
     val discardOutgoing: suspend (
         target: ChatMessageActionTarget,
         envelopeId: String
+    ) -> Boolean,
+    val createRedactionEnvelope: suspend (
+        target: ChatMessageActionTarget,
+        envelopeId: String,
+        transactionId: String,
+        targetMessage: MatrixChatMessage
     ) -> Boolean,
     val kickOutbox: (reason: String, envelopeId: String?) -> Unit
 )
@@ -106,6 +120,33 @@ internal class ChatMessageActionStore(
         }
     }
 
+    fun createRedactionRequest(
+        target: ChatMessageActionTarget,
+        messageIds: List<String>,
+        availableMessages: List<MatrixChatMessage>
+    ): ChatMessageActionRequest.RedactMessages? {
+        val distinctMessageIds = messageIds
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        if (distinctMessageIds.isEmpty()) {
+            return null
+        }
+
+        val messagesById = availableMessages.associateBy { it.id }
+        val targetMessages = distinctMessageIds
+            .mapNotNull { messagesById[it] }
+            .filter { message ->
+                message.isOwn &&
+                    message.eventId != null &&
+                    message.contentType != MatrixMessageContentType.REDACTED &&
+                    message.deliveryState == MatrixMessageDeliveryState.SENT
+            }
+        return targetMessages.takeIf { it.isNotEmpty() }?.let { messages ->
+            ChatMessageActionRequest.RedactMessages(target, messages)
+        }
+    }
+
     suspend fun execute(request: ChatMessageActionRequest): ChatMessageActionResult {
         return when (request) {
             is ChatMessageActionRequest.AddReaction -> {
@@ -118,6 +159,7 @@ internal class ChatMessageActionStore(
             }
             is ChatMessageActionRequest.RetryOutgoing -> retryOutgoing(request)
             is ChatMessageActionRequest.DiscardOutgoing -> discardOutgoing(request)
+            is ChatMessageActionRequest.RedactMessages -> redactMessages(request)
         }
     }
 
@@ -183,15 +225,45 @@ internal class ChatMessageActionStore(
             ChatMessageActionResult.NOT_APPLIED
         }
     }
+
+    private suspend fun redactMessages(
+        request: ChatMessageActionRequest.RedactMessages
+    ): ChatMessageActionResult {
+        val createdEnvelopeIds = mutableListOf<String>()
+        for (targetMessage in request.targetMessages) {
+            val envelopeId = "redaction:${driver.nextId()}"
+            val transactionId = driver.prepareTransactionId()
+            val didCreate = driver.createRedactionEnvelope(
+                request.target,
+                envelopeId,
+                transactionId,
+                targetMessage
+            )
+            if (didCreate) {
+                createdEnvelopeIds += envelopeId
+            }
+        }
+        if (createdEnvelopeIds.isEmpty()) {
+            return ChatMessageActionResult.NOT_APPLIED
+        }
+
+        driver.kickOutbox(
+            if (createdEnvelopeIds.size == 1) "new-redaction" else "new-redactions",
+            createdEnvelopeIds.singleOrNull()
+        )
+        return ChatMessageActionResult.COMPLETED
+    }
 }
 
 internal fun createChatMessageActionStore(
     matrixClientService: MatrixClientService,
     localCacheRepository: LocalCacheRepository,
-    outgoingOutboxService: OutgoingOutboxService
+    outgoingOutboxService: OutgoingOutboxService,
+    nextId: () -> String = { UUID.randomUUID().toString() }
 ): ChatMessageActionStore {
     return ChatMessageActionStore(
         driver = ChatMessageActionDriver(
+            nextId = nextId,
             prepareTransactionId = matrixClientService::prepareTransactionId,
             prepareReactionAdd = { target, targetEventId, reactionKey, transactionId ->
                 localCacheRepository.prepareOutgoingReactionAdd(
@@ -233,6 +305,16 @@ internal fun createChatMessageActionStore(
                     userId = target.userId,
                     roomId = target.roomId,
                     envelopeId = envelopeId
+                )
+            },
+            createRedactionEnvelope = {
+                    target, envelopeId, transactionId, targetMessage ->
+                localCacheRepository.createOutgoingRedactionEnvelope(
+                    userId = target.userId,
+                    roomId = target.roomId,
+                    envelopeId = envelopeId,
+                    transactionId = transactionId,
+                    targetMessage = targetMessage
                 )
             },
             kickOutbox = outgoingOutboxService::kick

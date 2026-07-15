@@ -41,12 +41,14 @@ import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatComposerSendTarget
 import com.zyna.app.ui.chat.ChatComposerState
+import com.zyna.app.ui.chat.ChatMessageActionTarget
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
 import com.zyna.app.ui.chat.ChatTimelineNavigationRequest
 import com.zyna.app.ui.chat.ChatTimelineNavigationResult
 import com.zyna.app.ui.chat.ChatTimelinePaginationResult
 import com.zyna.app.ui.chat.ChatTimelineTarget
 import com.zyna.app.ui.chat.createChatComposerStore
+import com.zyna.app.ui.chat.createChatMessageActionStore
 import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -274,6 +276,11 @@ class AppViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(AppUiState())
     private val chatComposerStore = createChatComposerStore(
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        outgoingOutboxService = outgoingOutboxService
+    )
+    private val chatMessageActionStore = createChatMessageActionStore(
         matrixClientService = matrixClientService,
         localCacheRepository = localCacheRepository,
         outgoingOutboxService = outgoingOutboxService
@@ -1855,72 +1862,16 @@ class AppViewModel(
         val state = _uiState.value
         val route = state.activeChatRoute ?: return
         val userId = state.matrixState.userIdOrNull() ?: return
-        val key = reactionKey.takeIf { it.isNotBlank() } ?: return
         val message = state.chatMessages.firstOrNull { it.id == messageId } ?: return
-        val targetEventId = message.eventId?.takeIf { it.isNotBlank() } ?: return
-        if (
-            message.contentType == MatrixMessageContentType.REDACTED ||
-            message.outgoingEnvelopeId != null
-        ) {
-            return
-        }
-        val ownReaction = message.reactions.firstOrNull {
-            it.key == key && it.isOwn
-        }
-        val shouldRemove = ownReaction != null && !ownReaction.isPendingRemoval
+        val request = chatMessageActionStore.createReactionRequest(
+            target = ChatMessageActionTarget(userId, route.roomId),
+            message = message,
+            reactionKey = reactionKey
+        ) ?: return
 
         viewModelScope.launch {
             try {
-                if (shouldRemove) {
-                    val transactionId = matrixClientService.prepareTransactionId()
-                    var reactionId = localCacheRepository.prepareOutgoingReactionRemoval(
-                        userId = userId,
-                        roomId = route.roomId,
-                        targetEventId = targetEventId,
-                        reactionKey = key,
-                        reactionEventId = null,
-                        transactionId = transactionId
-                    )
-                    if (reactionId == null) {
-                        val reactionEventId = matrixClientService.findOwnReactionEventId(
-                            roomId = route.roomId,
-                            targetEventId = targetEventId,
-                            reactionKey = key,
-                            userId = userId
-                        )
-                        if (reactionEventId != null) {
-                            reactionId = localCacheRepository.prepareOutgoingReactionRemoval(
-                                userId = userId,
-                                roomId = route.roomId,
-                                targetEventId = targetEventId,
-                                reactionKey = key,
-                                reactionEventId = reactionEventId,
-                                transactionId = transactionId
-                            )
-                        }
-                    }
-                    if (reactionId != null) {
-                        outgoingOutboxService.kick(
-                            reason = "new-reaction-removal",
-                            envelopeId = reactionId
-                        )
-                    }
-                } else {
-                    val transactionId = matrixClientService.prepareTransactionId()
-                    val reactionId = localCacheRepository.prepareOutgoingReactionAdd(
-                        userId = userId,
-                        roomId = route.roomId,
-                        targetEventId = targetEventId,
-                        reactionKey = key,
-                        transactionId = transactionId
-                    )
-                    if (reactionId != null) {
-                        outgoingOutboxService.kick(
-                            reason = "new-reaction",
-                            envelopeId = reactionId
-                        )
-                    }
-                }
+                chatMessageActionStore.execute(request)
                 _uiState.update {
                     if (!it.isRouteForRoom(userId, route.roomId)) {
                         it

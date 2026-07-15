@@ -13,6 +13,7 @@ import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.TimelineFlushSummary
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
+import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixClientService
@@ -43,6 +44,8 @@ import com.zyna.app.data.security.MatrixLogoutWarning
 import com.zyna.app.data.security.MatrixSessionSecurityState
 import com.zyna.app.data.timeline.RoomTimelineWindowStore
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
+import com.zyna.app.ui.chat.ChatTimelineTarget
+import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
@@ -289,12 +292,19 @@ class AppViewModel(
             Log.w(TAG, "Failed to send read receipt", error)
         }
     )
+    private val chatTimelineStore = createChatTimelineStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        onWindowUpdate = { target, update, isAtLiveEdge ->
+            applyChatTimelineWindowUpdate(target, update, isAtLiveEdge)
+        },
+        onTimelineSettled = ::settleChatTimeline,
+        onTimelineError = ::failChatTimeline
+    )
     private var visibleRoomRefreshRequestCount = 0
-    private var chatTimelineJob: Job? = null
     private var chatPaginationJob: Job? = null
-    private var chatCacheJob: Job? = null
     private var openRoomJob: Job? = null
-    private var chatTimelineWindowStore: RoomTimelineWindowStore? = null
     private var roomCacheJob: Job? = null
     private var roomListLiveJob: Job? = null
     private var callHistoryCacheJob: Job? = null
@@ -2329,8 +2339,7 @@ class AppViewModel(
 
         chatPaginationJob = viewModelScope.launch {
             try {
-                val timelineStore = chatTimelineWindowStore
-                    ?.takeIf { it.matches(userId, route.roomId) }
+                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 val didLoadFromCache = timelineStore?.expandOlderFromCache() == true
                 if (didLoadFromCache) {
                     _uiState.update {
@@ -2393,8 +2402,7 @@ class AppViewModel(
 
         chatPaginationJob = viewModelScope.launch {
             try {
-                val timelineStore = chatTimelineWindowStore
-                    ?.takeIf { it.matches(userId, route.roomId) }
+                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 val didLoadFromCache = timelineStore?.expandNewerFromCache() == true
                 if (didLoadFromCache) {
                     _uiState.update {
@@ -2491,8 +2499,7 @@ class AppViewModel(
             var hasReachedStart = false
             var didJump = false
             try {
-                val timelineStore = chatTimelineWindowStore
-                    ?.takeIf { it.matches(userId, route.roomId) }
+                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 if (timelineStore == null) {
                     logTeleport("jump abort noStore target=${normalizedEventId.shortLogId()}")
                     _uiState.update {
@@ -2616,8 +2623,7 @@ class AppViewModel(
 
         chatPaginationJob = viewModelScope.launch {
             try {
-                val timelineStore = chatTimelineWindowStore
-                    ?.takeIf { it.matches(userId, route.roomId) }
+                val timelineStore = chatTimelineStore.windowStoreFor(userId, route.roomId)
                 val didJump = timelineStore?.jumpToLiveEdge() == true
                 logTeleport(
                     "live final didJump=$didJump " +
@@ -2810,12 +2816,9 @@ class AppViewModel(
             localCacheRepository = localCacheRepository
         )
     ) {
-        chatTimelineJob?.cancel()
+        chatTimelineStore.deactivate()
         chatPaginationJob?.cancel()
         chatPaginationJob = null
-        chatCacheJob?.cancel()
-        chatCacheJob = null
-        chatTimelineWindowStore = timelineStore
         ZynaPerfLog.mark {
             "startChatTimeline.begin roomId=$roomId reset=$resetMessages " +
                 "currentMessages=${_uiState.value.chatMessages.size}"
@@ -2851,120 +2854,80 @@ class AppViewModel(
         ) {
             "roomId=$roomId reset=$resetMessages messages=${_uiState.value.chatMessages.size}"
         }
-        chatCacheJob = viewModelScope.launch {
-            timelineStore.messages.collect { update ->
-                val cacheUpdateStart = ZynaPerfLog.start()
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, roomId)) {
-                        it
-                    } else it.copy(
-                        chatMessages = update.messages,
-                        chatWindowChangeOrigin = update.origin,
-                        chatTimelineFlushSummary = update.flushSummary,
-                        isLoadingChat = if (update.messages.isNotEmpty()) false else it.isLoadingChat,
-                        canLoadNewerChatMessages = update.hasNewerInDb,
-                        isChatAtLiveEdge = timelineStore.isAtLiveEdge
-                    )
-                }
-                ZynaPerfLog.end(
-                    cacheUpdateStart,
-                    "chatCache.collect.stateUpdate"
-                ) {
-                    "roomId=$roomId origin=${update.origin} count=${update.messages.size} " +
-                        "older=${update.hasOlderInDb} newer=${update.hasNewerInDb}"
-                }
-            }
+        chatTimelineStore.activate(
+            target = ChatTimelineTarget(userId = userId, roomId = roomId),
+            windowStore = timelineStore
+        )
+    }
+
+    private fun applyChatTimelineWindowUpdate(
+        target: ChatTimelineTarget,
+        update: TimelineWindowUpdate<MatrixChatMessage>,
+        isAtLiveEdge: Boolean
+    ) {
+        val start = ZynaPerfLog.start()
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else it.copy(
+                chatMessages = update.messages,
+                chatWindowChangeOrigin = update.origin,
+                chatTimelineFlushSummary = update.flushSummary,
+                isLoadingChat = if (update.messages.isNotEmpty()) false else it.isLoadingChat,
+                canLoadNewerChatMessages = update.hasNewerInDb,
+                isChatAtLiveEdge = isAtLiveEdge
+            )
         }
-        chatTimelineJob = viewModelScope.launch {
-            try {
-                matrixClientService.roomTimelineMessageUpserts(roomId).collect { timelineUpdate ->
-                    ZynaPerfLog.mark {
-                        "chatTimeline.upsert.collect roomId=$roomId " +
-                            "messages=${timelineUpdate.messages.size} " +
-                            "calls=${timelineUpdate.callNotifications.size} " +
-                            "memberships=${timelineUpdate.callMemberships.size} " +
-                            "flush=${timelineUpdate.flushSummary}"
-                    }
-                    val messages = timelineUpdate.messages
-                    val callNotifications = timelineUpdate.callNotifications
-                    val callMemberships = timelineUpdate.callMemberships
-                    if (callNotifications.isNotEmpty() || callMemberships.isNotEmpty()) {
-                        val callHistoryCacheStart = ZynaPerfLog.start()
-                        localCacheRepository.cacheMatrixRtcCallTimelineEvents(
-                            userId = userId,
-                            notifications = callNotifications,
-                            memberships = callMemberships
-                        )
-                        ZynaPerfLog.end(
-                            callHistoryCacheStart,
-                            "chatTimeline.cacheMatrixRtcCalls"
-                        ) {
-                            "roomId=$roomId notifications=${callNotifications.size} " +
-                                "memberships=${callMemberships.size}"
-                        }
-                    }
-                    if (messages.isNotEmpty()) {
-                        timelineStore.recordTimelineFlush(timelineUpdate.flushSummary)
-                        val cacheStart = ZynaPerfLog.start()
-                        localCacheRepository.cacheRoomTimelineMessages(userId, roomId, messages)
-                        ZynaPerfLog.end(
-                            cacheStart,
-                            "chatTimeline.cacheMessages"
-                        ) {
-                            "roomId=$roomId count=${messages.size}"
-                        }
-                        val refreshStart = ZynaPerfLog.start()
-                        timelineStore.refreshInitialWindowFromCacheIfNeeded(
-                            timelineUpdate.flushSummary
-                        )
-                        ZynaPerfLog.end(
-                            refreshStart,
-                            "chatTimeline.refreshInitialWindow"
-                        ) {
-                            "roomId=$roomId"
-                        }
-                    }
-                    val timelineStateStart = ZynaPerfLog.start()
-                    _uiState.update {
-                        if (!it.isRouteForRoom(userId, roomId)) {
-                            it
-                        } else it.copy(
-                            isLoadingChat = false,
-                            isLoadingOlderChatMessages = false,
-                            chatErrorMessage = null
-                        )
-                    }
-                    ZynaPerfLog.end(
-                        timelineStateStart,
-                        "chatTimeline.stateUpdate"
-                    ) {
-                        "roomId=$roomId count=${messages.size}"
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                _uiState.update {
-                    if (!it.isRouteForRoom(userId, roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingChat = false,
-                        isLoadingOlderChatMessages = false,
-                        chatErrorMessage = error.message ?: error.javaClass.simpleName
-                    )
-                }
-            }
+        ZynaPerfLog.end(
+            start,
+            "chatCache.collect.stateUpdate"
+        ) {
+            "roomId=${target.roomId} origin=${update.origin} count=${update.messages.size} " +
+                "older=${update.hasOlderInDb} newer=${update.hasNewerInDb}"
+        }
+    }
+
+    private fun settleChatTimeline(
+        target: ChatTimelineTarget,
+        messageCount: Int
+    ) {
+        val start = ZynaPerfLog.start()
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else it.copy(
+                isLoadingChat = false,
+                isLoadingOlderChatMessages = false,
+                chatErrorMessage = null
+            )
+        }
+        ZynaPerfLog.end(
+            start,
+            "chatTimeline.stateUpdate"
+        ) {
+            "roomId=${target.roomId} count=$messageCount"
+        }
+    }
+
+    private fun failChatTimeline(
+        target: ChatTimelineTarget,
+        error: Throwable
+    ) {
+        _uiState.update {
+            if (!it.isRouteForRoom(target.userId, target.roomId)) {
+                it
+            } else it.copy(
+                isLoadingChat = false,
+                isLoadingOlderChatMessages = false,
+                chatErrorMessage = error.message ?: error.javaClass.simpleName
+            )
         }
     }
 
     private fun stopChatTimeline() {
         openRoomJob?.cancel()
         openRoomJob = null
-        chatTimelineJob?.cancel()
-        chatTimelineJob = null
-        chatCacheJob?.cancel()
-        chatCacheJob = null
-        chatTimelineWindowStore = null
+        chatTimelineStore.deactivate()
         chatPaginationJob?.cancel()
         chatPaginationJob = null
         clearChatCallInfoObserver()

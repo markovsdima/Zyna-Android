@@ -9,8 +9,6 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryItem
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
-import com.zyna.app.data.local.TimelineFlushSummary
-import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixChatMessage
@@ -44,8 +42,7 @@ import com.zyna.app.ui.chat.ChatMessageActionResult
 import com.zyna.app.ui.chat.ChatMessageActionTarget
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
 import com.zyna.app.ui.chat.ChatTimelineNavigationRequest
-import com.zyna.app.ui.chat.ChatTimelineNavigationResult
-import com.zyna.app.ui.chat.ChatTimelinePaginationResult
+import com.zyna.app.ui.chat.ChatTimelineState
 import com.zyna.app.ui.chat.ChatTimelineTarget
 import com.zyna.app.ui.chat.createChatComposerStore
 import com.zyna.app.ui.chat.createChatCallInfoCoordinator
@@ -137,19 +134,8 @@ data class AppUiState(
     val logoutErrorMessage: String? = null,
     val logoutConfirmation: LogoutConfirmationState? = null,
     val sessionSecurity: MatrixSessionSecurityState = MatrixSessionSecurityState(),
-    val chatMessages: List<MatrixChatMessage> = emptyList(),
-    val chatWindowChangeOrigin: TimelineWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
-    val chatTimelineFlushSummary: TimelineFlushSummary? = null,
-    val isLoadingChat: Boolean = false,
-    val isLoadingOlderChatMessages: Boolean = false,
-    val canLoadOlderChatMessages: Boolean = true,
-    val canLoadNewerChatMessages: Boolean = false,
-    val isChatAtLiveEdge: Boolean = true,
-    val chatErrorMessage: String? = null,
     val isSendingChatMessage: Boolean = false,
     val chatSendErrorMessage: String? = null,
-    val chatJumpTargetEventId: String? = null,
-    val chatScrollToLiveEdgeRequested: Boolean = false,
     val chatCallBanner: ChatCallBannerState? = null
 ) {
     val route: AppRoute
@@ -274,10 +260,20 @@ class AppViewModel(
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
     }
+    private val chatTimelineStore = createChatTimelineStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        onWindowUpdate = ::logChatTimelineWindowUpdate,
+        onTimelineSettled = ::logChatTimelineSettled,
+        onNavigationError = ::failChatTimelineNavigation,
+        onNavigationTrace = ::logTeleport
+    )
+    val chatTimelineState: StateFlow<ChatTimelineState> = chatTimelineStore.state
     private val chatReadReceiptCoordinator = ChatReadReceiptCoordinator(
         scope = viewModelScope,
         messageIndex = { eventId ->
-            _uiState.value.chatMessages.indexOfFirst { it.eventId == eventId }
+            chatTimelineStore.state.value.messages.indexOfFirst { it.eventId == eventId }
                 .takeIf { it >= 0 }
         },
         sendReadReceipt = { roomId, eventId ->
@@ -286,23 +282,6 @@ class AppViewModel(
         onSendFailure = { error ->
             Log.w(TAG, "Failed to send read receipt", error)
         }
-    )
-    private val chatTimelineStore = createChatTimelineStore(
-        scope = viewModelScope,
-        matrixClientService = matrixClientService,
-        localCacheRepository = localCacheRepository,
-        onWindowUpdate = { target, update, isAtLiveEdge ->
-            applyChatTimelineWindowUpdate(target, update, isAtLiveEdge)
-        },
-        onTimelineSettled = ::settleChatTimeline,
-        onTimelineError = ::failChatTimeline,
-        onPaginationResult = ::applyChatTimelinePaginationResult,
-        onPaginationError = { target, _ ->
-            clearChatTimelinePaginationLoading(target)
-        },
-        onNavigationResult = ::applyChatTimelineNavigationResult,
-        onNavigationError = ::failChatTimelineNavigation,
-        onNavigationTrace = ::logTeleport
     )
     private val chatCallInfoCoordinator = createChatCallInfoCoordinator(
         scope = viewModelScope,
@@ -484,47 +463,8 @@ class AppViewModel(
                         } else {
                             current.logoutConfirmation
                         },
-                        chatMessages = if (shouldClearChat) emptyList() else current.chatMessages,
-                        chatWindowChangeOrigin = if (shouldClearChat) {
-                            TimelineWindowChangeOrigin.INITIAL_LOAD
-                        } else {
-                            current.chatWindowChangeOrigin
-                        },
-                        chatTimelineFlushSummary = if (shouldClearChat) {
-                            null
-                        } else {
-                            current.chatTimelineFlushSummary
-                        },
-                        isLoadingChat = if (shouldClearChat) false else current.isLoadingChat,
-                        isLoadingOlderChatMessages = if (shouldClearChat) {
-                            false
-                        } else {
-                            current.isLoadingOlderChatMessages
-                        },
-                        canLoadOlderChatMessages = if (shouldClearChat) {
-                            true
-                        } else {
-                            current.canLoadOlderChatMessages
-                        },
-                        canLoadNewerChatMessages = if (shouldClearChat) {
-                            false
-                        } else {
-                            current.canLoadNewerChatMessages
-                        },
-                        isChatAtLiveEdge = if (shouldClearChat) true else current.isChatAtLiveEdge,
-                        chatErrorMessage = if (shouldClearChat) null else current.chatErrorMessage,
                         isSendingChatMessage = if (shouldClearChat) false else current.isSendingChatMessage,
                         chatSendErrorMessage = if (shouldClearChat) null else current.chatSendErrorMessage,
-                        chatJumpTargetEventId = if (shouldClearChat) {
-                            null
-                        } else {
-                            current.chatJumpTargetEventId
-                        },
-                        chatScrollToLiveEdgeRequested = if (shouldClearChat) {
-                            false
-                        } else {
-                            current.chatScrollToLiveEdgeRequested
-                        },
                         chatCallBanner = if (shouldClearChat) null else current.chatCallBanner
                     )
                 }
@@ -884,7 +824,8 @@ class AppViewModel(
         val requestStart = ZynaPerfLog.start()
         ZynaPerfLog.mark {
             "openRoom.request roomId=${room.id} name=${room.displayName} " +
-                "route=${_uiState.value.route.perfName()} currentMessages=${_uiState.value.chatMessages.size}"
+                "route=${_uiState.value.route.perfName()} " +
+                "currentMessages=${chatTimelineStore.state.value.messages.size}"
         }
         stopChatTimeline()
         ZynaPerfLog.end(
@@ -903,8 +844,10 @@ class AppViewModel(
         ZynaPerfLog.end(storeStart, "openRoom.createStore") { "roomId=${room.id}" }
 
         val routeUpdateStart = ZynaPerfLog.start()
+        val target = ChatTimelineTarget(userId = userId, roomId = room.id)
         if (_uiState.value.matrixState.userIdOrNull() == userId) {
             chatComposerStore.enterRoom(forwardTarget)
+            chatTimelineStore.prepareRoom(target)
         }
         _uiState.update {
             if (it.matrixState.userIdOrNull() != userId) {
@@ -943,13 +886,7 @@ class AppViewModel(
             }
 
             val stateUpdateStart = ZynaPerfLog.start()
-            _uiState.update {
-                it.applyInitialChatSnapshot(
-                    userId = userId,
-                    roomId = room.id,
-                    initialMessages = initialMessages
-                )
-            }
+            chatTimelineStore.applyInitialSnapshot(target, initialMessages)
             ZynaPerfLog.end(
                 stateUpdateStart,
                 "openRoom.stateUpdate"
@@ -962,7 +899,6 @@ class AppViewModel(
                 startChatTimeline(
                     userId = userId,
                     roomId = room.id,
-                    resetMessages = false,
                     timelineStore = timelineStore
                 )
                 initialEventId?.let(::jumpToChatEvent)
@@ -998,19 +934,8 @@ class AppViewModel(
         _uiState.update {
             it.copy(
                 navState = it.navState.closeChat(),
-                chatMessages = emptyList(),
-                chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
-                chatTimelineFlushSummary = null,
-                isLoadingChat = false,
-                isLoadingOlderChatMessages = false,
-                canLoadOlderChatMessages = true,
-                canLoadNewerChatMessages = false,
-                isChatAtLiveEdge = true,
-                chatErrorMessage = null,
                 isSendingChatMessage = false,
                 chatSendErrorMessage = null,
-                chatJumpTargetEventId = null,
-                chatScrollToLiveEdgeRequested = false,
                 chatCallBanner = null,
                 pendingNativeMatrixRtcCallLaunch = null
             )
@@ -1828,7 +1753,9 @@ class AppViewModel(
         val state = _uiState.value
         val route = state.activeChatRoute ?: return
         val userId = state.matrixState.userIdOrNull() ?: return
-        val message = state.chatMessages.firstOrNull { it.id == messageId } ?: return
+        val message = chatTimelineStore.state.value.messages
+            .firstOrNull { it.id == messageId }
+            ?: return
         val request = chatMessageActionStore.createReactionRequest(
             target = ChatMessageActionTarget(userId, route.roomId),
             message = message,
@@ -1947,7 +1874,7 @@ class AppViewModel(
         val request = chatMessageActionStore.createRedactionRequest(
             target = ChatMessageActionTarget(userId, route.roomId),
             messageIds = messageIds,
-            availableMessages = state.chatMessages
+            availableMessages = chatTimelineStore.state.value.messages
         ) ?: return
         launchChatMessageAction(request)
     }
@@ -1983,24 +1910,16 @@ class AppViewModel(
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
+        val timeline = chatTimelineStore.state.value
         if (
-            state.isLoadingChat ||
-            state.isLoadingOlderChatMessages ||
-            !state.canLoadOlderChatMessages ||
+            timeline.isLoading ||
+            timeline.isLoadingWindowOperation ||
+            !timeline.canLoadOlder ||
             chatTimelineStore.hasActiveWindowOperation()
         ) {
             return
         }
-
-        _uiState.update {
-            if (!it.isRouteForRoom(userId, route.roomId)) {
-                it
-            } else it.copy(isLoadingOlderChatMessages = true)
-        }
-
-        if (!chatTimelineStore.loadOlder(target)) {
-            clearChatTimelinePaginationLoading(target)
-        }
+        chatTimelineStore.loadOlder(target)
     }
 
     fun loadNewerChatMessages() {
@@ -2008,24 +1927,16 @@ class AppViewModel(
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
+        val timeline = chatTimelineStore.state.value
         if (
-            state.isLoadingChat ||
-            state.isLoadingOlderChatMessages ||
-            !state.canLoadNewerChatMessages ||
+            timeline.isLoading ||
+            timeline.isLoadingWindowOperation ||
+            !timeline.canLoadNewer ||
             chatTimelineStore.hasActiveWindowOperation()
         ) {
             return
         }
-
-        _uiState.update {
-            if (!it.isRouteForRoom(userId, route.roomId)) {
-                it
-            } else it.copy(isLoadingOlderChatMessages = true)
-        }
-
-        if (!chatTimelineStore.loadNewer(target)) {
-            clearChatTimelinePaginationLoading(target)
-        }
+        chatTimelineStore.loadNewer(target)
     }
 
     fun jumpToChatEvent(eventId: String) {
@@ -2034,61 +1945,39 @@ class AppViewModel(
         val state = _uiState.value
         val userId = state.matrixState.userIdOrNull() ?: return
         val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
+        val timeline = chatTimelineStore.state.value
         if (chatTimelineStore.hasActiveWindowOperation()) {
             logTeleport("jump cancels activeWindowOperation target=${normalizedEventId.shortLogId()}")
-            chatTimelineStore.cancelWindowOperation()
         }
         logTeleport(
             "jump request target=${normalizedEventId.shortLogId()} " +
-                "messages=${state.chatMessages.size} canOlder=${state.canLoadOlderChatMessages} " +
-                "canNewer=${state.canLoadNewerChatMessages} live=${state.isChatAtLiveEdge}"
+                "messages=${timeline.messages.size} canOlder=${timeline.canLoadOlder} " +
+                "canNewer=${timeline.canLoadNewer} live=${timeline.isAtLiveEdge}"
         )
 
-        val isTargetInCurrentWindow = state.chatMessages.any { message ->
+        val isTargetInCurrentWindow = timeline.messages.any { message ->
             message.eventId == normalizedEventId || message.id == normalizedEventId
         }
         if (isTargetInCurrentWindow) {
             logTeleport("jump local target=${normalizedEventId.shortLogId()}")
+        }
+
+        if (chatTimelineStore.jumpToEvent(target, normalizedEventId)) {
             _uiState.update {
-                if (!it.isRouteForRoom(userId, route.roomId)) {
+                if (it.isRouteForRoom(userId, route.roomId)) {
+                    it.copy(chatSendErrorMessage = null)
+                } else {
                     it
-                } else it.copy(
-                    chatWindowChangeOrigin = TimelineWindowChangeOrigin.JUMP,
-                    chatTimelineFlushSummary = null,
-                    isLoadingOlderChatMessages = false,
-                    chatSendErrorMessage = null,
-                    chatJumpTargetEventId = normalizedEventId
-                )
+                }
             }
             chatReadReceiptCoordinator.reset()
-            return
-        }
-
-        _uiState.update {
-            if (!it.isRouteForRoom(userId, route.roomId)) {
-                it
-            } else it.copy(
-                isLoadingOlderChatMessages = true,
-                chatSendErrorMessage = null,
-                chatJumpTargetEventId = normalizedEventId
-            )
-        }
-        chatReadReceiptCoordinator.reset()
-
-        if (!chatTimelineStore.jumpToEvent(target, normalizedEventId)) {
+        } else {
             logTeleport("jump abort unavailable target=${normalizedEventId.shortLogId()}")
-            clearChatTimelineEventJump(target, normalizedEventId)
         }
     }
 
     fun clearChatJumpTarget(eventId: String) {
-        _uiState.update {
-            if (it.chatJumpTargetEventId == eventId) {
-                it.copy(chatJumpTargetEventId = null)
-            } else {
-                it
-            }
-        }
+        chatTimelineStore.consumeJumpTarget(eventId)
     }
 
     fun jumpToChatLiveEdge() {
@@ -2098,35 +1987,24 @@ class AppViewModel(
         val target = ChatTimelineTarget(userId = userId, roomId = route.roomId)
         if (chatTimelineStore.hasActiveWindowOperation()) {
             logTeleport("live cancels activeWindowOperation")
-            chatTimelineStore.cancelWindowOperation()
         }
 
-        _uiState.update {
-            if (!it.isRouteForRoom(userId, route.roomId)) {
-                it
-            } else it.copy(
-                isLoadingOlderChatMessages = true,
-                chatSendErrorMessage = null,
-                chatJumpTargetEventId = null,
-                chatScrollToLiveEdgeRequested = true
-            )
-        }
-        chatReadReceiptCoordinator.reset()
-
-        if (!chatTimelineStore.jumpToLiveEdge(target)) {
+        if (chatTimelineStore.jumpToLiveEdge(target)) {
+            _uiState.update {
+                if (it.isRouteForRoom(userId, route.roomId)) {
+                    it.copy(chatSendErrorMessage = null)
+                } else {
+                    it
+                }
+            }
+            chatReadReceiptCoordinator.reset()
+        } else {
             logTeleport("live abort unavailable")
-            clearChatTimelineLiveEdgeJump(target)
         }
     }
 
     fun clearChatScrollToLiveEdgeRequest() {
-        _uiState.update {
-            if (it.chatScrollToLiveEdgeRequested) {
-                it.copy(chatScrollToLiveEdgeRequested = false)
-            } else {
-                it
-            }
-        }
+        chatTimelineStore.consumeScrollToLiveEdgeRequest()
     }
 
     fun updateVisibleReadReceiptCandidate(
@@ -2271,48 +2149,15 @@ class AppViewModel(
     private fun startChatTimeline(
         userId: String,
         roomId: String,
-        resetMessages: Boolean,
         timelineStore: RoomTimelineWindowStore = RoomTimelineWindowStore(
             userId = userId,
             roomId = roomId,
             localCacheRepository = localCacheRepository
         )
     ) {
-        chatTimelineStore.deactivate()
         ZynaPerfLog.mark {
-            "startChatTimeline.begin roomId=$roomId reset=$resetMessages " +
-                "currentMessages=${_uiState.value.chatMessages.size}"
-        }
-        val initialStateStart = ZynaPerfLog.start()
-        _uiState.update {
-            val nextMessages = if (resetMessages) emptyList() else it.chatMessages
-            it.copy(
-                chatMessages = nextMessages,
-                chatWindowChangeOrigin = if (resetMessages) {
-                    TimelineWindowChangeOrigin.INITIAL_LOAD
-                } else {
-                    it.chatWindowChangeOrigin
-                },
-                chatTimelineFlushSummary = if (resetMessages) null else it.chatTimelineFlushSummary,
-                isLoadingChat = nextMessages.isEmpty(),
-                isLoadingOlderChatMessages = false,
-                canLoadOlderChatMessages = true,
-                canLoadNewerChatMessages = if (resetMessages) false else it.canLoadNewerChatMessages,
-                isChatAtLiveEdge = if (resetMessages) true else it.isChatAtLiveEdge,
-                chatErrorMessage = null,
-                chatJumpTargetEventId = if (resetMessages) null else it.chatJumpTargetEventId,
-                chatScrollToLiveEdgeRequested = if (resetMessages) {
-                    false
-                } else {
-                    it.chatScrollToLiveEdgeRequested
-                }
-            )
-        }
-        ZynaPerfLog.end(
-            initialStateStart,
-            "startChatTimeline.initialState"
-        ) {
-            "roomId=$roomId reset=$resetMessages messages=${_uiState.value.chatMessages.size}"
+            "startChatTimeline.begin roomId=$roomId " +
+                "currentMessages=${chatTimelineStore.state.value.messages.size}"
         }
         chatTimelineStore.activate(
             target = ChatTimelineTarget(userId = userId, roomId = roomId),
@@ -2320,138 +2165,24 @@ class AppViewModel(
         )
     }
 
-    private fun applyChatTimelineWindowUpdate(
+    private fun logChatTimelineWindowUpdate(
         target: ChatTimelineTarget,
         update: TimelineWindowUpdate<MatrixChatMessage>,
         isAtLiveEdge: Boolean
     ) {
-        val start = ZynaPerfLog.start()
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else it.copy(
-                chatMessages = update.messages,
-                chatWindowChangeOrigin = update.origin,
-                chatTimelineFlushSummary = update.flushSummary,
-                isLoadingChat = if (update.messages.isNotEmpty()) false else it.isLoadingChat,
-                canLoadNewerChatMessages = update.hasNewerInDb,
-                isChatAtLiveEdge = isAtLiveEdge
-            )
-        }
-        ZynaPerfLog.end(
-            start,
-            "chatCache.collect.stateUpdate"
-        ) {
-            "roomId=${target.roomId} origin=${update.origin} count=${update.messages.size} " +
-                "older=${update.hasOlderInDb} newer=${update.hasNewerInDb}"
+        ZynaPerfLog.mark {
+            "chatCache.collect.stateUpdate roomId=${target.roomId} origin=${update.origin} " +
+                "count=${update.messages.size} older=${update.hasOlderInDb} " +
+                "newer=${update.hasNewerInDb} live=$isAtLiveEdge"
         }
     }
 
-    private fun settleChatTimeline(
+    private fun logChatTimelineSettled(
         target: ChatTimelineTarget,
         messageCount: Int
     ) {
-        val start = ZynaPerfLog.start()
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else it.copy(
-                isLoadingChat = false,
-                isLoadingOlderChatMessages = false,
-                chatErrorMessage = null
-            )
-        }
-        ZynaPerfLog.end(
-            start,
-            "chatTimeline.stateUpdate"
-        ) {
-            "roomId=${target.roomId} count=$messageCount"
-        }
-    }
-
-    private fun failChatTimeline(
-        target: ChatTimelineTarget,
-        error: Throwable
-    ) {
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else it.copy(
-                isLoadingChat = false,
-                isLoadingOlderChatMessages = false,
-                chatErrorMessage = error.message ?: error.javaClass.simpleName
-            )
-        }
-    }
-
-    private fun applyChatTimelinePaginationResult(
-        target: ChatTimelineTarget,
-        result: ChatTimelinePaginationResult
-    ) {
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else it.copy(
-                isLoadingOlderChatMessages = false,
-                canLoadOlderChatMessages = result.canLoadOlder
-                    ?: it.canLoadOlderChatMessages,
-                canLoadNewerChatMessages = result.canLoadNewer
-                    ?: it.canLoadNewerChatMessages,
-                isChatAtLiveEdge = result.isAtLiveEdge ?: it.isChatAtLiveEdge
-            )
-        }
-    }
-
-    private fun clearChatTimelinePaginationLoading(target: ChatTimelineTarget) {
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else {
-                it.copy(isLoadingOlderChatMessages = false)
-            }
-        }
-    }
-
-    private fun applyChatTimelineNavigationResult(
-        target: ChatTimelineTarget,
-        result: ChatTimelineNavigationResult
-    ) {
-        when (result) {
-            is ChatTimelineNavigationResult.EventJump -> {
-                _uiState.update {
-                    if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = result.canLoadOlder
-                            ?: it.canLoadOlderChatMessages,
-                        canLoadNewerChatMessages = result.canLoadNewer
-                            ?: it.canLoadNewerChatMessages,
-                        isChatAtLiveEdge = result.isAtLiveEdge,
-                        chatJumpTargetEventId = if (result.didJump) {
-                            it.chatJumpTargetEventId
-                        } else if (it.chatJumpTargetEventId == result.eventId) {
-                            null
-                        } else {
-                            it.chatJumpTargetEventId
-                        }
-                    )
-                }
-            }
-
-            is ChatTimelineNavigationResult.LiveEdge -> {
-                _uiState.update {
-                    if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                        it
-                    } else it.copy(
-                        isLoadingOlderChatMessages = false,
-                        canLoadOlderChatMessages = result.canLoadOlder,
-                        canLoadNewerChatMessages = result.canLoadNewer,
-                        isChatAtLiveEdge = result.isAtLiveEdge,
-                        chatScrollToLiveEdgeRequested = result.didJump
-                    )
-                }
-            }
+        ZynaPerfLog.mark {
+            "chatTimeline.stateUpdate roomId=${target.roomId} count=$messageCount"
         }
     }
 
@@ -2462,43 +2193,12 @@ class AppViewModel(
     ) {
         when (request) {
             is ChatTimelineNavigationRequest.EventJump -> {
-                Log.w(TAG, "Failed to jump to chat event", error)
-                clearChatTimelineEventJump(target, request.eventId)
+                Log.w(TAG, "Failed to jump to chat event in ${target.roomId}", error)
             }
 
             ChatTimelineNavigationRequest.LiveEdge -> {
-                Log.w(TAG, "Failed to jump to live edge", error)
-                clearChatTimelineLiveEdgeJump(target)
+                Log.w(TAG, "Failed to jump to live edge in ${target.roomId}", error)
             }
-        }
-    }
-
-    private fun clearChatTimelineEventJump(
-        target: ChatTimelineTarget,
-        eventId: String
-    ) {
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else it.copy(
-                isLoadingOlderChatMessages = false,
-                chatJumpTargetEventId = if (it.chatJumpTargetEventId == eventId) {
-                    null
-                } else {
-                    it.chatJumpTargetEventId
-                }
-            )
-        }
-    }
-
-    private fun clearChatTimelineLiveEdgeJump(target: ChatTimelineTarget) {
-        _uiState.update {
-            if (!it.isRouteForRoom(target.userId, target.roomId)) {
-                it
-            } else it.copy(
-                isLoadingOlderChatMessages = false,
-                chatScrollToLiveEdgeRequested = false
-            )
         }
     }
 
@@ -2688,41 +2388,9 @@ class AppViewModel(
                 roomId = room.id,
                 displayName = room.displayName
             ),
-            chatMessages = emptyList(),
-            chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
-            chatTimelineFlushSummary = null,
-            isLoadingChat = true,
-            isLoadingOlderChatMessages = false,
-            canLoadOlderChatMessages = false,
-            canLoadNewerChatMessages = false,
-            isChatAtLiveEdge = true,
-            chatErrorMessage = null,
             isSendingChatMessage = false,
             chatSendErrorMessage = null,
-            chatJumpTargetEventId = null,
-            chatScrollToLiveEdgeRequested = false,
             chatCallBanner = null
-        )
-    }
-
-    private fun AppUiState.applyInitialChatSnapshot(
-        userId: String,
-        roomId: String,
-        initialMessages: List<MatrixChatMessage>
-    ): AppUiState {
-        if (!isRouteForRoom(userId, roomId)) {
-            return this
-        }
-        return copy(
-            chatMessages = initialMessages,
-            chatWindowChangeOrigin = TimelineWindowChangeOrigin.INITIAL_LOAD,
-            chatTimelineFlushSummary = null,
-            isLoadingChat = initialMessages.isEmpty(),
-            isLoadingOlderChatMessages = false,
-            canLoadOlderChatMessages = true,
-            canLoadNewerChatMessages = false,
-            isChatAtLiveEdge = true,
-            chatErrorMessage = null
         )
     }
 

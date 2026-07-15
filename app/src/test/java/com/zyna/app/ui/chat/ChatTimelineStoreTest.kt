@@ -109,6 +109,7 @@ class ChatTimelineStoreTest {
         val target = target(roomId = ROOM_A)
         val windowStore = FakeWindowStore()
 
+        store.prepareRoom(target)
         store.activate(target, windowStore)
         store.deactivate()
 
@@ -117,6 +118,72 @@ class ChatTimelineStoreTest {
 
         assertTrue(windowDeliveries.isEmpty())
         assertTrue(settledTargets.isEmpty())
+        assertEquals(ChatTimelineState(), store.state.value)
+    }
+
+    @Test
+    fun roomPreparationAndInitialSnapshot_areOwnedByStore() {
+        val target = target(roomId = ROOM_A)
+        val initialMessage = message(EVENT_A)
+
+        store.prepareRoom(target)
+
+        assertEquals(
+            ChatTimelineState(
+                roomId = ROOM_A,
+                isLoading = true,
+                canLoadOlder = false
+            ),
+            store.state.value
+        )
+
+        store.applyInitialSnapshot(target, listOf(initialMessage))
+        store.applyInitialSnapshot(target(roomId = ROOM_B), emptyList())
+
+        assertEquals(
+            ChatTimelineState(
+                roomId = ROOM_A,
+                messages = listOf(initialMessage),
+                isLoading = false
+            ),
+            store.state.value
+        )
+    }
+
+    @Test
+    fun activeUpdatesAndSettlement_projectTimelineState() {
+        val target = target(roomId = ROOM_A)
+        val windowStore = FakeWindowStore().apply {
+            isAtLiveEdge = false
+        }
+        val message = message(EVENT_A)
+        store.prepareRoom(target)
+        store.applyInitialSnapshot(target, emptyList())
+        store.activate(target, windowStore)
+
+        assertTrue(
+            windowStore.updates.tryEmit(
+                TimelineWindowUpdate(
+                    messages = listOf(message),
+                    origin = TimelineWindowChangeOrigin.JUMP,
+                    hasOlderInDb = true,
+                    hasNewerInDb = true,
+                    flushSummary = null
+                )
+            )
+        )
+
+        assertEquals(listOf(message), store.state.value.messages)
+        assertEquals(TimelineWindowChangeOrigin.JUMP, store.state.value.windowChangeOrigin)
+        assertFalse(store.state.value.isLoading)
+        assertTrue(store.state.value.canLoadNewer)
+        assertFalse(store.state.value.isAtLiveEdge)
+
+        assertTrue(timelineFlow(target).tryEmit(timelineUpdate()))
+
+        assertFalse(store.state.value.isLoading)
+        assertFalse(store.state.value.isLoadingWindowOperation)
+        assertEquals(null, store.state.value.errorMessage)
     }
 
     @Test
@@ -160,6 +227,8 @@ class ChatTimelineStoreTest {
         store.activate(target, FakeWindowStore())
 
         assertEquals(listOf(target to expected), errors)
+        assertEquals("timeline failed", store.state.value.errorMessage)
+        assertFalse(store.state.value.isLoading)
     }
 
     @Test

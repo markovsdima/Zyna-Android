@@ -32,6 +32,7 @@ import com.zyna.app.ui.chat.ChatComposerState
 import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
+import com.zyna.app.ui.chat.ChatTimelineState
 import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
@@ -93,6 +94,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var latestState: AppUiState? = null
     private var latestChatComposer: ChatComposerState? = null
     private var latestCallHistory: CallHistoryState? = null
+    private var latestChatTimeline: ChatTimelineState? = null
     private var latestActions: ZynaAppActions? = null
     private var latestPreferences: ZynaRootPreferences? = null
     private var renderSequence = 0L
@@ -213,6 +215,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         chatComposer: ChatComposerState,
         callHistory: CallHistoryState,
+        chatTimeline: ChatTimelineState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ) {
@@ -221,11 +224,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val sequence = renderSequence
         ZynaPerfLog.mark {
             "root.render.begin seq=$sequence route=${state.route.perfName()} " +
-                "messages=${state.chatMessages.size} loading=${state.isLoadingChat}"
+                "messages=${chatTimeline.messages.size} loading=${chatTimeline.isLoading}"
         }
         latestState = state
         latestChatComposer = chatComposer
         latestCallHistory = callHistory
+        latestChatTimeline = chatTimeline
         latestActions = actions
         latestPreferences = preferences
 
@@ -234,7 +238,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             renderStart,
             "root.render.done"
         ) {
-            "seq=$sequence route=${state.route.perfName()} messages=${state.chatMessages.size}"
+            "seq=$sequence route=${state.route.perfName()} " +
+                "messages=${chatTimeline.messages.size}"
         }
     }
 
@@ -541,6 +546,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val state = latestState ?: return
         val chatComposer = latestChatComposer ?: return
         val callHistory = latestCallHistory ?: return
+        val chatTimeline = latestChatTimeline ?: return
         val actions = latestActions ?: return
         val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
@@ -551,6 +557,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             state,
             chatComposer,
             callHistory,
+            chatTimeline,
             actions,
             preferences
         )
@@ -650,6 +657,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         chatComposer: ChatComposerState,
         callHistory: CallHistoryState,
+        chatTimeline: ChatTimelineState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
@@ -685,6 +693,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 is AppRoute.Chat -> chatEntry(
                     state,
                     chatComposer,
+                    chatTimeline,
                     actions,
                     preferences,
                     route
@@ -1035,10 +1044,17 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun chatEntry(
         state: AppUiState,
         chatComposer: ChatComposerState,
+        chatTimeline: ChatTimelineState,
         actions: ZynaAppActions,
         preferences: ZynaRootPreferences,
         route: AppRoute.Chat
     ): ZynaScreenEntry {
+        val timeline = chatTimeline.takeIf { it.roomId == route.roomId }
+            ?: ChatTimelineState(
+                roomId = route.roomId,
+                isLoading = true,
+                canLoadOlder = false
+            )
         return ZynaScreenEntry(
             key = "chat:${route.roomId}",
             rootGlassOwnerKey = chatGlassOwnerKey(),
@@ -1069,15 +1085,15 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             style = PresenceText.LastSeenStyle.CHAT
                         )
                             ?: route.roomId,
-                        messages = state.chatMessages,
-                        windowChangeOrigin = state.chatWindowChangeOrigin,
-                        isLoading = state.isLoadingChat,
-                        isLoadingOlder = state.isLoadingOlderChatMessages,
-                        canLoadOlder = state.canLoadOlderChatMessages,
-                        canLoadNewer = state.canLoadNewerChatMessages,
-                        isAtLiveEdge = state.isChatAtLiveEdge,
-                        scrollToLiveEdgeRequested = state.chatScrollToLiveEdgeRequested,
-                        errorMessage = state.chatErrorMessage,
+                        messages = timeline.messages,
+                        windowChangeOrigin = timeline.windowChangeOrigin,
+                        isLoading = timeline.isLoading,
+                        isLoadingOlder = timeline.isLoadingWindowOperation,
+                        canLoadOlder = timeline.canLoadOlder,
+                        canLoadNewer = timeline.canLoadNewer,
+                        isAtLiveEdge = timeline.isAtLiveEdge,
+                        scrollToLiveEdgeRequested = timeline.scrollToLiveEdgeRequested,
+                        errorMessage = timeline.errorMessage,
                         isSendingMessage = state.isSendingChatMessage,
                         sendErrorMessage = state.chatSendErrorMessage,
                         replyTarget = chatComposer.replyTarget,
@@ -1086,7 +1102,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         matrixMediaLoader = actions.matrixMediaLoader,
                         audioPlaybackController = actions.audioPlaybackController,
                         voiceRecorderController = actions.voiceRecorderController,
-                        jumpTargetEventId = state.chatJumpTargetEventId,
+                        jumpTargetEventId = timeline.jumpTargetEventId,
                         callBanner = state.chatCallBanner,
                         chatBubbleTheme = preferences.chatBubbleTheme
                     ),
@@ -1129,8 +1145,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     updateStart,
                     "root.chatEntry.updateView"
                 ) {
-                    "roomId=${route.roomId} messages=${state.chatMessages.size} " +
-                        "origin=${state.chatWindowChangeOrigin}"
+                    "roomId=${route.roomId} messages=${timeline.messages.size} " +
+                        "origin=${timeline.windowChangeOrigin}"
                 }
             }
         )

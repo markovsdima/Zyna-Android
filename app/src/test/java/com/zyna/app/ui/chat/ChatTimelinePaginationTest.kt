@@ -114,6 +114,10 @@ class ChatTimelinePaginationTest {
             ),
             results
         )
+        assertFalse(store.state.value.isLoadingWindowOperation)
+        assertTrue(store.state.value.canLoadOlder)
+        assertTrue(store.state.value.canLoadNewer)
+        assertFalse(store.state.value.isAtLiveEdge)
     }
 
     @Test
@@ -233,6 +237,7 @@ class ChatTimelinePaginationTest {
         assertEquals(listOf(TARGET to expected), errors)
         assertTrue(results.isEmpty())
         assertFalse(store.hasActiveWindowOperation())
+        assertFalse(store.state.value.isLoadingWindowOperation)
     }
 
     private data class FakeWindowStore(

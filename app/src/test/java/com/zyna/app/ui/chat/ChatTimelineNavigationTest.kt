@@ -1,5 +1,6 @@
 package com.zyna.app.ui.chat
 
+import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.matrix.MatrixChatMessage
 import com.zyna.app.data.matrix.MatrixTimelineUpdate
@@ -107,6 +108,34 @@ class ChatTimelineNavigationTest {
     }
 
     @Test
+    fun eventJump_insideCurrentWindow_isProjectedWithoutWindowNavigation() {
+        val message = MatrixChatMessage(
+            id = EVENT_ID,
+            eventId = EVENT_ID,
+            sender = "@bob:example.org",
+            body = "Message",
+            timestampMillis = 1L,
+            isOwn = false
+        )
+        val windowStore = FakeWindowStore()
+        store.prepareRoom(TARGET)
+        store.applyInitialSnapshot(TARGET, listOf(message))
+        store.activate(TARGET, windowStore)
+
+        assertTrue(store.jumpToEvent(TARGET, EVENT_ID))
+
+        assertTrue(windowStore.directJumpEventIds.isEmpty())
+        assertTrue(backwardTargets.isEmpty())
+        assertEquals(TimelineWindowChangeOrigin.JUMP, store.state.value.windowChangeOrigin)
+        assertEquals(EVENT_ID, store.state.value.jumpTargetEventId)
+        assertFalse(store.state.value.isLoadingWindowOperation)
+
+        store.consumeJumpTarget(EVENT_ID)
+
+        assertEquals(null, store.state.value.jumpTargetEventId)
+    }
+
+    @Test
     fun eventJump_paginatesUntilMaterializedEventIsFound() {
         afterMaterializationResults += listOf(false, true)
         val windowStore = FakeWindowStore(
@@ -197,6 +226,14 @@ class ChatTimelineNavigationTest {
             ),
             results.single().second
         )
+        assertFalse(store.state.value.isLoadingWindowOperation)
+        assertFalse(store.state.value.canLoadNewer)
+        assertTrue(store.state.value.isAtLiveEdge)
+        assertTrue(store.state.value.scrollToLiveEdgeRequested)
+
+        store.consumeScrollToLiveEdgeRequest()
+
+        assertFalse(store.state.value.scrollToLiveEdgeRequested)
     }
 
     @Test

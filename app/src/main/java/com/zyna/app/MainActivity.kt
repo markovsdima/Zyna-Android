@@ -49,6 +49,7 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
 import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.chat.ChatComposerState
+import com.zyna.app.ui.chat.ChatTimelineState
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
@@ -69,13 +70,15 @@ class MainActivity : AppCompatActivity() {
     private data class RootFeatureInput(
         val state: AppUiState,
         val chatComposer: ChatComposerState,
-        val callHistory: CallHistoryState
+        val callHistory: CallHistoryState,
+        val chatTimeline: ChatTimelineState
     )
 
     private data class RootRenderInput(
         val state: AppUiState,
         val chatComposer: ChatComposerState,
         val callHistory: CallHistoryState,
+        val chatTimeline: ChatTimelineState,
         val preferences: ZynaRootPreferences
     )
 
@@ -328,12 +331,14 @@ class MainActivity : AppCompatActivity() {
                     combine(
                         appViewModel.uiState,
                         appViewModel.chatComposerState,
-                        appViewModel.callHistoryState
-                    ) { state, chatComposer, callHistory ->
+                        appViewModel.callHistoryState,
+                        appViewModel.chatTimelineState
+                    ) { state, chatComposer, callHistory, chatTimeline ->
                         RootFeatureInput(
                             state = state,
                             chatComposer = chatComposer,
-                            callHistory = callHistory
+                            callHistory = callHistory,
+                            chatTimeline = chatTimeline
                         )
                     },
                     appContainer.chatBubbleThemeStore.selectedTheme,
@@ -344,6 +349,7 @@ class MainActivity : AppCompatActivity() {
                         state = feature.state,
                         chatComposer = feature.chatComposer,
                         callHistory = feature.callHistory,
+                        chatTimeline = feature.chatTimeline,
                         preferences = ZynaRootPreferences(
                             chatBubbleTheme = chatBubbleTheme,
                             appThemeMode = appThemeMode,
@@ -355,7 +361,8 @@ class MainActivity : AppCompatActivity() {
                     val collectStart = ZynaPerfLog.start()
                     ZynaPerfLog.mark {
                         "activity.uiState.collect route=${state.route.perfName()} " +
-                            "messages=${state.chatMessages.size} loading=${state.isLoadingChat}"
+                            "messages=${input.chatTimeline.messages.size} " +
+                            "loading=${input.chatTimeline.isLoading}"
                     }
                     if (hasRenderedState) {
                         cancelVoiceComposerIfRouteChanged(latestState, state)
@@ -366,6 +373,7 @@ class MainActivity : AppCompatActivity() {
                         state = state,
                         chatComposer = input.chatComposer,
                         callHistory = input.callHistory,
+                        chatTimeline = input.chatTimeline,
                         actions = actions,
                         preferences = input.preferences
                     )
@@ -377,7 +385,8 @@ class MainActivity : AppCompatActivity() {
                         collectStart,
                         "activity.uiState.rendered"
                     ) {
-                        "route=${state.route.perfName()} messages=${state.chatMessages.size}"
+                        "route=${state.route.perfName()} " +
+                            "messages=${input.chatTimeline.messages.size}"
                     }
                 }
             }

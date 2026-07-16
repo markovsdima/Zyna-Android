@@ -34,7 +34,7 @@ The main app has fixed roots:
 - Contacts: `AppRoute.Contacts`
 - Calls: `AppRoute.Calls`
 - Chats: `AppRoute.Rooms`
-- Profile: `AppRoute.Settings`
+- Profile: `AppRoute.Profile`
 
 Each tab owns its own stack. Switching tabs changes `selectedTab` and preserves
 the other tab stacks. Tapping the active tab pops that tab back to its root.

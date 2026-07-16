@@ -18,13 +18,12 @@ import androidx.core.view.updatePadding
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.presence.UserPresenceStatus
-import com.zyna.app.ui.app.UserProfileUiState
 import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
 internal data class UserProfileScreenViewState(
-    val profile: UserProfileUiState,
+    val profile: UserProfileState,
     val roomId: String?,
     val presence: UserPresenceStatus?,
     val actionUserId: String?,

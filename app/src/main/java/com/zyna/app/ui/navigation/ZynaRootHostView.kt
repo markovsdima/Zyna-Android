@@ -22,7 +22,6 @@ import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
-import com.zyna.app.ui.app.UserProfileUiState
 import com.zyna.app.ui.auth.LoginScreen
 import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.CallsScreenView
@@ -50,6 +49,7 @@ import com.zyna.app.ui.profile.ProfileScreenViewState
 import com.zyna.app.ui.profile.UserProfileScreenView
 import com.zyna.app.ui.profile.UserProfileScreenViewActions
 import com.zyna.app.ui.profile.UserProfileScreenViewState
+import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
@@ -96,6 +96,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
     private var latestOwnProfile: OwnProfileState? = null
+    private var latestUserProfile: UserProfileState? = null
     private var latestCallHistory: CallHistoryState? = null
     private var latestChat: ChatFeatureState? = null
     private var latestActions: ZynaAppActions? = null
@@ -217,6 +218,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     fun render(
         state: AppUiState,
         ownProfile: OwnProfileState,
+        userProfile: UserProfileState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
         actions: ZynaAppActions,
@@ -231,6 +233,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
         latestState = state
         latestOwnProfile = ownProfile
+        latestUserProfile = userProfile
         latestCallHistory = callHistory
         latestChat = chat
         latestActions = actions
@@ -548,6 +551,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val ownProfile = latestOwnProfile ?: return
+        val userProfile = latestUserProfile ?: return
         val callHistory = latestCallHistory ?: return
         val chat = latestChat ?: return
         val actions = latestActions ?: return
@@ -559,6 +563,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val entries = entriesFor(
             state,
             ownProfile,
+            userProfile,
             callHistory,
             chat,
             actions,
@@ -659,6 +664,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun entriesFor(
         state: AppUiState,
         ownProfile: OwnProfileState,
+        userProfile: UserProfileState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
         actions: ZynaAppActions,
@@ -672,7 +678,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 is AppRoute.RecoveryKey -> recoveryEntry(state, actions, route)
                 is AppRoute.SessionSecurity -> sessionSecurityEntry(state, actions, route)
                 AppRoute.Contacts -> contactsEntry(state, actions)
-                is AppRoute.UserProfile -> userProfileEntry(state, actions, route)
+                is AppRoute.UserProfile -> userProfileEntry(
+                    state,
+                    userProfile,
+                    actions,
+                    route
+                )
                 AppRoute.Calls -> callsEntry(callHistory, actions)
                 AppRoute.Rooms -> roomsEntry(
                     state = state,
@@ -769,7 +780,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     ),
                     actions = ContactsScreenViewActions(
                         onSearchQueryChanged = actions.onContactsSearchQueryChanged,
-                        onOpenProfile = actions.onOpenUserProfile,
+                        onOpenProfile = { contact ->
+                            actions.onOpenUserProfile(
+                                contact.userId,
+                                contact.displayName,
+                                contact.avatarUrl
+                            )
+                        },
                         onOpenChat = actions.onOpenContactChat,
                         onCall = actions.onCallContact
                     )
@@ -803,6 +820,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun userProfileEntry(
         state: AppUiState,
+        userProfile: UserProfileState,
         actions: ZynaAppActions,
         route: AppRoute.UserProfile
     ): ZynaScreenEntry {
@@ -812,8 +830,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             updateView = { view ->
                 (view as UserProfileScreenView).render(
                     state = UserProfileScreenViewState(
-                        profile = state.userProfile.takeIf { it.userId == route.userId }
-                            ?: UserProfileUiState(userId = route.userId),
+                        profile = userProfile.takeIf { it.userId == route.userId }
+                            ?: UserProfileState(userId = route.userId),
                         roomId = state.roomIdForContact(route.userId),
                         presence = state.presenceByUserId[route.userId],
                         actionUserId = state.contactActionUserId,
@@ -1036,7 +1054,16 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isMarkedUnread = room?.isMarkedUnread == true
                     ),
                     actions = RoomDetailsScreenViewActions(
-                        onBack = { actions.onNavigateBack() }
+                        onBack = { actions.onNavigateBack() },
+                        onOpenDirectUserProfile = {
+                            room?.directUserId?.takeIf { it.isNotBlank() }?.let { userId ->
+                                actions.onOpenUserProfile(
+                                    userId,
+                                    displayName,
+                                    room.avatarUrl
+                                )
+                            }
+                        }
                     )
                 )
             }

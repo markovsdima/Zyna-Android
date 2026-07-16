@@ -27,7 +27,8 @@ internal data class RoomDetailsScreenViewState(
 )
 
 internal data class RoomDetailsScreenViewActions(
-    val onBack: () -> Unit
+    val onBack: () -> Unit,
+    val onOpenDirectUserProfile: () -> Unit
 )
 
 internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
@@ -113,8 +114,10 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         showsAccessory = false
     }
     private val directUserRow = RoomDetailsRowView(context).apply {
-        title = "Direct User"
-        showsAccessory = false
+        title = "User Profile"
+        showsAccessory = true
+        isClickable = true
+        isFocusable = true
     }
     private val unreadRow = RoomDetailsRowView(context).apply {
         title = "Unread"
@@ -274,7 +277,14 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         unreadTag.visibility = if (state.unreadCount > 0 || state.isMarkedUnread) VISIBLE else GONE
         roomIdRow.detail = state.roomId
         directUserRow.detail = state.directUserId.orEmpty()
-        directUserRow.visibility = if (state.directUserId.isNullOrBlank()) GONE else VISIBLE
+        val hasDirectUser = !state.directUserId.isNullOrBlank()
+        directUserRow.visibility = if (hasDirectUser) VISIBLE else GONE
+        directUserRow.isFocusable = hasDirectUser
+        if (hasDirectUser) {
+            directUserRow.setOnClickListener { actions.onOpenDirectUserProfile() }
+        } else {
+            directUserRow.setOnClickListener(null)
+        }
         unreadRow.detail = state.unreadLabel()
         unreadRow.visibility = if (state.unreadCount > 0 || state.isMarkedUnread) VISIBLE else GONE
         contentDescription = "${state.displayName}. ${state.roomId}"

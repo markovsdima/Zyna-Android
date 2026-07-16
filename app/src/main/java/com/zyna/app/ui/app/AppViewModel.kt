@@ -47,7 +47,9 @@ import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.createCallHistoryStore
 import com.zyna.app.ui.profile.OwnProfileState
+import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.profile.createOwnProfileStore
+import com.zyna.app.ui.profile.createUserProfileStore
 import com.zyna.app.util.ZynaPerfLog
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -61,17 +63,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-data class UserProfileUiState(
-    val userId: String = "",
-    val displayName: String? = null,
-    val avatarUrl: String? = null,
-    val isLoading: Boolean = false,
-    val errorMessage: String? = null
-) {
-    val effectiveDisplayName: String
-        get() = displayName?.takeIf { it.isNotBlank() } ?: userId
-}
 
 data class PendingNativeMatrixRtcCallLaunch(
     val requestId: Long,
@@ -92,7 +83,6 @@ data class AppUiState(
     val contactsSearchResults: List<MatrixUserProfile> = emptyList(),
     val isSearchingContacts: Boolean = false,
     val contactsSearchErrorMessage: String? = null,
-    val userProfile: UserProfileUiState = UserProfileUiState(),
     val contactActionUserId: String? = null,
     val contactActionErrorMessage: String? = null,
     val pendingNativeMatrixRtcCallLaunch: PendingNativeMatrixRtcCallLaunch? = null,
@@ -233,6 +223,12 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val ownProfileState: StateFlow<OwnProfileState> = ownProfileStore.state
+    private val userProfileStore = createUserProfileStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val userProfileState: StateFlow<UserProfileState> = userProfileStore.state
     private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
         performRoomRefresh(userId)
     }
@@ -280,8 +276,6 @@ class AppViewModel(
     private var roomListLiveUserId: String? = null
     private var contactsSearchJob: Job? = null
     private var contactsSearchGeneration = 0L
-    private var userProfileLoadJob: Job? = null
-    private var userProfileLoadGeneration = 0L
     private var contactActionJob: Job? = null
     private var contactActionGeneration = 0L
     private var pendingNativeMatrixRtcCallLaunchCounter = 0L
@@ -349,7 +343,8 @@ class AppViewModel(
                     callHistoryStore.deactivate(clearState = shouldClearSessionData)
                     stopRoomListLiveRefresh()
                     ownProfileStore.deactivate()
-                    stopContactJobs(clearState = true)
+                    userProfileStore.clear()
+                    stopContactJobs()
                 }
 
                 when {
@@ -396,11 +391,6 @@ class AppViewModel(
                             null
                         } else {
                             current.contactsSearchErrorMessage
-                        },
-                        userProfile = if (shouldClearSessionData) {
-                            UserProfileUiState()
-                        } else {
-                            current.userProfile
                         },
                         contactActionUserId = if (shouldClearSessionData) {
                             null
@@ -645,31 +635,36 @@ class AppViewModel(
         }
     }
 
-    fun openUserProfile(contact: MatrixContact) {
-        val userId = contact.userId.takeIf { it.isNotBlank() } ?: return
+    fun openUserProfile(
+        userId: String,
+        displayName: String? = null,
+        avatarUrl: String? = null
+    ) {
+        val targetUserId = userId.trim().takeIf { it.isNotEmpty() } ?: return
+        val currentNavState = _uiState.value.navState
+        val nextNavState = currentNavState.openUserProfile(targetUserId)
+        if (nextNavState == currentNavState) {
+            return
+        }
+        userProfileStore.open(
+            userId = targetUserId,
+            seedDisplayName = displayName,
+            seedAvatarUrl = avatarUrl
+        )
         _uiState.update { current ->
+            val latestNavState = current.navState.openUserProfile(targetUserId)
+            if (latestNavState == current.navState) {
+                return@update current
+            }
             current.copy(
-                navState = current.navState.openUserProfile(userId),
+                navState = latestNavState,
                 contactActionErrorMessage = null
             )
         }
-        startUserProfileLoad(
-            userId = userId,
-            seedDisplayName = contact.displayName,
-            seedAvatarUrl = contact.avatarUrl,
-            force = true
-        )
     }
 
     fun refreshUserProfile() {
-        val profile = _uiState.value.userProfile
-        val userId = profile.userId.takeIf { it.isNotBlank() } ?: return
-        startUserProfileLoad(
-            userId = userId,
-            seedDisplayName = profile.displayName,
-            seedAvatarUrl = profile.avatarUrl,
-            force = true
-        )
+        userProfileStore.refresh()
     }
 
     fun openContactChat(contact: MatrixContact) {
@@ -773,6 +768,7 @@ class AppViewModel(
         initialEventId: String? = null
     ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        val isReplacingUserProfile = _uiState.value.route is AppRoute.UserProfile
         val requestStart = ZynaPerfLog.start()
         ZynaPerfLog.mark {
             "openRoom.request roomId=${room.id} name=${room.displayName} " +
@@ -806,6 +802,9 @@ class AppViewModel(
             }
         }
         if (_uiState.value.isRouteForRoom(userId, room.id)) {
+            if (isReplacingUserProfile) {
+                userProfileStore.clear()
+            }
             chatTimelineStore.open(timelineTarget) {
                 initialEventId?.let(::jumpToChatEvent)
             }
@@ -868,6 +867,11 @@ class AppViewModel(
                 }
                 cancelOwnProfileEdit()
                 popActiveStack()
+            }
+            is AppRoute.UserProfile -> {
+                val didNavigate = popActiveStack()
+                userProfileStore.clear()
+                didNavigate
             }
             else -> {
                 popActiveStack()
@@ -934,82 +938,6 @@ class AppViewModel(
     fun saveOwnProfile() {
         _uiState.value.matrixState.userIdOrNull() ?: return
         ownProfileStore.save()
-    }
-
-    private fun startUserProfileLoad(
-        userId: String,
-        seedDisplayName: String?,
-        seedAvatarUrl: String?,
-        force: Boolean = false
-    ) {
-        if (!force &&
-            _uiState.value.userProfile.userId == userId &&
-            _uiState.value.userProfile.errorMessage == null
-        ) {
-            return
-        }
-
-        userProfileLoadJob?.cancel()
-        userProfileLoadGeneration += 1
-        val generation = userProfileLoadGeneration
-        _uiState.update { current ->
-            current.copy(
-                userProfile = UserProfileUiState(
-                    userId = userId,
-                    displayName = seedDisplayName?.takeIf { it.isNotBlank() },
-                    avatarUrl = seedAvatarUrl?.takeIf { it.isNotBlank() },
-                    isLoading = true,
-                    errorMessage = null
-                )
-            )
-        }
-
-        val loadJob = viewModelScope.launch {
-            try {
-                val profile = matrixClientService.loadUserProfile(userId)
-                _uiState.update { current ->
-                    if (userProfileLoadGeneration != generation ||
-                        current.userProfile.userId != userId
-                    ) {
-                        current
-                    } else {
-                        current.copy(
-                            userProfile = UserProfileUiState(
-                                userId = profile.userId,
-                                displayName = profile.displayName,
-                                avatarUrl = profile.avatarUrl,
-                                isLoading = false,
-                                errorMessage = null
-                            )
-                        )
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to load user profile", error)
-                _uiState.update { current ->
-                    if (userProfileLoadGeneration != generation ||
-                        current.userProfile.userId != userId
-                    ) {
-                        current
-                    } else {
-                        current.copy(
-                            userProfile = current.userProfile.copy(
-                                isLoading = false,
-                                errorMessage = error.message ?: error.javaClass.simpleName
-                            )
-                        )
-                    }
-                }
-            }
-        }
-        userProfileLoadJob = loadJob
-        loadJob.invokeOnCompletion {
-            if (userProfileLoadJob === loadJob) {
-                userProfileLoadJob = null
-            }
-        }
     }
 
     private fun resolveContactRoom(contact: MatrixContact, startCall: Boolean) {
@@ -1153,7 +1081,7 @@ class AppViewModel(
     }
 
     private fun contactFromUserProfile(): MatrixContact? {
-        val profile = _uiState.value.userProfile
+        val profile = userProfileStore.state.value
         val userId = profile.userId.takeIf { it.isNotBlank() } ?: return null
         return MatrixContact(
             userId = userId,
@@ -1163,29 +1091,23 @@ class AppViewModel(
         )
     }
 
-    private fun stopContactJobs(clearState: Boolean) {
+    private fun stopContactJobs() {
         contactsSearchJob?.cancel()
         contactsSearchJob = null
         contactsSearchGeneration += 1
-        userProfileLoadJob?.cancel()
-        userProfileLoadJob = null
-        userProfileLoadGeneration += 1
         contactActionJob?.cancel()
         contactActionJob = null
         contactActionGeneration += 1
-        if (clearState) {
-            _uiState.update {
-                it.copy(
-                    contactsSearchQuery = "",
-                    contactsSearchResults = emptyList(),
-                    isSearchingContacts = false,
-                    contactsSearchErrorMessage = null,
-                    userProfile = UserProfileUiState(),
-                    contactActionUserId = null,
-                    contactActionErrorMessage = null,
-                    pendingNativeMatrixRtcCallLaunch = null
-                )
-            }
+        _uiState.update {
+            it.copy(
+                contactsSearchQuery = "",
+                contactsSearchResults = emptyList(),
+                isSearchingContacts = false,
+                contactsSearchErrorMessage = null,
+                contactActionUserId = null,
+                contactActionErrorMessage = null,
+                pendingNativeMatrixRtcCallLaunch = null
+            )
         }
     }
 

@@ -55,6 +55,7 @@ import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
 import com.zyna.app.ui.profile.OwnProfileState
+import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -70,6 +71,7 @@ class MainActivity : AppCompatActivity() {
     private data class RootFeatureInput(
         val state: AppUiState,
         val ownProfile: OwnProfileState,
+        val userProfile: UserProfileState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState
     )
@@ -77,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private data class RootRenderInput(
         val state: AppUiState,
         val ownProfile: OwnProfileState,
+        val userProfile: UserProfileState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState,
         val preferences: ZynaRootPreferences
@@ -331,6 +334,7 @@ class MainActivity : AppCompatActivity() {
                     combine(
                         appViewModel.uiState,
                         appViewModel.ownProfileState,
+                        appViewModel.userProfileState,
                         appViewModel.callHistoryState,
                         combine(
                             appViewModel.chatComposerState,
@@ -343,10 +347,11 @@ class MainActivity : AppCompatActivity() {
                                 callInfo = callInfo
                             )
                         }
-                    ) { state, ownProfile, callHistory, chat ->
+                    ) { state, ownProfile, userProfile, callHistory, chat ->
                         RootFeatureInput(
                             state = state,
                             ownProfile = ownProfile,
+                            userProfile = userProfile,
                             callHistory = callHistory,
                             chat = chat
                         )
@@ -358,6 +363,7 @@ class MainActivity : AppCompatActivity() {
                     RootRenderInput(
                         state = feature.state,
                         ownProfile = feature.ownProfile,
+                        userProfile = feature.userProfile,
                         callHistory = feature.callHistory,
                         chat = feature.chat,
                         preferences = ZynaRootPreferences(
@@ -382,6 +388,7 @@ class MainActivity : AppCompatActivity() {
                     rootHost.render(
                         state = state,
                         ownProfile = input.ownProfile,
+                        userProfile = input.userProfile,
                         callHistory = input.callHistory,
                         chat = input.chat,
                         actions = actions,

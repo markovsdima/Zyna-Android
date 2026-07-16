@@ -25,7 +25,7 @@ data class ZynaAppActions(
     val onNavigateBack: () -> Boolean,
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onContactsSearchQueryChanged: (String) -> Unit,
-    val onOpenUserProfile: (MatrixContact) -> Unit,
+    val onOpenUserProfile: (userId: String, displayName: String?, avatarUrl: String?) -> Unit,
     val onOpenContactChat: (MatrixContact) -> Unit,
     val onCallContact: (MatrixContact) -> Unit,
     val onOpenUserProfileChat: () -> Unit,

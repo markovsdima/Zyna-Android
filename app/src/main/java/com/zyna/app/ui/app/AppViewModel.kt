@@ -46,7 +46,12 @@ import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.createCallHistoryStore
 import com.zyna.app.ui.contacts.ContactsState
+import com.zyna.app.ui.contacts.DirectRoomActionIntent
+import com.zyna.app.ui.contacts.DirectRoomActionRequest
+import com.zyna.app.ui.contacts.DirectRoomActionState
+import com.zyna.app.ui.contacts.ResolvedDirectRoomAction
 import com.zyna.app.ui.contacts.createContactsStore
+import com.zyna.app.ui.contacts.createDirectRoomActionCoordinator
 import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.profile.createOwnProfileStore
@@ -78,8 +83,6 @@ data class AppUiState(
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
     val rooms: List<MatrixRoomSummary> = emptyList(),
     val presenceByUserId: Map<String, UserPresenceStatus> = emptyMap(),
-    val contactActionUserId: String? = null,
-    val contactActionErrorMessage: String? = null,
     val pendingNativeMatrixRtcCallLaunch: PendingNativeMatrixRtcCallLaunch? = null,
     val isRefreshingRooms: Boolean = false,
     val isLoggingOut: Boolean = false,
@@ -147,6 +150,16 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val contactsState: StateFlow<ContactsState> = contactsStore.state
+    private val directRoomActionCoordinator = createDirectRoomActionCoordinator(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        canDeliver = ::canDeliverDirectRoomAction,
+        onResolved = ::handleResolvedDirectRoomAction,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val directRoomActionState: StateFlow<DirectRoomActionState> =
+        directRoomActionCoordinator.state
     private val callHistoryStore = createCallHistoryStore(
         scope = viewModelScope,
         localCacheRepository = localCacheRepository,
@@ -215,8 +228,6 @@ class AppViewModel(
     private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
     private var roomListLiveUserId: String? = null
-    private var contactActionJob: Job? = null
-    private var contactActionGeneration = 0L
     private var pendingNativeMatrixRtcCallLaunchCounter = 0L
     private val externalRouteCoordinator = ExternalRouteCoordinator()
 
@@ -283,7 +294,7 @@ class AppViewModel(
                     stopRoomListLiveRefresh()
                     ownProfileStore.deactivate()
                     userProfileStore.clear()
-                    stopContactAction()
+                    directRoomActionCoordinator.cancel()
                 }
 
                 when {
@@ -310,16 +321,6 @@ class AppViewModel(
                             emptyMap()
                         } else {
                             current.presenceByUserId
-                        },
-                        contactActionUserId = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.contactActionUserId
-                        },
-                        contactActionErrorMessage = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.contactActionErrorMessage
                         },
                         pendingNativeMatrixRtcCallLaunch = if (shouldClearSessionData || shouldClearChat) {
                             null
@@ -368,6 +369,8 @@ class AppViewModel(
                 val matrixState = _uiState.value.matrixState
                 val userId = matrixState.userIdOrNull()
                 val previousSecurity = _uiState.value.sessionSecurity
+                val previousContactActionOwner =
+                    _uiState.value.route.directRoomActionOwnerKey()
                 val becameGateComplete =
                     !previousSecurity.gateComplete && sessionSecurity.gateComplete
                 val receivedNewVerificationRequest =
@@ -397,6 +400,12 @@ class AppViewModel(
                             current.navState
                         }
                     )
+                }
+                if (
+                    _uiState.value.route.directRoomActionOwnerKey() !=
+                    previousContactActionOwner
+                ) {
+                    directRoomActionCoordinator.cancel()
                 }
 
                 if (userId != null && sessionSecurity.userId == userId) {
@@ -507,6 +516,7 @@ class AppViewModel(
         if (nextNavState == currentNavState) {
             return
         }
+        directRoomActionCoordinator.cancel()
         userProfileStore.open(
             userId = targetUserId,
             seedDisplayName = displayName,
@@ -518,8 +528,7 @@ class AppViewModel(
                 return@update current
             }
             current.copy(
-                navState = latestNavState,
-                contactActionErrorMessage = null
+                navState = latestNavState
             )
         }
     }
@@ -529,11 +538,11 @@ class AppViewModel(
     }
 
     fun openContactChat(contact: MatrixContact) {
-        resolveContactRoom(contact, startCall = false)
+        submitDirectRoomAction(contact, DirectRoomActionIntent.OPEN_CHAT)
     }
 
     fun callContact(contact: MatrixContact) {
-        resolveContactRoom(contact, startCall = true)
+        submitDirectRoomAction(contact, DirectRoomActionIntent.START_CALL)
     }
 
     fun openUserProfileChat() {
@@ -575,6 +584,7 @@ class AppViewModel(
 
     fun openSessionSecurity() {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        directRoomActionCoordinator.cancel()
         matrixClientService.handleSessionSecurityAction(MatrixSessionSecurityAction.Manage)
         _uiState.update { current ->
             current.copy(navState = current.navState.openSessionSecurity(userId))
@@ -629,6 +639,7 @@ class AppViewModel(
         initialEventId: String? = null
     ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
+        directRoomActionCoordinator.cancel()
         val isReplacingUserProfile = _uiState.value.route is AppRoute.UserProfile
         val requestStart = ZynaPerfLog.start()
         ZynaPerfLog.mark {
@@ -691,6 +702,7 @@ class AppViewModel(
 
     fun selectTab(tab: AppTab) {
         val state = _uiState.value
+        val previousContactActionOwner = state.route.directRoomActionOwnerKey()
         val isClosingEditProfile = state.route == AppRoute.EditProfile
         if (isClosingEditProfile && ownProfileStore.state.value.isSaving) {
             return
@@ -709,11 +721,15 @@ class AppViewModel(
         if (tab == AppTab.PROFILE) {
             _uiState.value.matrixState.userIdOrNull()?.let(ownProfileStore::activate)
         }
+        if (_uiState.value.route.directRoomActionOwnerKey() != previousContactActionOwner) {
+            directRoomActionCoordinator.cancel()
+        }
     }
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
-        return when (route) {
+        val previousContactActionOwner = route.directRoomActionOwnerKey()
+        val didNavigate = when (route) {
             is AppRoute.Chat -> {
                 closeChat()
                 true
@@ -738,6 +754,10 @@ class AppViewModel(
                 popActiveStack()
             }
         }
+        if (_uiState.value.route.directRoomActionOwnerKey() != previousContactActionOwner) {
+            directRoomActionCoordinator.cancel()
+        }
+        return didNavigate
     }
 
     fun openRoomDetails() {
@@ -801,76 +821,49 @@ class AppViewModel(
         ownProfileStore.save()
     }
 
-    private fun resolveContactRoom(contact: MatrixContact, startCall: Boolean) {
-        val userId = contact.userId.takeIf { it.isNotBlank() } ?: return
-        val activeUserId = _uiState.value.matrixState.userIdOrNull() ?: return
-        if (contactActionJob?.isActive == true && _uiState.value.contactActionUserId == userId) {
+    private fun submitDirectRoomAction(
+        contact: MatrixContact,
+        intent: DirectRoomActionIntent
+    ) {
+        val state = _uiState.value
+        val sessionUserId = state.matrixState.userIdOrNull() ?: return
+        val ownerKey = state.route.directRoomActionOwnerKey() ?: return
+        directRoomActionCoordinator.submit(
+            sessionUserId = sessionUserId,
+            ownerKey = ownerKey,
+            contact = contact,
+            rooms = state.rooms,
+            intent = intent
+        )
+    }
+
+    private fun canDeliverDirectRoomAction(request: DirectRoomActionRequest): Boolean {
+        val state = _uiState.value
+        return state.matrixState.userIdOrNull() == request.sessionUserId &&
+            state.route.directRoomActionOwnerKey() == request.ownerKey
+    }
+
+    private fun handleResolvedDirectRoomAction(result: ResolvedDirectRoomAction) {
+        if (!canDeliverDirectRoomAction(result.request)) {
             return
         }
-
-        contactActionJob?.cancel()
-        contactActionGeneration += 1
-        val generation = contactActionGeneration
+        openRoom(result.room)
+        if (result.request.intent != DirectRoomActionIntent.START_CALL) {
+            return
+        }
         _uiState.update { current ->
-            current.copy(
-                contactActionUserId = userId,
-                contactActionErrorMessage = null
-            )
-        }
-
-        val actionJob = viewModelScope.launch {
-            try {
-                val room = resolvedContactRoom(contact)
-                if (contactActionGeneration != generation) {
-                    return@launch
-                }
-
-                cacheResolvedDirectRoom(activeUserId, room)
-                if (contactActionGeneration != generation) {
-                    return@launch
-                }
-
-                openRoom(room)
-
-                _uiState.update { current ->
-                    if (contactActionGeneration != generation) {
-                        current
-                    } else {
-                        current.copy(
-                            contactActionUserId = null,
-                            contactActionErrorMessage = null,
-                            pendingNativeMatrixRtcCallLaunch = if (startCall) {
-                                PendingNativeMatrixRtcCallLaunch(
-                                    requestId = nextPendingNativeMatrixRtcCallLaunchId(),
-                                    roomId = room.id,
-                                    roomName = room.displayName
-                                )
-                            } else {
-                                current.pendingNativeMatrixRtcCallLaunch
-                            }
-                        )
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to resolve contact room", error)
-                _uiState.update { current ->
-                    if (contactActionGeneration != generation) {
-                        current
-                    } else {
-                        current.copy(
-                            contactActionUserId = null,
-                            contactActionErrorMessage = error.message ?: error.javaClass.simpleName
-                        )
-                    }
-                }
-            }
-        }
-        contactActionJob = actionJob
-        actionJob.invokeOnCompletion {
-            if (contactActionJob === actionJob) {
-                contactActionJob = null
+            if (current.matrixState.userIdOrNull() != result.request.sessionUserId ||
+                current.activeChatRoute?.roomId != result.room.id
+            ) {
+                current
+            } else {
+                current.copy(
+                    pendingNativeMatrixRtcCallLaunch = PendingNativeMatrixRtcCallLaunch(
+                        requestId = nextPendingNativeMatrixRtcCallLaunchId(),
+                        roomId = result.room.id,
+                        roomName = result.room.displayName
+                    )
+                )
             }
         }
     }
@@ -914,33 +907,6 @@ class AppViewModel(
             )
     }
 
-    private suspend fun resolvedContactRoom(contact: MatrixContact): MatrixRoomSummary {
-        val existingRoom = contact.roomId
-            ?.let { roomId -> _uiState.value.rooms.firstOrNull { it.id == roomId } }
-        if (existingRoom != null) {
-            return existingRoom
-        }
-
-        if (!contact.roomId.isNullOrBlank()) {
-            return MatrixRoomSummary(
-                id = contact.roomId,
-                displayName = contact.displayName,
-                avatarUrl = contact.avatarUrl,
-                directUserId = contact.userId
-            )
-        }
-
-        return matrixClientService.resolveDirectRoom(
-            userId = contact.userId,
-            fallbackDisplayName = contact.displayName,
-            fallbackAvatarUrl = contact.avatarUrl
-        )
-    }
-
-    private suspend fun cacheResolvedDirectRoom(userId: String, room: MatrixRoomSummary) {
-        localCacheRepository.cacheRoomSummary(userId, room)
-    }
-
     private fun contactFromUserProfile(): MatrixContact? {
         val profile = userProfileStore.state.value
         val userId = profile.userId.takeIf { it.isNotBlank() } ?: return null
@@ -950,19 +916,6 @@ class AppViewModel(
             avatarUrl = profile.avatarUrl,
             roomId = _uiState.value.roomIdForContact(userId)
         )
-    }
-
-    private fun stopContactAction() {
-        contactActionJob?.cancel()
-        contactActionJob = null
-        contactActionGeneration += 1
-        _uiState.update {
-            it.copy(
-                contactActionUserId = null,
-                contactActionErrorMessage = null,
-                pendingNativeMatrixRtcCallLaunch = null
-            )
-        }
     }
 
     private fun nextPendingNativeMatrixRtcCallLaunchId(): Long {
@@ -1588,6 +1541,14 @@ class AppViewModel(
                 displayName = room.displayName
             )
         )
+    }
+
+    private fun AppRoute.directRoomActionOwnerKey(): String? {
+        return when (this) {
+            AppRoute.Contacts -> "contacts"
+            is AppRoute.UserProfile -> "user-profile:$userId"
+            else -> null
+        }
     }
 
     private fun AppRoute.perfName(): String {

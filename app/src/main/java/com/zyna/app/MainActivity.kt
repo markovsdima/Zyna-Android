@@ -49,7 +49,7 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
 import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.chat.ChatFeatureState
-import com.zyna.app.ui.contacts.ContactsState
+import com.zyna.app.ui.contacts.ContactsFeatureState
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
@@ -70,7 +70,7 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
     private data class RootFeatureInput(
         val state: AppUiState,
-        val contacts: ContactsState,
+        val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState
@@ -78,7 +78,7 @@ class MainActivity : AppCompatActivity() {
 
     private data class RootRenderInput(
         val state: AppUiState,
-        val contacts: ContactsState,
+        val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState,
@@ -333,7 +333,15 @@ class MainActivity : AppCompatActivity() {
                 combine(
                     combine(
                         appViewModel.uiState,
-                        appViewModel.contactsState,
+                        combine(
+                            appViewModel.contactsState,
+                            appViewModel.directRoomActionState
+                        ) { directory, directRoomAction ->
+                            ContactsFeatureState(
+                                directory = directory,
+                                directRoomAction = directRoomAction
+                            )
+                        },
                         combine(
                             appViewModel.ownProfileState,
                             appViewModel.userProfileState

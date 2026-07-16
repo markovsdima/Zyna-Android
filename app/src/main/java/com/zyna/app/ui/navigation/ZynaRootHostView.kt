@@ -34,7 +34,7 @@ import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
 import com.zyna.app.ui.chat.ChatTimelineState
-import com.zyna.app.ui.contacts.ContactsState
+import com.zyna.app.ui.contacts.ContactsFeatureState
 import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
@@ -97,7 +97,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var bottomInset = 0
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
-    private var latestContacts: ContactsState? = null
+    private var latestContacts: ContactsFeatureState? = null
     private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
     private var latestChat: ChatFeatureState? = null
@@ -219,7 +219,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     fun render(
         state: AppUiState,
-        contacts: ContactsState,
+        contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
@@ -665,7 +665,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun entriesFor(
         state: AppUiState,
-        contacts: ContactsState,
+        contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
@@ -683,6 +683,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 is AppRoute.UserProfile -> userProfileEntry(
                     state,
                     profile.user,
+                    contacts,
                     actions,
                     route
                 )
@@ -763,7 +764,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun contactsEntry(
         state: AppUiState,
-        contacts: ContactsState,
+        contacts: ContactsFeatureState,
         actions: ZynaAppActions
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -772,12 +773,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             updateView = { view ->
                 (view as ContactsScreenView).render(
                     state = ContactsScreenViewState(
-                        contacts = contacts.contactsFor(state.rooms),
-                        searchQuery = contacts.searchQuery,
-                        isSearching = contacts.isSearching,
-                        errorMessage = state.contactActionErrorMessage
-                            ?: contacts.searchErrorMessage,
-                        actionUserId = state.contactActionUserId,
+                        contacts = contacts.directory.contactsFor(state.rooms),
+                        searchQuery = contacts.directory.searchQuery,
+                        isSearching = contacts.directory.isSearching,
+                        errorMessage = contacts.directRoomAction.errorMessage
+                            ?: contacts.directory.searchErrorMessage,
+                        actionUserId = contacts.directRoomAction.activeUserId,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
@@ -824,6 +825,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun userProfileEntry(
         state: AppUiState,
         userProfile: UserProfileState,
+        contacts: ContactsFeatureState,
         actions: ZynaAppActions,
         route: AppRoute.UserProfile
     ): ZynaScreenEntry {
@@ -837,8 +839,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             ?: UserProfileState(userId = route.userId),
                         roomId = state.roomIdForContact(route.userId),
                         presence = state.presenceByUserId[route.userId],
-                        actionUserId = state.contactActionUserId,
-                        actionErrorMessage = state.contactActionErrorMessage,
+                        actionUserId = contacts.directRoomAction.activeUserId,
+                        actionErrorMessage = contacts.directRoomAction.errorMessage,
                         matrixMediaLoader = actions.matrixMediaLoader
                     ),
                     actions = UserProfileScreenViewActions(

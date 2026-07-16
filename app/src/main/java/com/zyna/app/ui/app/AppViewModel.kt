@@ -56,10 +56,11 @@ import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.profile.createOwnProfileStore
 import com.zyna.app.ui.profile.createUserProfileStore
+import com.zyna.app.ui.rooms.RoomListState
+import com.zyna.app.ui.rooms.createRoomListStore
 import com.zyna.app.util.ZynaPerfLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -81,10 +82,8 @@ data class LogoutConfirmationState(
 data class AppUiState(
     val navState: AppNavState = AppNavState(),
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
-    val rooms: List<MatrixRoomSummary> = emptyList(),
     val presenceByUserId: Map<String, UserPresenceStatus> = emptyMap(),
     val pendingNativeMatrixRtcCallLaunch: PendingNativeMatrixRtcCallLaunch? = null,
-    val isRefreshingRooms: Boolean = false,
     val isLoggingOut: Boolean = false,
     val logoutErrorMessage: String? = null,
     val logoutConfirmation: LogoutConfirmationState? = null,
@@ -102,24 +101,12 @@ data class AppUiState(
     val activeChatRoute: AppRoute.Chat?
         get() = navState.activeChatRoute
 
-    val activeChatDirectUserId: String?
-        get() = activeChatRoute?.let { route ->
-            rooms.firstOrNull { it.id == route.roomId }?.directUserId
-        }
-
-    val activeChatPresence: UserPresenceStatus?
-        get() = activeChatDirectUserId?.let { userId -> presenceByUserId[userId] }
-
     val isBusy: Boolean
         get() = matrixState is MatrixClientState.LoggingIn ||
             matrixState is MatrixClientState.RestoringSession
 
     val errorMessage: String?
         get() = (matrixState as? MatrixClientState.Error)?.message
-
-    fun roomIdForContact(userId: String): String? {
-        return rooms.firstOrNull { it.directUserId == userId }?.id
-    }
 }
 
 class AppViewModel(
@@ -183,9 +170,13 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val userProfileState: StateFlow<UserProfileState> = userProfileStore.state
-    private val roomRefreshCoordinator = CoalescingRoomRefreshCoordinator(viewModelScope) { userId ->
-        performRoomRefresh(userId)
-    }
+    private val roomListStore = createRoomListStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomListState: StateFlow<RoomListState> = roomListStore.state
     private val chatTimelineStore = createChatTimelineStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -223,11 +214,6 @@ class AppViewModel(
         onLog = ::logChatCall
     )
     val chatCallInfoState: StateFlow<ChatCallInfoState> = chatCallInfoCoordinator.state
-    private var visibleRoomRefreshRequestCount = 0
-    private var roomCacheJob: Job? = null
-    private var roomListLiveJob: Job? = null
-    private var roomCacheUserId: String? = null
-    private var roomListLiveUserId: String? = null
     private var pendingNativeMatrixRtcCallLaunchCounter = 0L
     private val externalRouteCoordinator = ExternalRouteCoordinator()
 
@@ -251,7 +237,11 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
-            _uiState.collect(::consumePendingExternalRouteIfReady)
+            combine(_uiState, roomListStore.state) { state, roomList ->
+                state to roomList
+            }.collect { (state, roomList) ->
+                consumePendingExternalRouteIfReady(state, roomList)
+            }
         }
 
         viewModelScope.launch {
@@ -276,10 +266,7 @@ class AppViewModel(
                     didChangeUser ||
                     matrixState is MatrixClientState.Error
                 ) {
-                    roomRefreshCoordinator.deactivateSession()
-                }
-                if (nextUserId != null && matrixState !is MatrixClientState.Error) {
-                    roomRefreshCoordinator.activateSession(nextUserId)
+                    roomListStore.deactivate()
                 }
                 if (
                     nextUserId == null ||
@@ -289,9 +276,7 @@ class AppViewModel(
                     stopChatTimeline()
                 }
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
-                    stopRoomCache()
                     callHistoryStore.deactivate(clearState = shouldClearSessionData)
-                    stopRoomListLiveRefresh()
                     ownProfileStore.deactivate()
                     userProfileStore.clear()
                     directRoomActionCoordinator.cancel()
@@ -312,11 +297,6 @@ class AppViewModel(
                     current.copy(
                         matrixState = matrixState,
                         navState = nextNavState,
-                        rooms = if (shouldClearSessionData) {
-                            emptyList()
-                        } else {
-                            current.rooms
-                        },
                         presenceByUserId = if (shouldClearSessionData) {
                             emptyMap()
                         } else {
@@ -346,7 +326,7 @@ class AppViewModel(
                 }
 
                 if (nextUserId != null) {
-                    startRoomCache(nextUserId)
+                    roomListStore.activate(nextUserId)
                     callHistoryStore.activate(nextUserId)
                     ownProfileStore.activate(nextUserId)
                 }
@@ -357,8 +337,7 @@ class AppViewModel(
                         _uiState.value.sessionSecurity.userId == userId &&
                         _uiState.value.sessionSecurity.gateComplete
                     ) {
-                        startRoomListLiveRefresh(userId)
-                        launchRoomRefresh(showRefreshing = true)
+                        roomListStore.enableReactiveSynchronization(userId)
                     }
                 }
             }
@@ -414,8 +393,7 @@ class AppViewModel(
                         allowed = sessionSecurity.gateComplete
                     )
                     if (becameGateComplete && matrixState is MatrixClientState.Syncing) {
-                        startRoomListLiveRefresh(userId)
-                        launchRoomRefresh(showRefreshing = true)
+                        roomListStore.enableReactiveSynchronization(userId)
                     }
                 }
             }
@@ -454,51 +432,6 @@ class AppViewModel(
 
     fun setAppForeground(isForeground: Boolean) {
         presenceRepository.setForeground(isForeground)
-    }
-
-    private fun launchRoomRefresh(showRefreshing: Boolean) {
-        viewModelScope.launch {
-            awaitRoomRefresh(showRefreshing = showRefreshing)
-        }
-    }
-
-    private suspend fun awaitRoomRefresh(showRefreshing: Boolean) {
-        if (showRefreshing) {
-            beginVisibleRoomRefresh()
-        }
-        try {
-            roomRefreshCoordinator.refresh()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            Log.w(TAG, "Failed to refresh rooms", error)
-        } finally {
-            if (showRefreshing) {
-                endVisibleRoomRefresh()
-            }
-        }
-    }
-
-    private suspend fun performRoomRefresh(userId: String) {
-        val rooms = matrixClientService.roomsSnapshot()
-        if (_uiState.value.matrixState.userIdOrNull() != userId) {
-            return
-        }
-        localCacheRepository.cacheRoomsSnapshot(userId, rooms)
-    }
-
-    private fun beginVisibleRoomRefresh() {
-        visibleRoomRefreshRequestCount += 1
-        if (visibleRoomRefreshRequestCount == 1) {
-            _uiState.update { it.copy(isRefreshingRooms = true) }
-        }
-    }
-
-    private fun endVisibleRoomRefresh() {
-        visibleRoomRefreshRequestCount = (visibleRoomRefreshRequestCount - 1).coerceAtLeast(0)
-        if (visibleRoomRefreshRequestCount == 0) {
-            _uiState.update { it.copy(isRefreshingRooms = false) }
-        }
     }
 
     fun setContactsSearchQuery(query: String) {
@@ -597,11 +530,17 @@ class AppViewModel(
 
     fun handleExternalRoute(command: ExternalRouteCommand) {
         if (externalRouteCoordinator.accept(command)) {
-            consumePendingExternalRouteIfReady(_uiState.value)
+            consumePendingExternalRouteIfReady(
+                state = _uiState.value,
+                roomList = roomListStore.state.value
+            )
         }
     }
 
-    private fun consumePendingExternalRouteIfReady(state: AppUiState) {
+    private fun consumePendingExternalRouteIfReady(
+        state: AppUiState,
+        roomList: RoomListState
+    ) {
         if (!externalRouteCoordinator.hasPendingCommand()) {
             return
         }
@@ -612,7 +551,7 @@ class AppViewModel(
             state.sessionSecurity.gateComplete
         val command = externalRouteCoordinator.takeIfReady(
             canOpenRooms = canOpenRooms,
-            availableRoomIds = state.rooms.asSequence().map { it.id }.toSet()
+            availableRoomIds = roomList.rooms.asSequence().map { it.id }.toSet()
         ) ?: return
 
         // External navigation never acknowledges messages. Read receipts remain
@@ -623,7 +562,7 @@ class AppViewModel(
                     route.eventId?.let(::jumpToChatEvent)
                     return
                 }
-                val room = state.rooms.firstOrNull { it.id == route.roomId } ?: return
+                val room = roomList.roomForId(route.roomId) ?: return
                 openRoom(
                     room = room,
                     forwardTarget = null,
@@ -832,7 +771,7 @@ class AppViewModel(
             sessionUserId = sessionUserId,
             ownerKey = ownerKey,
             contact = contact,
-            rooms = state.rooms,
+            rooms = roomListStore.state.value.rooms,
             intent = intent
         )
     }
@@ -899,7 +838,7 @@ class AppViewModel(
     }
 
     private fun callHistoryRoomSummary(item: MatrixRtcCallHistoryItem): MatrixRoomSummary {
-        return _uiState.value.rooms.firstOrNull { it.id == item.roomId }
+        return roomListStore.state.value.roomForId(item.roomId)
             ?: MatrixRoomSummary(
                 id = item.roomId,
                 displayName = item.title,
@@ -914,7 +853,7 @@ class AppViewModel(
             userId = userId,
             displayName = profile.effectiveDisplayName,
             avatarUrl = profile.avatarUrl,
-            roomId = _uiState.value.roomIdForContact(userId)
+            roomId = roomListStore.state.value.roomIdForDirectUser(userId)
         )
     }
 
@@ -1302,10 +1241,8 @@ class AppViewModel(
 
     private suspend fun cleanupAfterLogout() {
         runLogoutCleanup("stop chat timeline") { stopChatTimeline() }
-        runLogoutCleanup("stop room cache") { stopRoomCache() }
-        runLogoutCleanup("stop room refresh") { stopRoomListLiveRefresh() }
-        runLogoutCleanup("deactivate room refresh") {
-            roomRefreshCoordinator.deactivateSession()
+        runLogoutCleanup("deactivate room list") {
+            roomListStore.deactivate()
         }
         runLogoutCleanup("clear local cache") { localCacheRepository.clearAll() }
         runLogoutCleanup("clear media cache") {
@@ -1407,61 +1344,6 @@ class AppViewModel(
         chatReadReceiptCoordinator.reset()
     }
 
-    private fun startRoomCache(userId: String) {
-        if (roomCacheUserId == userId && roomCacheJob?.isActive == true) {
-            return
-        }
-
-        roomCacheJob?.cancel()
-        roomCacheUserId = userId
-        roomCacheJob = viewModelScope.launch {
-            localCacheRepository.observeRooms(userId).collect { rooms ->
-                _uiState.update {
-                    if (it.matrixState.userIdOrNull() == userId) {
-                        it.copy(rooms = rooms)
-                    } else {
-                        it
-                    }
-                }
-            }
-        }
-    }
-
-    private fun stopRoomCache() {
-        roomCacheJob?.cancel()
-        roomCacheJob = null
-        roomCacheUserId = null
-    }
-
-    private fun startRoomListLiveRefresh(userId: String) {
-        if (roomListLiveUserId == userId && roomListLiveJob?.isActive == true) {
-            return
-        }
-
-        roomListLiveJob?.cancel()
-        roomListLiveUserId = userId
-        roomListLiveJob = viewModelScope.launch {
-            try {
-                matrixClientService.roomListChangeSignals().collect {
-                    val security = _uiState.value.sessionSecurity
-                    if (security.userId == userId && security.gateComplete) {
-                        awaitRoomRefresh(showRefreshing = false)
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to observe room list state", error)
-            }
-        }
-    }
-
-    private fun stopRoomListLiveRefresh() {
-        roomListLiveJob?.cancel()
-        roomListLiveJob = null
-        roomListLiveUserId = null
-    }
-
     private suspend fun observePresenceRegistrationInputs() {
         var lastRooms: List<MatrixRoomSummary>? = null
         var lastRoomUserIds: Set<String> = emptySet()
@@ -1470,11 +1352,13 @@ class AppViewModel(
         var lastProfileUserId: String? = null
         var lastProfileUserIds: Set<String> = emptySet()
 
-        _uiState.collect { state ->
-            val roomsChanged = lastRooms !== state.rooms
+        combine(_uiState, roomListStore.state) { state, roomList ->
+            state to roomList.rooms
+        }.collect { (state, rooms) ->
+            val roomsChanged = lastRooms !== rooms
             if (roomsChanged) {
-                lastRooms = state.rooms
-                val nextRoomUserIds = state.rooms.directPresenceUserIds()
+                lastRooms = rooms
+                val nextRoomUserIds = rooms.directPresenceUserIds()
                 if (nextRoomUserIds != lastRoomUserIds) {
                     lastRoomUserIds = nextRoomUserIds
                     presenceRepository.register(PRESENCE_TAG_ROOMS, nextRoomUserIds)
@@ -1485,7 +1369,7 @@ class AppViewModel(
             if (roomsChanged || activeChatRoomId != lastChatRoomId) {
                 lastChatRoomId = activeChatRoomId
                 val nextChatUserIds = activeChatRoomId
-                    ?.let { roomId -> state.rooms.directPresenceUserIdForRoom(roomId) }
+                    ?.let { roomId -> rooms.directPresenceUserIdForRoom(roomId) }
                     ?.let(::setOf)
                     ?: emptySet()
                 if (nextChatUserIds != lastChatUserIds) {

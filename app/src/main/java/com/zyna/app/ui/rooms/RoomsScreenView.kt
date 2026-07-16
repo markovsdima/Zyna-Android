@@ -46,7 +46,7 @@ import kotlin.math.roundToInt
 
 data class RoomsScreenViewState(
     val rooms: List<MatrixRoomSummary>,
-    val isRefreshing: Boolean,
+    val isSynchronizing: Boolean,
     val title: String,
     val showBack: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?,
@@ -216,7 +216,7 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             recyclerView.paddingRight,
             state.bottomContentPaddingPx
         )
-        emptyView.text = if (state.isRefreshing) "Loading chats" else "No chats"
+        emptyView.text = if (state.isSynchronizing) "Loading chats" else "No chats"
         emptyView.visibility = if (state.rooms.isEmpty()) View.VISIBLE else View.GONE
         recyclerView.visibility = if (state.rooms.isEmpty()) View.GONE else View.VISIBLE
 
@@ -241,7 +241,8 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             }
         }
         ZynaPerfLog.end(renderStart, "roomsView.render") {
-            "title=${state.title} rooms=${state.rooms.size} refreshing=${state.isRefreshing}"
+            "title=${state.title} rooms=${state.rooms.size} " +
+                "synchronizing=${state.isSynchronizing}"
         }
     }
 

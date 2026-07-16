@@ -56,6 +56,7 @@ import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
 import com.zyna.app.ui.profile.ProfileFeatureState
+import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -68,8 +69,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
+    private data class AppFeatureInput(
+        val state: AppUiState,
+        val roomList: RoomListState
+    )
+
     private data class RootFeatureInput(
         val state: AppUiState,
+        val roomList: RoomListState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -78,6 +85,7 @@ class MainActivity : AppCompatActivity() {
 
     private data class RootRenderInput(
         val state: AppUiState,
+        val roomList: RoomListState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -332,7 +340,12 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 combine(
                     combine(
-                        appViewModel.uiState,
+                        combine(
+                            appViewModel.uiState,
+                            appViewModel.roomListState
+                        ) { state, roomList ->
+                            AppFeatureInput(state = state, roomList = roomList)
+                        },
                         combine(
                             appViewModel.contactsState,
                             appViewModel.directRoomActionState
@@ -360,9 +373,10 @@ class MainActivity : AppCompatActivity() {
                                 callInfo = callInfo
                             )
                         }
-                    ) { state, contacts, profile, callHistory, chat ->
+                    ) { app, contacts, profile, callHistory, chat ->
                         RootFeatureInput(
-                            state = state,
+                            state = app.state,
+                            roomList = app.roomList,
                             contacts = contacts,
                             profile = profile,
                             callHistory = callHistory,
@@ -375,6 +389,7 @@ class MainActivity : AppCompatActivity() {
                 ) { feature, chatBubbleTheme, appThemeMode, presenceProvider ->
                     RootRenderInput(
                         state = feature.state,
+                        roomList = feature.roomList,
                         contacts = feature.contacts,
                         profile = feature.profile,
                         callHistory = feature.callHistory,
@@ -400,6 +415,7 @@ class MainActivity : AppCompatActivity() {
                     hasRenderedState = true
                     rootHost.render(
                         state = state,
+                        roomList = input.roomList,
                         contacts = input.contacts,
                         profile = input.profile,
                         callHistory = input.callHistory,

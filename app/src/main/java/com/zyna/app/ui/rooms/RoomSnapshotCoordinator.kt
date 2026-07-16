@@ -1,4 +1,4 @@
-package com.zyna.app.ui.app
+package com.zyna.app.ui.rooms
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -12,12 +12,13 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 
 /**
- * Runs at most one room snapshot refresh at a time and folds queued requests into one trailing run.
+ * Runs at most one room snapshot sync at a time and folds queued requests into
+ * one trailing run.
  *
- * Refreshes are scoped to an explicit session. Deactivating that session cancels and joins the
- * active operation, which provides the barrier required before clearing session-owned cache data.
+ * Syncs belong to an explicit session. Deactivation cancels and joins the
+ * active operation, providing a barrier before session-owned cache is cleared.
  */
-internal class CoalescingRoomRefreshCoordinator(
+internal class CoalescingRoomSnapshotCoordinator(
     scope: CoroutineScope,
     private val operation: suspend (userId: String) -> Unit
 ) {
@@ -52,7 +53,7 @@ internal class CoalescingRoomRefreshCoordinator(
             val staleBatch = batch.filter { request -> request.session != session }
             staleBatch.forEach { request ->
                 request.completion.completeExceptionally(
-                    CancellationException("Room refresh session changed")
+                    CancellationException("Room snapshot session changed")
                 )
             }
             if (session == null || currentBatch.isEmpty()) {
@@ -64,7 +65,7 @@ internal class CoalescingRoomRefreshCoordinator(
             }
             val shouldStart = synchronized(stateLock) {
                 if (activeSession == session) {
-                    check(activeOperation == null) { "Room refresh operation already active" }
+                    check(activeOperation == null) { "Room snapshot operation already active" }
                     activeOperation = run
                     true
                 } else {
@@ -72,10 +73,10 @@ internal class CoalescingRoomRefreshCoordinator(
                 }
             }
             if (!shouldStart) {
-                run.cancel(CancellationException("Room refresh session changed"))
+                run.cancel(CancellationException("Room snapshot session changed"))
                 currentBatch.forEach { request ->
                     request.completion.completeExceptionally(
-                        CancellationException("Room refresh session changed")
+                        CancellationException("Room snapshot session changed")
                     )
                 }
                 continue
@@ -104,7 +105,7 @@ internal class CoalescingRoomRefreshCoordinator(
         }
     }.also { job ->
         job.invokeOnCompletion { cause ->
-            val error = cause ?: CancellationException("Room refresh coordinator stopped")
+            val error = cause ?: CancellationException("Room snapshot coordinator stopped")
             requests.close(error)
             while (true) {
                 val request = requests.tryReceive().getOrNull() ?: break
@@ -119,7 +120,7 @@ internal class CoalescingRoomRefreshCoordinator(
                 return
             }
             check(activeOperation == null) {
-                "Deactivate the previous room refresh session before activating a new one"
+                "Deactivate the previous room snapshot session before activating a new one"
             }
             nextSessionGeneration += 1
             activeSession = Session(userId = userId, generation = nextSessionGeneration)
@@ -132,7 +133,7 @@ internal class CoalescingRoomRefreshCoordinator(
             activeSession = null
             activeOperation
         }
-        operationToCancel?.cancel(CancellationException("Room refresh session deactivated"))
+        operationToCancel?.cancel(CancellationException("Room snapshot session deactivated"))
         operationToCancel?.join()
         synchronized(stateLock) {
             if (activeOperation === operationToCancel) {
@@ -141,14 +142,13 @@ internal class CoalescingRoomRefreshCoordinator(
         }
     }
 
-    suspend fun refresh() {
+    suspend fun synchronize() {
         val request = synchronized(stateLock) {
             val session = activeSession
-                ?: throw CancellationException("Room refresh session is not active")
+                ?: throw CancellationException("Room snapshot session is not active")
             Request(session = session, completion = CompletableDeferred())
         }
         requests.send(request)
-        val completion = request.completion
-        completion.await()
+        request.completion.await()
     }
 }

@@ -1,4 +1,4 @@
-package com.zyna.app.ui.app
+package com.zyna.app.ui.rooms
 
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicInteger
@@ -19,9 +19,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class RoomRefreshCoordinatorTest {
+class RoomSnapshotCoordinatorTest {
     @Test
-    fun requestsDuringRefresh_areFoldedIntoOneSequentialTrailingRefresh() = runBlocking {
+    fun requestsDuringSync_areFoldedIntoOneSequentialTrailingSync() = runBlocking {
         withTimeout(5_000L) {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val activeOperations = AtomicInteger(0)
@@ -32,7 +32,7 @@ class RoomRefreshCoordinatorTest {
             val releaseFirst = CompletableDeferred<Unit>()
             val secondStarted = CompletableDeferred<Unit>()
             val releaseSecond = CompletableDeferred<Unit>()
-            val coordinator = CoalescingRoomRefreshCoordinator(scope) { userId ->
+            val coordinator = CoalescingRoomSnapshotCoordinator(scope) { userId ->
                 assertEquals(USER_ID, userId)
                 val active = activeOperations.incrementAndGet()
                 maximumActiveOperations.accumulateAndGet(active) { current, candidate ->
@@ -58,10 +58,16 @@ class RoomRefreshCoordinatorTest {
             coordinator.activateSession(USER_ID)
 
             try {
-                val first = async(start = CoroutineStart.UNDISPATCHED) { coordinator.refresh() }
+                val first = async(start = CoroutineStart.UNDISPATCHED) {
+                    coordinator.synchronize()
+                }
                 firstStarted.await()
-                val second = async(start = CoroutineStart.UNDISPATCHED) { coordinator.refresh() }
-                val third = async(start = CoroutineStart.UNDISPATCHED) { coordinator.refresh() }
+                val second = async(start = CoroutineStart.UNDISPATCHED) {
+                    coordinator.synchronize()
+                }
+                val third = async(start = CoroutineStart.UNDISPATCHED) {
+                    coordinator.synchronize()
+                }
 
                 releaseFirst.complete(Unit)
                 first.await()
@@ -82,13 +88,13 @@ class RoomRefreshCoordinatorTest {
     }
 
     @Test
-    fun deactivateSession_cancelsAndJoinsActiveRefreshBeforeNextSession() = runBlocking {
+    fun deactivateSession_cancelsAndJoinsActiveSyncBeforeNextSession() = runBlocking {
         withTimeout(5_000L) {
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             val operationCount = AtomicInteger(0)
             val firstStarted = CompletableDeferred<Unit>()
             val firstFinished = CompletableDeferred<Unit>()
-            val coordinator = CoalescingRoomRefreshCoordinator(scope) { userId ->
+            val coordinator = CoalescingRoomSnapshotCoordinator(scope) { userId ->
                 operationCount.incrementAndGet()
                 if (userId == FIRST_USER_ID) {
                     firstStarted.complete(Unit)
@@ -102,22 +108,28 @@ class RoomRefreshCoordinatorTest {
 
             try {
                 coordinator.activateSession(FIRST_USER_ID)
-                val firstRefresh = async(start = CoroutineStart.UNDISPATCHED) {
-                    coordinator.refresh()
+                val firstSync = async(start = CoroutineStart.UNDISPATCHED) {
+                    coordinator.synchronize()
                 }
                 firstStarted.await()
-                val queuedRefresh = async(start = CoroutineStart.UNDISPATCHED) {
-                    coordinator.refresh()
+                val queuedSync = async(start = CoroutineStart.UNDISPATCHED) {
+                    coordinator.synchronize()
                 }
 
                 coordinator.deactivateSession()
 
                 assertTrue(firstFinished.isCompleted)
-                assertTrue(runCatching { firstRefresh.await() }.exceptionOrNull() is CancellationException)
-                assertTrue(runCatching { queuedRefresh.await() }.exceptionOrNull() is CancellationException)
+                assertTrue(
+                    runCatching { firstSync.await() }.exceptionOrNull() is
+                        CancellationException
+                )
+                assertTrue(
+                    runCatching { queuedSync.await() }.exceptionOrNull() is
+                        CancellationException
+                )
 
                 coordinator.activateSession(SECOND_USER_ID)
-                coordinator.refresh()
+                coordinator.synchronize()
 
                 assertEquals(2, operationCount.get())
             } finally {

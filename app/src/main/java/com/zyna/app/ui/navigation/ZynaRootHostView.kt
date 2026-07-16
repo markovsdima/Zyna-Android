@@ -34,6 +34,7 @@ import com.zyna.app.ui.chat.ChatScreenView
 import com.zyna.app.ui.chat.ChatScreenViewActions
 import com.zyna.app.ui.chat.ChatScreenViewState
 import com.zyna.app.ui.chat.ChatTimelineState
+import com.zyna.app.ui.contacts.ContactsState
 import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
@@ -43,6 +44,7 @@ import com.zyna.app.ui.profile.EditProfileScreenView
 import com.zyna.app.ui.profile.EditProfileScreenViewActions
 import com.zyna.app.ui.profile.EditProfileScreenViewState
 import com.zyna.app.ui.profile.OwnProfileState
+import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.profile.ProfileScreenView
 import com.zyna.app.ui.profile.ProfileScreenViewActions
 import com.zyna.app.ui.profile.ProfileScreenViewState
@@ -95,8 +97,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var bottomInset = 0
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
-    private var latestOwnProfile: OwnProfileState? = null
-    private var latestUserProfile: UserProfileState? = null
+    private var latestContacts: ContactsState? = null
+    private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
     private var latestChat: ChatFeatureState? = null
     private var latestActions: ZynaAppActions? = null
@@ -217,8 +219,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     fun render(
         state: AppUiState,
-        ownProfile: OwnProfileState,
-        userProfile: UserProfileState,
+        contacts: ContactsState,
+        profile: ProfileFeatureState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
         actions: ZynaAppActions,
@@ -232,8 +234,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "messages=${chat.timeline.messages.size} loading=${chat.timeline.isLoading}"
         }
         latestState = state
-        latestOwnProfile = ownProfile
-        latestUserProfile = userProfile
+        latestContacts = contacts
+        latestProfile = profile
         latestCallHistory = callHistory
         latestChat = chat
         latestActions = actions
@@ -500,7 +502,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         if (!navigationStack.canStartInteractivePop()) {
             return false
         }
-        if (state.route == AppRoute.EditProfile && latestOwnProfile?.isSaving == true) {
+        if (state.route == AppRoute.EditProfile && latestProfile?.own?.isSaving == true) {
             return false
         }
         if (
@@ -550,8 +552,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
-        val ownProfile = latestOwnProfile ?: return
-        val userProfile = latestUserProfile ?: return
+        val contacts = latestContacts ?: return
+        val profile = latestProfile ?: return
         val callHistory = latestCallHistory ?: return
         val chat = latestChat ?: return
         val actions = latestActions ?: return
@@ -562,8 +564,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val entriesStart = ZynaPerfLog.start()
         val entries = entriesFor(
             state,
-            ownProfile,
-            userProfile,
+            contacts,
+            profile,
             callHistory,
             chat,
             actions,
@@ -663,8 +665,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun entriesFor(
         state: AppUiState,
-        ownProfile: OwnProfileState,
-        userProfile: UserProfileState,
+        contacts: ContactsState,
+        profile: ProfileFeatureState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
         actions: ZynaAppActions,
@@ -677,10 +679,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.Login -> loginEntry(state, actions)
                 is AppRoute.RecoveryKey -> recoveryEntry(state, actions, route)
                 is AppRoute.SessionSecurity -> sessionSecurityEntry(state, actions, route)
-                AppRoute.Contacts -> contactsEntry(state, actions)
+                AppRoute.Contacts -> contactsEntry(state, contacts, actions)
                 is AppRoute.UserProfile -> userProfileEntry(
                     state,
-                    userProfile,
+                    profile.user,
                     actions,
                     route
                 )
@@ -699,8 +701,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     onBack = { actions.onNavigateBack() },
                     withBottomPadding = false
                 )
-                AppRoute.Profile -> profileEntry(ownProfile, actions)
-                AppRoute.EditProfile -> editProfileEntry(ownProfile, actions)
+                AppRoute.Profile -> profileEntry(profile.own, actions)
+                AppRoute.EditProfile -> editProfileEntry(profile.own, actions)
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(state, actions, route)
@@ -761,6 +763,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun contactsEntry(
         state: AppUiState,
+        contacts: ContactsState,
         actions: ZynaAppActions
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -769,11 +772,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             updateView = { view ->
                 (view as ContactsScreenView).render(
                     state = ContactsScreenViewState(
-                        contacts = state.contacts,
-                        searchQuery = state.contactsSearchQuery,
-                        isSearching = state.isSearchingContacts,
+                        contacts = contacts.contactsFor(state.rooms),
+                        searchQuery = contacts.searchQuery,
+                        isSearching = contacts.isSearching,
                         errorMessage = state.contactActionErrorMessage
-                            ?: state.contactsSearchErrorMessage,
+                            ?: contacts.searchErrorMessage,
                         actionUserId = state.contactActionUserId,
                         matrixMediaLoader = actions.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset

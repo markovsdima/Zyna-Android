@@ -19,7 +19,6 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
-import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
@@ -46,16 +45,16 @@ import com.zyna.app.ui.chat.createChatMessageActionStore
 import com.zyna.app.ui.chat.createChatTimelineStore
 import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.createCallHistoryStore
+import com.zyna.app.ui.contacts.ContactsState
+import com.zyna.app.ui.contacts.createContactsStore
 import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.profile.createOwnProfileStore
 import com.zyna.app.ui.profile.createUserProfileStore
 import com.zyna.app.util.ZynaPerfLog
-import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -79,10 +78,6 @@ data class AppUiState(
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
     val rooms: List<MatrixRoomSummary> = emptyList(),
     val presenceByUserId: Map<String, UserPresenceStatus> = emptyMap(),
-    val contactsSearchQuery: String = "",
-    val contactsSearchResults: List<MatrixUserProfile> = emptyList(),
-    val isSearchingContacts: Boolean = false,
-    val contactsSearchErrorMessage: String? = null,
     val contactActionUserId: String? = null,
     val contactActionErrorMessage: String? = null,
     val pendingNativeMatrixRtcCallLaunch: PendingNativeMatrixRtcCallLaunch? = null,
@@ -119,68 +114,8 @@ data class AppUiState(
     val errorMessage: String?
         get() = (matrixState as? MatrixClientState.Error)?.message
 
-    val contacts: List<MatrixContact>
-        get() = buildContacts()
-
     fun roomIdForContact(userId: String): String? {
         return rooms.firstOrNull { it.directUserId == userId }?.id
-    }
-
-    private fun buildContacts(): List<MatrixContact> {
-        val query = contactsSearchQuery.trim()
-        val directContacts = rooms
-            .asSequence()
-            .mapNotNull { room -> room.toContactOrNull() }
-            .sortedWith(compareBy<MatrixContact> { it.displayName.lowercase(Locale.ROOT) }
-                .thenBy { it.userId })
-            .toList()
-        if (query.isBlank()) {
-            return directContacts
-        }
-
-        val directMatches = directContacts.filter { it.matchesQuery(query) }
-        val directByUserId = directContacts.associateBy { it.userId }
-        val searchContacts = contactsSearchResults.map { profile ->
-            val existing = directByUserId[profile.userId]
-            MatrixContact(
-                userId = profile.userId,
-                displayName = profile.effectiveDisplayName,
-                avatarUrl = profile.avatarUrl ?: existing?.avatarUrl,
-                roomId = existing?.roomId
-            )
-        }
-
-        return (directMatches + searchContacts)
-            .fold(LinkedHashMap<String, MatrixContact>()) { contactsByUserId, contact ->
-                val existing = contactsByUserId[contact.userId]
-                contactsByUserId[contact.userId] = when {
-                    existing == null -> contact
-                    existing.roomId == null && contact.roomId != null -> contact
-                    existing.avatarUrl.isNullOrBlank() && !contact.avatarUrl.isNullOrBlank() -> {
-                        existing.copy(avatarUrl = contact.avatarUrl)
-                    }
-                    else -> existing
-                }
-                contactsByUserId
-            }
-            .values
-            .sortedWith(compareBy<MatrixContact> { it.displayName.lowercase(Locale.ROOT) }
-                .thenBy { it.userId })
-    }
-
-    private fun MatrixRoomSummary.toContactOrNull(): MatrixContact? {
-        val directUserId = this.directUserId?.takeIf { it.isNotBlank() } ?: return null
-        return MatrixContact(
-            userId = directUserId,
-            displayName = displayName.takeIf { it.isNotBlank() } ?: directUserId,
-            avatarUrl = avatarUrl,
-            roomId = id
-        )
-    }
-
-    private fun MatrixContact.matchesQuery(query: String): Boolean {
-        return displayName.contains(query, ignoreCase = true) ||
-            userId.contains(query, ignoreCase = true)
     }
 }
 
@@ -206,6 +141,12 @@ class AppViewModel(
     )
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
     val chatComposerState: StateFlow<ChatComposerState> = chatComposerStore.state
+    private val contactsStore = createContactsStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val contactsState: StateFlow<ContactsState> = contactsStore.state
     private val callHistoryStore = createCallHistoryStore(
         scope = viewModelScope,
         localCacheRepository = localCacheRepository,
@@ -274,8 +215,6 @@ class AppViewModel(
     private var roomListLiveJob: Job? = null
     private var roomCacheUserId: String? = null
     private var roomListLiveUserId: String? = null
-    private var contactsSearchJob: Job? = null
-    private var contactsSearchGeneration = 0L
     private var contactActionJob: Job? = null
     private var contactActionGeneration = 0L
     private var pendingNativeMatrixRtcCallLaunchCounter = 0L
@@ -344,7 +283,7 @@ class AppViewModel(
                     stopRoomListLiveRefresh()
                     ownProfileStore.deactivate()
                     userProfileStore.clear()
-                    stopContactJobs()
+                    stopContactAction()
                 }
 
                 when {
@@ -371,26 +310,6 @@ class AppViewModel(
                             emptyMap()
                         } else {
                             current.presenceByUserId
-                        },
-                        contactsSearchQuery = if (shouldClearSessionData) {
-                            ""
-                        } else {
-                            current.contactsSearchQuery
-                        },
-                        contactsSearchResults = if (shouldClearSessionData) {
-                            emptyList()
-                        } else {
-                            current.contactsSearchResults
-                        },
-                        isSearchingContacts = if (shouldClearSessionData) {
-                            false
-                        } else {
-                            current.isSearchingContacts
-                        },
-                        contactsSearchErrorMessage = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.contactsSearchErrorMessage
                         },
                         contactActionUserId = if (shouldClearSessionData) {
                             null
@@ -419,6 +338,10 @@ class AppViewModel(
                             current.logoutConfirmation
                         }
                     )
+                }
+
+                if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
+                    contactsStore.clear()
                 }
 
                 if (nextUserId != null) {
@@ -570,69 +493,7 @@ class AppViewModel(
     }
 
     fun setContactsSearchQuery(query: String) {
-        if (_uiState.value.contactsSearchQuery == query) {
-            return
-        }
-
-        contactsSearchJob?.cancel()
-        contactsSearchGeneration += 1
-        val generation = contactsSearchGeneration
-        val trimmed = query.trim()
-        val shouldSearchServer = trimmed.length >= CONTACTS_SEARCH_MIN_LENGTH
-
-        _uiState.update { current ->
-            current.copy(
-                contactsSearchQuery = query,
-                contactsSearchResults = emptyList(),
-                isSearchingContacts = shouldSearchServer,
-                contactsSearchErrorMessage = null
-            )
-        }
-
-        if (!shouldSearchServer) {
-            return
-        }
-
-        contactsSearchJob = viewModelScope.launch {
-            delay(CONTACTS_SEARCH_DEBOUNCE_MS)
-            try {
-                val results = matrixClientService.searchUsers(
-                    searchTerm = trimmed,
-                    limit = CONTACTS_SEARCH_LIMIT
-                )
-                _uiState.update { current ->
-                    if (contactsSearchGeneration != generation ||
-                        current.contactsSearchQuery.trim() != trimmed
-                    ) {
-                        current
-                    } else {
-                        current.copy(
-                            contactsSearchResults = results,
-                            isSearchingContacts = false,
-                            contactsSearchErrorMessage = null
-                        )
-                    }
-                }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to search contacts", error)
-                _uiState.update { current ->
-                    if (contactsSearchGeneration != generation ||
-                        current.contactsSearchQuery.trim() != trimmed
-                    ) {
-                        current
-                    } else {
-                        current.copy(
-                            contactsSearchResults = emptyList(),
-                            isSearchingContacts = false,
-                            contactsSearchErrorMessage = error.message
-                                ?: error.javaClass.simpleName
-                        )
-                    }
-                }
-            }
-        }
+        contactsStore.setSearchQuery(query)
     }
 
     fun openUserProfile(
@@ -1091,19 +952,12 @@ class AppViewModel(
         )
     }
 
-    private fun stopContactJobs() {
-        contactsSearchJob?.cancel()
-        contactsSearchJob = null
-        contactsSearchGeneration += 1
+    private fun stopContactAction() {
         contactActionJob?.cancel()
         contactActionJob = null
         contactActionGeneration += 1
         _uiState.update {
             it.copy(
-                contactsSearchQuery = "",
-                contactsSearchResults = emptyList(),
-                isSearchingContacts = false,
-                contactsSearchErrorMessage = null,
                 contactActionUserId = null,
                 contactActionErrorMessage = null,
                 pendingNativeMatrixRtcCallLaunch = null
@@ -1781,9 +1635,6 @@ class AppViewModel(
     private companion object {
         const val TAG = "AppViewModel"
         const val TELEPORT_LOG_TAG = "ZynaChatTeleport"
-        const val CONTACTS_SEARCH_MIN_LENGTH = 2
-        const val CONTACTS_SEARCH_DEBOUNCE_MS = 250L
-        const val CONTACTS_SEARCH_LIMIT = 30
         const val PRESENCE_TAG_ROOMS = "rooms"
         const val PRESENCE_TAG_CHAT = "chat"
         const val PRESENCE_TAG_PROFILE = "profile"

@@ -49,13 +49,13 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
 import com.zyna.app.ui.calls.NativeMatrixRtcCallView
 import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.chat.ChatFeatureState
+import com.zyna.app.ui.contacts.ContactsState
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.ZynaAppActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
-import com.zyna.app.ui.profile.OwnProfileState
-import com.zyna.app.ui.profile.UserProfileState
+import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -70,16 +70,16 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
     private data class RootFeatureInput(
         val state: AppUiState,
-        val ownProfile: OwnProfileState,
-        val userProfile: UserProfileState,
+        val contacts: ContactsState,
+        val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState
     )
 
     private data class RootRenderInput(
         val state: AppUiState,
-        val ownProfile: OwnProfileState,
-        val userProfile: UserProfileState,
+        val contacts: ContactsState,
+        val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
         val chat: ChatFeatureState,
         val preferences: ZynaRootPreferences
@@ -333,8 +333,13 @@ class MainActivity : AppCompatActivity() {
                 combine(
                     combine(
                         appViewModel.uiState,
-                        appViewModel.ownProfileState,
-                        appViewModel.userProfileState,
+                        appViewModel.contactsState,
+                        combine(
+                            appViewModel.ownProfileState,
+                            appViewModel.userProfileState
+                        ) { own, user ->
+                            ProfileFeatureState(own = own, user = user)
+                        },
                         appViewModel.callHistoryState,
                         combine(
                             appViewModel.chatComposerState,
@@ -347,11 +352,11 @@ class MainActivity : AppCompatActivity() {
                                 callInfo = callInfo
                             )
                         }
-                    ) { state, ownProfile, userProfile, callHistory, chat ->
+                    ) { state, contacts, profile, callHistory, chat ->
                         RootFeatureInput(
                             state = state,
-                            ownProfile = ownProfile,
-                            userProfile = userProfile,
+                            contacts = contacts,
+                            profile = profile,
                             callHistory = callHistory,
                             chat = chat
                         )
@@ -362,8 +367,8 @@ class MainActivity : AppCompatActivity() {
                 ) { feature, chatBubbleTheme, appThemeMode, presenceProvider ->
                     RootRenderInput(
                         state = feature.state,
-                        ownProfile = feature.ownProfile,
-                        userProfile = feature.userProfile,
+                        contacts = feature.contacts,
+                        profile = feature.profile,
                         callHistory = feature.callHistory,
                         chat = feature.chat,
                         preferences = ZynaRootPreferences(
@@ -387,8 +392,8 @@ class MainActivity : AppCompatActivity() {
                     hasRenderedState = true
                     rootHost.render(
                         state = state,
-                        ownProfile = input.ownProfile,
-                        userProfile = input.userProfile,
+                        contacts = input.contacts,
+                        profile = input.profile,
                         callHistory = input.callHistory,
                         chat = input.chat,
                         actions = actions,

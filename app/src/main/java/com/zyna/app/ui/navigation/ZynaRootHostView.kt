@@ -73,6 +73,11 @@ import com.zyna.app.util.ZynaPerfLog
 import kotlin.math.abs
 import kotlin.math.max
 
+enum class ZynaOverlayPresentation(val coversTabBar: Boolean) {
+    FULLSCREEN(coversTabBar = true),
+    OVER_CONTENT(coversTabBar = false)
+}
+
 class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private enum class FullscreenBackGesturePhase {
         Idle,
@@ -122,6 +127,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var systemBackInProgress = false
     private var navigationTouchSuppressionUntilUptimeMs = 0L
     private var isSuppressingNavigationTouchSequence = false
+    private var overlayPresentation: ZynaOverlayPresentation? = null
 
     init {
         setBackgroundColor(Color.BLACK)
@@ -258,11 +264,25 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
     }
 
-    fun showOverlay(view: View?) {
+    fun showOverlay(
+        view: View?,
+        presentation: ZynaOverlayPresentation = ZynaOverlayPresentation.FULLSCREEN
+    ) {
         if (view == null) {
             overlayContainer.removeAllViews()
+            overlayPresentation = null
+            setTabBarPresented(
+                presented = latestState?.navState?.showsTabs == true,
+                animated = false
+            )
             return
         }
+        overlayPresentation = presentation
+        setTabBarPresented(
+            presented = latestState?.navState?.showsTabs == true &&
+                !presentation.coversTabBar,
+            animated = false
+        )
         if (overlayContainer.childCount == 1 && overlayContainer.getChildAt(0) === view) {
             return
         }
@@ -509,8 +529,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         if (!navigationStack.canStartInteractivePop()) {
             return false
         }
-        if (state.route == AppRoute.EditProfile && latestProfile?.own?.isSaving == true) {
-            return false
+        if (state.route == AppRoute.EditProfile) {
+            if (
+                latestProfile?.own?.isSaving == true ||
+                latestProfile?.own?.hasUnsavedChanges == true
+            ) {
+                return false
+            }
         }
         if (
             state.route is AppRoute.Chat &&
@@ -606,7 +631,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         ) {
             discardPrewarmedChatView()
         }
-        val showTabs = state.navState.showsTabs
+        val showTabs = state.navState.showsTabs && !overlayCoversTabBar()
         setTabBarPresented(showTabs, animated = animated && hadRenderedRoute)
         tabBar.setSelectedTab(state.selectedTab.toTabBarTab())
         ZynaPerfLog.mark {
@@ -641,7 +666,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 .setDuration(TAB_BAR_ANIMATION_MS)
                 .setInterpolator(tabBarInterpolator)
                 .withEndAction {
-                    if (latestState?.navState?.showsTabs == true) {
+                    if (
+                        latestState?.navState?.showsTabs == true &&
+                        !overlayCoversTabBar()
+                    ) {
                         tabBar.alpha = 1f
                         tabBar.translationY = 0f
                     }
@@ -658,7 +686,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 .setDuration(TAB_BAR_ANIMATION_MS)
                 .setInterpolator(tabBarInterpolator)
                 .withEndAction {
-                    if (latestState?.navState?.showsTabs != true) {
+                    if (
+                        latestState?.navState?.showsTabs != true ||
+                        overlayCoversTabBar()
+                    ) {
                         tabBar.visibility = View.GONE
                         tabBar.alpha = 1f
                         tabBar.translationY = tabBarHiddenTranslationY()
@@ -672,6 +703,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val measuredHeight = tabBar.height.takeIf { it > 0 }
             ?: (dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset)
         return measuredHeight.toFloat()
+    }
+
+    private fun overlayCoversTabBar(): Boolean {
+        return overlayContainer.childCount > 0 &&
+            overlayPresentation?.coversTabBar != false
     }
 
     private fun entriesFor(
@@ -727,7 +763,15 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     withBottomPadding = false
                 )
                 AppRoute.Profile -> profileEntry(profile.own, actions, dependencies)
-                AppRoute.EditProfile -> editProfileEntry(profile.own, actions, dependencies)
+                AppRoute.EditProfile -> editProfileEntry(
+                    ownProfile = profile.own,
+                    isDiscardConfirmationVisible =
+                        profile.own.editSessionId != 0L &&
+                            state.pendingEditProfileExit?.editSessionId ==
+                            profile.own.editSessionId,
+                    actions = actions,
+                    dependencies = dependencies
+                )
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(
@@ -993,6 +1037,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun editProfileEntry(
         ownProfile: OwnProfileState,
+        isDiscardConfirmationVisible: Boolean,
         actions: ZynaRootActions,
         dependencies: ZynaRenderDependencies
     ): ZynaScreenEntry {
@@ -1004,14 +1049,19 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state = EditProfileScreenViewState(
                         profile = ownProfile,
                         matrixMediaLoader = dependencies.matrixMediaLoader,
-                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
+                        bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset,
+                        isDiscardConfirmationVisible = isDiscardConfirmationVisible
                     ),
                     actions = EditProfileScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onDisplayNameChanged = actions.profile.own.onDisplayNameChanged,
                         onPickAvatar = actions.profile.own.onPickAvatar,
                         onRemoveAvatar = actions.profile.own.onRemoveAvatar,
-                        onSave = actions.profile.own.onSave
+                        onSave = actions.profile.own.onSave,
+                        onDiscardChangesConfirmed =
+                            actions.profile.own.onConfirmEditExit,
+                        onDiscardChangesCancelled =
+                            actions.profile.own.onCancelEditExit
                     )
                 )
             }

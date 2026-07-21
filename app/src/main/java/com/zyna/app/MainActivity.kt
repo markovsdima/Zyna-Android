@@ -21,6 +21,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
 import androidx.core.content.ContextCompat
@@ -34,7 +36,6 @@ import com.zyna.app.data.outgoing.OutgoingMediaStorage
 import com.zyna.app.data.outgoing.OutgoingOutboxDebugHooks
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingPhotoDraftItem
-import com.zyna.app.data.profile.ProfileAvatarPreprocessor
 import com.zyna.app.data.media.VoiceRecorderState
 import com.zyna.app.data.matrix.MatrixAudioInfo
 import com.zyna.app.ui.app.AppRoute
@@ -70,6 +71,12 @@ import com.zyna.app.ui.navigation.ZynaRootActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
+import com.zyna.app.ui.profile.ProfileAvatarCropCoordinator
+import com.zyna.app.ui.profile.ProfileAvatarCropError
+import com.zyna.app.ui.profile.ProfileAvatarCropEditor
+import com.zyna.app.ui.profile.ProfileAvatarCropState
+import com.zyna.app.ui.profile.ProfileAvatarPickRequest
+import com.zyna.app.ui.profile.createProfileAvatarCropDriver
 import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
@@ -115,13 +122,9 @@ class MainActivity : AppCompatActivity() {
 
     private enum class RootOverlayOwner {
         PHOTO_EDITOR,
+        PROFILE_AVATAR_CROP,
         NATIVE_MATRIX_RTC_CALL
     }
-
-    private data class ProfileAvatarPickRequest(
-        val editSessionId: Long,
-        val generation: Long
-    )
 
     private val appContainer by lazy { (application as ZynaApplication).appContainer }
     private lateinit var appViewModel: AppViewModel
@@ -142,7 +145,9 @@ class MainActivity : AppCompatActivity() {
     private var pendingRecordAudioPermissionRequest: RecordAudioPermissionRequest? = null
     private var pendingNativeMatrixRtcCall: NativeMatrixRtcCallLaunchContext? = null
     private var pendingProfileAvatarPickRequest: ProfileAvatarPickRequest? = null
-    private var profileAvatarPickGeneration: Long = 0L
+    private lateinit var profileAvatarCropCoordinator: ProfileAvatarCropCoordinator
+    private var profileAvatarCropView: ComposeView? = null
+    private var profileAvatarCropRenderJob: Job? = null
     private var rootOverlayOwner: RootOverlayOwner? = null
     private var nativeMatrixRtcCallController: NativeMatrixRtcCallController? = null
     private var nativeMatrixRtcCallRenderJob: Job? = null
@@ -173,10 +178,31 @@ class MainActivity : AppCompatActivity() {
                 nativeMatrixRtcCallService = appContainer.nativeMatrixRtcCallService
             )
         )[AppViewModel::class.java]
+        profileAvatarCropCoordinator = ProfileAvatarCropCoordinator(
+            scope = lifecycleScope,
+            driver = createProfileAvatarCropDriver(
+                contentResolver = contentResolver,
+                sourceDirectory = File(filesDir, PROFILE_AVATAR_SOURCE_DIRECTORY),
+                outputDirectory = File(filesDir, PROFILE_AVATAR_DIRECTORY)
+            ),
+            canDeliver = { editSessionId ->
+                appViewModel.uiState.value.route == AppRoute.EditProfile &&
+                    appViewModel.ownProfileState.value.editSessionId == editSessionId
+            },
+            onDraftReady = appViewModel::setOwnProfileAvatarDraft,
+            onPreparationError = { editSessionId ->
+                appViewModel.setOwnProfileEditError(
+                    message = getString(R.string.profile_avatar_crop_error),
+                    editSessionId = editSessionId
+                )
+            },
+            onSessionWillClose = ::disposeProfileAvatarCropOverlay
+        )
         handleExternalRouteIntent(intent)
         cleanupProfileAvatarTempFiles(
             excludedPath = appViewModel.ownProfileState.value.editAvatarLocalPath
         )
+        profileAvatarCropCoordinator.cleanupOrphanSources()
 
         photoPickerLauncher = registerForActivityResult(
             ActivityResultContracts.PickMultipleVisualMedia(10)
@@ -188,7 +214,7 @@ class MainActivity : AppCompatActivity() {
         ) { uri ->
             val request = pendingProfileAvatarPickRequest
             pendingProfileAvatarPickRequest = null
-            handlePickedProfileAvatar(uri, request)
+            profileAvatarCropCoordinator.handlePickerResult(uri, request)
         }
         notificationPermissionLauncher = registerForActivityResult(
             ActivityResultContracts.RequestPermission()
@@ -244,7 +270,10 @@ class MainActivity : AppCompatActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackStarted(backEvent: BackEventCompat) {
-                    if (nativeMatrixRtcCallController == null) {
+                    if (
+                        nativeMatrixRtcCallController == null &&
+                        profileAvatarCropCoordinator.state.value.session == null
+                    ) {
                         rootHost.handleSystemBackStarted()
                     }
                 }
@@ -262,6 +291,12 @@ class MainActivity : AppCompatActivity() {
                         controller.endCall()
                         return
                     }
+                    profileAvatarCropCoordinator.state.value.session?.let {
+                        if (!profileAvatarCropCoordinator.state.value.isProcessing) {
+                            profileAvatarCropCoordinator.dismiss()
+                        }
+                        return
+                    }
                     if (rootHost.handleSystemBackPressed()) {
                         return
                     }
@@ -274,6 +309,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         )
+
+        profileAvatarCropRenderJob = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                profileAvatarCropCoordinator.state.collect { state ->
+                    renderProfileAvatarCrop(state)
+                }
+            }
+        }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -366,6 +409,9 @@ class MainActivity : AppCompatActivity() {
                     startPendingNativeMatrixRtcCallIfNeeded(state, actions)
                     requestNotificationPermissionIfNeeded(state)
                     restoreNativeMatrixRtcCallOverlayIfNeeded(state)
+                    // Coordinator state drives the crop contents; the root render also checks
+                    // the app route so an active crop is dismissed when EditProfile closes.
+                    renderProfileAvatarCrop()
                     renderPhotoEditor()
                     ZynaPerfLog.end(
                         collectStart,
@@ -460,7 +506,9 @@ class MainActivity : AppCompatActivity() {
                     onDisplayNameChanged = appViewModel::setOwnProfileDisplayNameDraft,
                     onPickAvatar = ::launchProfileAvatarPicker,
                     onRemoveAvatar = ::removeOwnProfileAvatarDraft,
-                    onSave = appViewModel::saveOwnProfile
+                    onSave = appViewModel::saveOwnProfile,
+                    onConfirmEditExit = appViewModel::confirmEditProfileExit,
+                    onCancelEditExit = appViewModel::cancelEditProfileExit
                 )
             ),
             settings = SettingsFeatureActions(
@@ -513,18 +561,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchProfileAvatarPicker(editSessionId: Long) {
-        profileAvatarPickGeneration += 1
-        pendingProfileAvatarPickRequest = ProfileAvatarPickRequest(
-            editSessionId = editSessionId,
-            generation = profileAvatarPickGeneration
-        )
+        pendingProfileAvatarPickRequest = profileAvatarCropCoordinator.beginPick(editSessionId)
         profileAvatarPickerLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
         )
     }
 
     private fun removeOwnProfileAvatarDraft() {
-        profileAvatarPickGeneration += 1
+        profileAvatarCropCoordinator.dismiss()
         appViewModel.removeOwnProfileAvatarDraft()
     }
 
@@ -922,39 +966,55 @@ class MainActivity : AppCompatActivity() {
         rootHost.showOverlay(editorView)
     }
 
-    private fun handlePickedProfileAvatar(uri: Uri?, request: ProfileAvatarPickRequest?) {
-        if (uri == null || request == null) {
+    private fun renderProfileAvatarCrop(
+        state: ProfileAvatarCropState = profileAvatarCropCoordinator.state.value
+    ) {
+        if (state.session == null) {
+            disposeProfileAvatarCropOverlay()
             return
         }
-        lifecycleScope.launch {
-            try {
-                val draft = withContext(Dispatchers.IO) {
-                    ProfileAvatarPreprocessor.process(
-                        contentResolver = contentResolver,
-                        uri = uri,
-                        outputDir = File(filesDir, PROFILE_AVATAR_DIRECTORY)
-                    )
-                }
-                if (request.generation != profileAvatarPickGeneration) {
-                    runCatching { File(draft.localPath).delete() }
-                    return@launch
-                }
-                appViewModel.setOwnProfileAvatarDraft(
-                    draft = draft,
-                    editSessionId = request.editSessionId
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (request.generation != profileAvatarPickGeneration) {
-                    return@launch
-                }
-                appViewModel.setOwnProfileEditError(
-                    message = error.message ?: error.javaClass.simpleName,
-                    editSessionId = request.editSessionId
-                )
-            }
+        if (latestState.route != AppRoute.EditProfile) {
+            profileAvatarCropCoordinator.dismiss()
+            return
         }
+        if (
+            rootOverlayOwner != null &&
+            rootOverlayOwner != RootOverlayOwner.PROFILE_AVATAR_CROP
+        ) {
+            return
+        }
+
+        val editorView = profileAvatarCropView ?: ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setContent {
+                ZynaAndroidTheme(darkTheme = true, dynamicColor = false) {
+                    val cropState by profileAvatarCropCoordinator.state.collectAsState()
+                    cropState.session?.let { activeSession ->
+                        ProfileAvatarCropEditor(
+                            bitmap = activeSession.previewBitmap,
+                            isProcessing = cropState.isProcessing,
+                            errorMessage = cropState.error
+                                ?.takeIf { it == ProfileAvatarCropError.EXPORT }
+                                ?.let { getString(R.string.profile_avatar_crop_error) },
+                            onDismiss = profileAvatarCropCoordinator::dismiss,
+                            onConfirm = profileAvatarCropCoordinator::confirm
+                        )
+                    }
+                }
+            }
+            profileAvatarCropView = this
+        }
+        rootOverlayOwner = RootOverlayOwner.PROFILE_AVATAR_CROP
+        rootHost.showOverlay(editorView)
+    }
+
+    private fun disposeProfileAvatarCropOverlay() {
+        profileAvatarCropView?.disposeComposition()
+        if (rootOverlayOwner == RootOverlayOwner.PROFILE_AVATAR_CROP) {
+            rootOverlayOwner = null
+            rootHost.showOverlay(null)
+        }
+        profileAvatarCropView = null
     }
 
     private fun cleanupProfileAvatarTempFiles(excludedPath: String?) {
@@ -1022,6 +1082,9 @@ class MainActivity : AppCompatActivity() {
         nativeMatrixRtcCallRenderJob = null
         nativeMatrixRtcCallController?.close()
         nativeMatrixRtcCallController = null
+        profileAvatarCropRenderJob?.cancel()
+        profileAvatarCropRenderJob = null
+        profileAvatarCropCoordinator.close()
         if (isFinishing) {
             appContainer.voiceRecorderController.clear()
             appContainer.nativeMatrixRtcCallService.leaveActiveCallAsync()
@@ -1189,6 +1252,7 @@ private const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "notification_permissi
 private const val STATE_DELIVERED_EXTERNAL_COMMAND_IDS =
     "zyna.state.deliveredExternalCommandIds"
 private const val PROFILE_AVATAR_DIRECTORY = "profile_avatars"
+private const val PROFILE_AVATAR_SOURCE_DIRECTORY = "profile_avatar_sources"
 
 private fun MotionEvent.isInsideView(view: View): Boolean {
     val bounds = Rect()

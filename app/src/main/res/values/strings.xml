@@ -140,6 +140,16 @@
     <string name="user_profile_opening_chat">Opening chat...</string>
     <string name="user_profile_retry">Retry</string>
     <string name="common_cancel">Cancel</string>
+    <string name="profile_avatar_crop_title">Adjust Photo</string>
+    <string name="profile_avatar_crop_done">Done</string>
+    <string name="profile_avatar_crop_reset">Reset</string>
+    <string name="profile_avatar_crop_hint">Move and pinch to zoom</string>
+    <string name="profile_avatar_crop_preview_description">Avatar crop preview</string>
+    <string name="profile_avatar_crop_error">Could not prepare the selected photo</string>
+    <string name="profile_edit_discard_title">Exit without saving?</string>
+    <string name="profile_edit_discard_message">Your profile changes will not be saved.</string>
+    <string name="profile_edit_keep_editing">Keep editing</string>
+    <string name="profile_edit_discard">Exit without saving</string>
     <string name="settings_presence">Presence</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
     <string name="presence_provider_matrix_standard">Matrix Standard</string>

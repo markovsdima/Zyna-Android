@@ -7,6 +7,36 @@ enum class AppTab {
     PROFILE
 }
 
+sealed interface EditProfileExitDestination {
+    data object Back : EditProfileExitDestination
+    data class Tab(val tab: AppTab) : EditProfileExitDestination
+}
+
+internal enum class EditProfileExitDecision {
+    NOT_APPLICABLE,
+    BLOCKED_WHILE_SAVING,
+    REQUEST_CONFIRMATION,
+    EXIT
+}
+
+internal fun editProfileExitDecision(
+    route: AppRoute,
+    isSaving: Boolean,
+    hasUnsavedChanges: Boolean
+): EditProfileExitDecision {
+    if (route != AppRoute.EditProfile) {
+        return EditProfileExitDecision.NOT_APPLICABLE
+    }
+    if (isSaving) {
+        return EditProfileExitDecision.BLOCKED_WHILE_SAVING
+    }
+    return if (hasUnsavedChanges) {
+        EditProfileExitDecision.REQUEST_CONFIRMATION
+    } else {
+        EditProfileExitDecision.EXIT
+    }
+}
+
 sealed interface AppNavMode {
     data object Login : AppNavMode
     data class RecoveryKey(val userId: String) : AppNavMode
@@ -220,6 +250,14 @@ data class AppNavState(
             return this
         }
         return copy(profileStack = profileStack.dropLast(1).ifEmpty { listOf(AppRoute.Profile) })
+    }
+
+    fun exitEditProfile(destination: EditProfileExitDestination): AppNavState {
+        val closed = closeEditProfile()
+        return when (destination) {
+            EditProfileExitDestination.Back -> closed
+            is EditProfileExitDestination.Tab -> closed.selectTab(destination.tab)
+        }
     }
 
     fun openChatThemeSettings(): AppNavState {

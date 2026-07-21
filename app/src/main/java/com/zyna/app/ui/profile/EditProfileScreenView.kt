@@ -15,9 +15,11 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
@@ -25,7 +27,8 @@ import kotlin.math.roundToInt
 internal data class EditProfileScreenViewState(
     val profile: OwnProfileState,
     val matrixMediaLoader: MatrixMediaLoader?,
-    val bottomContentPaddingPx: Int
+    val bottomContentPaddingPx: Int,
+    val isDiscardConfirmationVisible: Boolean
 )
 
 internal data class EditProfileScreenViewActions(
@@ -33,7 +36,9 @@ internal data class EditProfileScreenViewActions(
     val onDisplayNameChanged: (String) -> Unit,
     val onPickAvatar: (Long) -> Unit,
     val onRemoveAvatar: () -> Unit,
-    val onSave: () -> Unit
+    val onSave: () -> Unit,
+    val onDiscardChangesConfirmed: () -> Unit,
+    val onDiscardChangesCancelled: () -> Unit
 )
 
 internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
@@ -42,6 +47,7 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
     private var statusTopInset = 0
     private var bottomContentPaddingPx = 0
     private var isRendering = false
+    private var discardChangesDialog: AlertDialog? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -268,6 +274,12 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         ViewCompat.requestApplyInsets(this)
     }
 
+    override fun onDetachedFromWindow() {
+        discardChangesDialog?.dismiss()
+        discardChangesDialog = null
+        super.onDetachedFromWindow()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration?) {
         super.onConfigurationChanged(newConfig)
         palette = SettingsPalette.from(context)
@@ -307,6 +319,11 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         )
 
         val isSaving = profile.isSaving
+        if (isSaving || !state.isDiscardConfirmationVisible) {
+            discardChangesDialog?.dismiss()
+        } else {
+            showDiscardChangesConfirmation(actions)
+        }
         backButton.isEnabled = !isSaving
         saveButton.isEnabled = !isSaving
         changePhotoButton.isEnabled = !isSaving
@@ -326,6 +343,39 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         errorText.text = profile.errorMessage.orEmpty()
         errorText.visibility = if (profile.errorMessage.isNullOrBlank()) GONE else VISIBLE
         applyEnabledState(isSaving)
+    }
+
+    private fun showDiscardChangesConfirmation(actions: EditProfileScreenViewActions) {
+        if (discardChangesDialog?.isShowing == true) {
+            return
+        }
+        var handled = false
+        discardChangesDialog = AlertDialog.Builder(context)
+            .setTitle(R.string.profile_edit_discard_title)
+            .setMessage(R.string.profile_edit_discard_message)
+            .setNegativeButton(R.string.profile_edit_keep_editing) { _, _ ->
+                handled = true
+                actions.onDiscardChangesCancelled()
+            }
+            .setPositiveButton(R.string.profile_edit_discard) { _, _ ->
+                handled = true
+                actions.onDiscardChangesConfirmed()
+            }
+            .create()
+            .also { dialog ->
+                dialog.setOnCancelListener {
+                    if (!handled) {
+                        handled = true
+                        actions.onDiscardChangesCancelled()
+                    }
+                }
+                dialog.setOnDismissListener {
+                    if (discardChangesDialog === dialog) {
+                        discardChangesDialog = null
+                    }
+                }
+                dialog.show()
+            }
     }
 
     private fun applyPalette() {

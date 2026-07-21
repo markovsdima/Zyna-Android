@@ -125,7 +125,9 @@ data class OwnProfileActions(
     val onDisplayNameChanged: (String) -> Unit,
     val onPickAvatar: (Long) -> Unit,
     val onRemoveAvatar: () -> Unit,
-    val onSave: () -> Unit
+    val onSave: () -> Unit,
+    val onConfirmEditExit: () -> Unit,
+    val onCancelEditExit: () -> Unit
 )
 
 data class SettingsFeatureActions(

@@ -1,6 +1,5 @@
 package com.zyna.app.data.profile
 
-import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -8,12 +7,12 @@ import android.graphics.ColorSpace
 import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Rect
+import android.graphics.RectF
 import android.media.ExifInterface
-import android.net.Uri
 import android.os.Build
 import java.io.File
 import java.util.UUID
+import kotlin.math.roundToInt
 
 data class ProfileAvatarDraft(
     val localPath: String,
@@ -25,15 +24,25 @@ data class ProfileAvatarDraft(
 
 object ProfileAvatarPreprocessor {
     private const val AVATAR_SIZE_PX = 768
-    private const val DECODE_MAX_DIMENSION = 1536
+    private const val PREVIEW_MAX_DIMENSION = 2048
+    private const val EXPORT_MAX_DIMENSION = 3072
     private const val JPEG_QUALITY = 85
     private const val JPEG_MIME_TYPE = "image/jpeg"
 
+    fun loadPreview(sourceFile: File): Bitmap {
+        require(sourceFile.isFile) { "Avatar source file is not available" }
+        return decodeBitmap(
+            sourceFile = sourceFile,
+            maxDecodeDimension = PREVIEW_MAX_DIMENSION
+        )
+    }
+
     fun process(
-        contentResolver: ContentResolver,
-        uri: Uri,
+        sourceFile: File,
+        crop: ProfileAvatarCropSpec,
         outputDir: File
     ): ProfileAvatarDraft {
+        require(sourceFile.isFile) { "Avatar source file is not available" }
         outputDir.mkdirs()
         val outputFile = File(
             outputDir,
@@ -43,11 +52,13 @@ object ProfileAvatarPreprocessor {
         var avatar: Bitmap? = null
         try {
             decoded = decodeBitmap(
-                contentResolver = contentResolver,
-                uri = uri,
-                maxDecodeDimension = DECODE_MAX_DIMENSION
+                sourceFile = sourceFile,
+                maxDecodeDimension = EXPORT_MAX_DIMENSION
             )
-            avatar = decoded.centerCropSquare(AVATAR_SIZE_PX)
+            avatar = decoded.cropSquare(
+                sizePx = AVATAR_SIZE_PX,
+                crop = crop
+            )
             avatar.writeJpeg(outputFile)
             return ProfileAvatarDraft(
                 localPath = outputFile.absolutePath,
@@ -66,32 +77,34 @@ object ProfileAvatarPreprocessor {
     }
 
     private fun decodeBitmap(
-        contentResolver: ContentResolver,
-        uri: Uri,
+        sourceFile: File,
         maxDecodeDimension: Int
     ): Bitmap {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            runCatching {
-                val source = ImageDecoder.createSource(contentResolver, uri)
+            try {
+                val source = ImageDecoder.createSource(sourceFile)
                 return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                    val sampleSize = sampleSize(
-                        sourceWidth = info.size.width,
-                        sourceHeight = info.size.height,
-                        maxDimension = maxDecodeDimension
-                    )
                     decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    decoder.setTargetSampleSize(sampleSize)
                     decoder.setTargetColorSpace(ColorSpace.get(ColorSpace.Named.SRGB))
+                    val sourceMax = maxOf(info.size.width, info.size.height).coerceAtLeast(1)
+                    if (sourceMax > maxDecodeDimension) {
+                        val scale = maxDecodeDimension.toFloat() / sourceMax
+                        decoder.setTargetSize(
+                            (info.size.width * scale).roundToInt().coerceAtLeast(1),
+                            (info.size.height * scale).roundToInt().coerceAtLeast(1)
+                        )
+                    }
                 }.ensureArgb8888()
+            } catch (_: Exception) {
+                // BitmapFactory remains a compatibility fallback for decoders
+                // that ImageDecoder cannot open. VM errors must not be swallowed.
             }
         }
 
         val bounds = BitmapFactory.Options().apply {
             inJustDecodeBounds = true
         }
-        contentResolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, bounds)
-        }
+        BitmapFactory.decodeFile(sourceFile.absolutePath, bounds)
         val options = BitmapFactory.Options().apply {
             inPreferredConfig = Bitmap.Config.ARGB_8888
             inSampleSize = sampleSize(
@@ -100,34 +113,42 @@ object ProfileAvatarPreprocessor {
                 maxDimension = maxDecodeDimension
             )
         }
-        val decoded = contentResolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, options)
-        }?.ensureArgb8888() ?: error("Could not decode selected image")
-        return decoded.applyExifOrientation(contentResolver, uri)
+        val decoded = BitmapFactory.decodeFile(sourceFile.absolutePath, options)
+            ?.ensureArgb8888()
+            ?: error("Could not decode selected image")
+        return decoded.applyExifOrientation(sourceFile)
     }
 
     private fun sampleSize(sourceWidth: Int, sourceHeight: Int, maxDimension: Int): Int {
         val sourceMax = maxOf(sourceWidth, sourceHeight).coerceAtLeast(1)
         val targetMax = maxDimension.coerceAtLeast(1)
         var sampleSize = 1
-        while (sourceMax / (sampleSize * 2) >= targetMax) {
+        while (sourceMax / sampleSize > targetMax) {
             sampleSize *= 2
         }
         return sampleSize.coerceAtLeast(1)
     }
 
-    private fun Bitmap.centerCropSquare(sizePx: Int): Bitmap {
-        val sourceSize = minOf(width, height).coerceAtLeast(1)
-        val sourceLeft = ((width - sourceSize) / 2).coerceAtLeast(0)
-        val sourceTop = ((height - sourceSize) / 2).coerceAtLeast(0)
-        val targetSize = minOf(sizePx.coerceAtLeast(1), sourceSize)
+    private fun Bitmap.cropSquare(sizePx: Int, crop: ProfileAvatarCropSpec): Bitmap {
+        val sourceRect = ProfileAvatarCropGeometry.sourceRect(
+            crop = crop,
+            sourceWidth = width,
+            sourceHeight = height
+        )
+        val targetSize = sizePx.coerceAtLeast(1)
         val target = Bitmap.createBitmap(targetSize, targetSize, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(target)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+        val matrix = Matrix().apply {
+            setRectToRect(
+                RectF(sourceRect.left, sourceRect.top, sourceRect.right, sourceRect.bottom),
+                RectF(0f, 0f, targetSize.toFloat(), targetSize.toFloat()),
+                Matrix.ScaleToFit.FILL
+            )
+        }
         canvas.drawBitmap(
             this,
-            Rect(sourceLeft, sourceTop, sourceLeft + sourceSize, sourceTop + sourceSize),
-            Rect(0, 0, targetSize, targetSize),
+            matrix,
             paint
         )
         return target
@@ -142,13 +163,13 @@ object ProfileAvatarPreprocessor {
         return converted
     }
 
-    private fun Bitmap.applyExifOrientation(contentResolver: ContentResolver, uri: Uri): Bitmap {
-        val orientation = contentResolver.openInputStream(uri)?.use { input ->
+    private fun Bitmap.applyExifOrientation(sourceFile: File): Bitmap {
+        val orientation = sourceFile.inputStream().use { input ->
             ExifInterface(input).getAttributeInt(
                 ExifInterface.TAG_ORIENTATION,
                 ExifInterface.ORIENTATION_NORMAL
             )
-        } ?: ExifInterface.ORIENTATION_NORMAL
+        }
         return applyExifOrientation(orientation)
     }
 

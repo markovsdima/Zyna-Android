@@ -390,6 +390,138 @@ class AppNavStateTest {
     }
 
     @Test
+    fun exitEditProfileBackClosesOnlyTheEditRoute() {
+        val state = AppNavState()
+            .enterMain()
+            .openEditProfile()
+
+        val nextState = state.exitEditProfile(EditProfileExitDestination.Back)
+
+        assertEquals(AppTab.PROFILE, nextState.selectedTab)
+        assertEquals(listOf(AppRoute.Profile), nextState.profileStack)
+        assertEquals(AppRoute.Profile, nextState.top)
+    }
+
+    @Test
+    fun exitEditProfileTabClosesTheEditRouteBeforeSelectingDestination() {
+        val state = AppNavState()
+            .enterMain()
+            .openEditProfile()
+
+        val nextState = state.exitEditProfile(
+            EditProfileExitDestination.Tab(AppTab.CONTACTS)
+        )
+
+        assertEquals(AppTab.CONTACTS, nextState.selectedTab)
+        assertEquals(listOf(AppRoute.Profile), nextState.profileStack)
+        assertEquals(AppRoute.Contacts, nextState.top)
+    }
+
+    @Test
+    fun editProfileExitRequestsConfirmationOnlyForUnsavedDraft() {
+        assertEquals(
+            EditProfileExitDecision.REQUEST_CONFIRMATION,
+            editProfileExitDecision(
+                route = AppRoute.EditProfile,
+                isSaving = false,
+                hasUnsavedChanges = true
+            )
+        )
+        assertEquals(
+            EditProfileExitDecision.EXIT,
+            editProfileExitDecision(
+                route = AppRoute.EditProfile,
+                isSaving = false,
+                hasUnsavedChanges = false
+            )
+        )
+    }
+
+    @Test
+    fun editProfileExitIsBlockedWhileSavingAndIgnoredOnOtherRoutes() {
+        assertEquals(
+            EditProfileExitDecision.BLOCKED_WHILE_SAVING,
+            editProfileExitDecision(
+                route = AppRoute.EditProfile,
+                isSaving = true,
+                hasUnsavedChanges = true
+            )
+        )
+        assertEquals(
+            EditProfileExitDecision.NOT_APPLICABLE,
+            editProfileExitDecision(
+                route = AppRoute.Profile,
+                isSaving = false,
+                hasUnsavedChanges = true
+            )
+        )
+    }
+
+    @Test
+    fun routeScopedEditProfileExitIsClearedWhenExternalNavigationOpensChat() {
+        val editNavState = AppNavState()
+            .enterMain()
+            .openEditProfile()
+        val state = AppUiState(
+            navState = editNavState,
+            pendingEditProfileExit = PendingEditProfileExit(
+                destination = EditProfileExitDestination.Tab(AppTab.CONTACTS),
+                editSessionId = 17L
+            )
+        )
+
+        val nextState = state.withNavigationState(
+            editNavState.openChat(roomId = "!room:example.org", displayName = "Room")
+        )
+
+        assertEquals(AppRoute.Chat("!room:example.org", "Room"), nextState.route)
+        assertNull(nextState.pendingEditProfileExit)
+    }
+
+    @Test
+    fun routeScopedEditProfileExitDoesNotReturnAfterSecurityRouteCloses() {
+        val editNavState = AppNavState()
+            .enterMain()
+            .openEditProfile()
+        val state = AppUiState(
+            navState = editNavState,
+            pendingEditProfileExit = PendingEditProfileExit(
+                destination = EditProfileExitDestination.Back,
+                editSessionId = 23L
+            )
+        )
+
+        val securityState = state.withNavigationState(
+            editNavState.openSessionSecurity("@alice:example.org")
+        )
+        val returnedState = securityState.withNavigationState(
+            requireNotNull(securityState.navState.popActiveStack())
+        )
+
+        assertEquals(AppRoute.EditProfile, returnedState.route)
+        assertNull(returnedState.pendingEditProfileExit)
+    }
+
+    @Test
+    fun routeScopedEditProfileExitSurvivesUnrelatedStateUpdatesOnItsOwner() {
+        val editNavState = AppNavState()
+            .enterMain()
+            .openEditProfile()
+        val pending = PendingEditProfileExit(
+            destination = EditProfileExitDestination.Back,
+            editSessionId = 31L
+        )
+        val state = AppUiState(
+            navState = editNavState,
+            pendingEditProfileExit = pending
+        )
+
+        val nextState = state.withNavigationState(editNavState)
+
+        assertEquals(pending, nextState.pendingEditProfileExit)
+    }
+
+    @Test
     fun popActiveStack_returnsToChatsFromNonChatRootAndStopsAtChatsRoot() {
         val profileRootState = AppNavState()
             .enterMain()

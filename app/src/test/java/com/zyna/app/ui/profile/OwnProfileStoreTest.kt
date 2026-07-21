@@ -156,6 +156,33 @@ class OwnProfileStoreTest {
     }
 
     @Test
+    fun unsavedChangesTrackNameAndAvatarDraftsWithinEditSession() = runBlocking {
+        val fixture = OwnProfileStoreFixture(coroutineContext)
+        try {
+            fixture.store.activate(USER_ID)
+            awaitCondition { fixture.store.state.value.displayName == "Alice" }
+            fixture.store.beginEdit()
+
+            assertFalse(fixture.store.state.value.hasUnsavedChanges)
+
+            fixture.store.setDisplayNameDraft("Alice Updated")
+            assertTrue(fixture.store.state.value.hasUnsavedChanges)
+
+            fixture.store.setDisplayNameDraft("Alice")
+            assertFalse(fixture.store.state.value.hasUnsavedChanges)
+
+            val editSessionId = fixture.store.state.value.editSessionId
+            fixture.store.setAvatarDraft(draft("avatar.jpg"), editSessionId)
+            assertTrue(fixture.store.state.value.hasUnsavedChanges)
+
+            fixture.store.cancelEdit()
+            assertFalse(fixture.store.state.value.hasUnsavedChanges)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun saveRemovedAvatarCallsDriverAndRefreshesProfile() = runBlocking {
         val fixture = OwnProfileStoreFixture(coroutineContext)
         try {

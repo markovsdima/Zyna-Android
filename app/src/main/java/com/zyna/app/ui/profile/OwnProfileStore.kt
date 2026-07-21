@@ -40,6 +40,11 @@ data class OwnProfileState(
             (avatarUrl?.isNotBlank() == true ||
                 (editAvatarChange == OwnProfileAvatarChange.REPLACE &&
                     editAvatarLocalPath != null))
+
+    val hasUnsavedChanges: Boolean
+        get() = editSessionId != 0L &&
+            (editDisplayName != displayName.orEmpty() ||
+                editAvatarChange != OwnProfileAvatarChange.KEEP)
 }
 
 internal class OwnProfileDriver(

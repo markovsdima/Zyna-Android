@@ -101,6 +101,16 @@
     <string name="system_event_you_removed_room_topic">Вы удалили тему комнаты</string>
     <string name="system_event_sender_removed_room_topic">%1$s удалил(а) тему комнаты</string>
     <string name="common_cancel">Отмена</string>
+    <string name="profile_avatar_crop_title">Настройка фото</string>
+    <string name="profile_avatar_crop_done">Готово</string>
+    <string name="profile_avatar_crop_reset">Сбросить</string>
+    <string name="profile_avatar_crop_hint">Перемещайте и масштабируйте фото</string>
+    <string name="profile_avatar_crop_preview_description">Предпросмотр кадрирования аватарки</string>
+    <string name="profile_avatar_crop_error">Не удалось подготовить выбранное фото</string>
+    <string name="profile_edit_discard_title">Выйти без сохранения?</string>
+    <string name="profile_edit_discard_message">Изменения профиля не сохранятся.</string>
+    <string name="profile_edit_keep_editing">Продолжить редактирование</string>
+    <string name="profile_edit_discard">Выйти без сохранения</string>
     <string name="settings_presence">Статус онлайн</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
     <string name="presence_provider_matrix_standard">Matrix Standard</string>

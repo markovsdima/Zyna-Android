@@ -79,6 +79,11 @@ data class LogoutConfirmationState(
     val warning: MatrixLogoutWarning?
 )
 
+data class PendingEditProfileExit(
+    val destination: EditProfileExitDestination,
+    val editSessionId: Long
+)
+
 data class AppUiState(
     val navState: AppNavState = AppNavState(),
     val matrixState: MatrixClientState = MatrixClientState.LoggedOut,
@@ -87,6 +92,7 @@ data class AppUiState(
     val isLoggingOut: Boolean = false,
     val logoutErrorMessage: String? = null,
     val logoutConfirmation: LogoutConfirmationState? = null,
+    val pendingEditProfileExit: PendingEditProfileExit? = null,
     val sessionSecurity: MatrixSessionSecurityState = MatrixSessionSecurityState()
 ) {
     val route: AppRoute
@@ -107,6 +113,15 @@ data class AppUiState(
 
     val errorMessage: String?
         get() = (matrixState as? MatrixClientState.Error)?.message
+}
+
+internal fun AppUiState.withNavigationState(nextNavState: AppNavState): AppUiState {
+    val keepsEditProfileOwner =
+        route == AppRoute.EditProfile && nextNavState.top == AppRoute.EditProfile
+    return copy(
+        navState = nextNavState,
+        pendingEditProfileExit = pendingEditProfileExit.takeIf { keepsEditProfileOwner }
+    )
 }
 
 class AppViewModel(
@@ -158,7 +173,7 @@ class AppViewModel(
         matrixClientService = matrixClientService,
         onEditFinished = {
             _uiState.update { current ->
-                current.copy(navState = current.navState.closeEditProfile())
+                current.withNavigationState(current.navState.closeEditProfile())
             }
         },
         onWarning = { message, error -> Log.w(TAG, message, error) }
@@ -296,7 +311,6 @@ class AppViewModel(
 
                     current.copy(
                         matrixState = matrixState,
-                        navState = nextNavState,
                         presenceByUserId = if (shouldClearSessionData) {
                             emptyMap()
                         } else {
@@ -318,7 +332,7 @@ class AppViewModel(
                         } else {
                             current.logoutConfirmation
                         }
-                    )
+                    ).withNavigationState(nextNavState)
                 }
 
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
@@ -359,26 +373,25 @@ class AppViewModel(
 
                 _uiState.update { current ->
                     val securityMatchesSession = userId != null && sessionSecurity.userId == userId
-                    current.copy(
-                        sessionSecurity = sessionSecurity,
-                        navState = if (securityMatchesSession) {
-                            val routedState = current.navState.routeForClientState(
-                                shouldShowLogin = false,
-                                recoveryUserId = userId.takeUnless { sessionSecurity.gateComplete }
-                            )
-                            if (
-                                sessionSecurity.gateComplete &&
-                                receivedNewVerificationRequest &&
-                                routedState.mode == AppNavMode.Main
-                            ) {
-                                routedState.openSessionSecurity(userId)
-                            } else {
-                                routedState
-                            }
+                    val nextNavState = if (securityMatchesSession) {
+                        val routedState = current.navState.routeForClientState(
+                            shouldShowLogin = false,
+                            recoveryUserId = userId.takeUnless { sessionSecurity.gateComplete }
+                        )
+                        if (
+                            sessionSecurity.gateComplete &&
+                            receivedNewVerificationRequest &&
+                            routedState.mode == AppNavMode.Main
+                        ) {
+                            routedState.openSessionSecurity(userId)
                         } else {
-                            current.navState
+                            routedState
                         }
-                    )
+                    } else {
+                        current.navState
+                    }
+                    current.copy(sessionSecurity = sessionSecurity)
+                        .withNavigationState(nextNavState)
                 }
                 if (
                     _uiState.value.route.directRoomActionOwnerKey() !=
@@ -460,9 +473,7 @@ class AppViewModel(
             if (latestNavState == current.navState) {
                 return@update current
             }
-            current.copy(
-                navState = latestNavState
-            )
+            current.withNavigationState(latestNavState)
         }
     }
 
@@ -520,7 +531,7 @@ class AppViewModel(
         directRoomActionCoordinator.cancel()
         matrixClientService.handleSessionSecurityAction(MatrixSessionSecurityAction.Manage)
         _uiState.update { current ->
-            current.copy(navState = current.navState.openSessionSecurity(userId))
+            current.withNavigationState(current.navState.openSessionSecurity(userId))
         }
     }
 
@@ -632,30 +643,23 @@ class AppViewModel(
         stopChatTimeline()
         chatComposerStore.clearAll()
         _uiState.update {
-            it.copy(
-                navState = it.navState.closeChat(),
-                pendingNativeMatrixRtcCallLaunch = null
-            )
+            it.withNavigationState(it.navState.closeChat())
+                .copy(pendingNativeMatrixRtcCallLaunch = null)
         }
     }
 
     fun selectTab(tab: AppTab) {
-        val state = _uiState.value
-        val previousContactActionOwner = state.route.directRoomActionOwnerKey()
-        val isClosingEditProfile = state.route == AppRoute.EditProfile
-        if (isClosingEditProfile && ownProfileStore.state.value.isSaving) {
+        if (requestEditProfileExit(EditProfileExitDestination.Tab(tab))) {
             return
         }
-        if (isClosingEditProfile) {
-            ownProfileStore.cancelEdit()
-        }
+        selectTabImmediately(tab)
+    }
+
+    private fun selectTabImmediately(tab: AppTab) {
+        val state = _uiState.value
+        val previousContactActionOwner = state.route.directRoomActionOwnerKey()
         _uiState.update { current ->
-            val nextNavState = if (isClosingEditProfile) {
-                current.navState.closeEditProfile()
-            } else {
-                current.navState
-            }
-            current.copy(navState = nextNavState.selectTab(tab))
+            current.withNavigationState(current.navState.selectTab(tab))
         }
         if (tab == AppTab.PROFILE) {
             _uiState.value.matrixState.userIdOrNull()?.let(ownProfileStore::activate)
@@ -667,6 +671,12 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
+        if (
+            route == AppRoute.EditProfile &&
+            requestEditProfileExit(EditProfileExitDestination.Back)
+        ) {
+            return true
+        }
         val previousContactActionOwner = route.directRoomActionOwnerKey()
         val didNavigate = when (route) {
             is AppRoute.Chat -> {
@@ -677,13 +687,7 @@ class AppViewModel(
                 cancelForwardPicker()
                 true
             }
-            AppRoute.EditProfile -> {
-                if (ownProfileStore.state.value.isSaving) {
-                    return true
-                }
-                cancelOwnProfileEdit()
-                popActiveStack()
-            }
+            AppRoute.EditProfile -> false
             is AppRoute.UserProfile -> {
                 val didNavigate = popActiveStack()
                 userProfileStore.clear()
@@ -699,28 +703,116 @@ class AppViewModel(
         return didNavigate
     }
 
+    fun confirmEditProfileExit() {
+        val pending = _uiState.value.pendingEditProfileExit ?: return
+        completeEditProfileExit(
+            destination = pending.destination,
+            expectedEditSessionId = pending.editSessionId
+        )
+    }
+
+    fun cancelEditProfileExit() {
+        _uiState.update { current ->
+            if (current.pendingEditProfileExit == null) {
+                current
+            } else {
+                current.copy(pendingEditProfileExit = null)
+            }
+        }
+    }
+
+    private fun requestEditProfileExit(destination: EditProfileExitDestination): Boolean {
+        val state = _uiState.value
+        val profile = ownProfileStore.state.value
+        return when (
+            editProfileExitDecision(
+                route = state.route,
+                isSaving = profile.isSaving,
+                hasUnsavedChanges = profile.hasUnsavedChanges
+            )
+        ) {
+            EditProfileExitDecision.NOT_APPLICABLE -> false
+            EditProfileExitDecision.BLOCKED_WHILE_SAVING -> true
+            EditProfileExitDecision.REQUEST_CONFIRMATION -> {
+                _uiState.update { current ->
+                    if (current.route == AppRoute.EditProfile) {
+                        current.copy(
+                            pendingEditProfileExit = PendingEditProfileExit(
+                                destination = destination,
+                                editSessionId = profile.editSessionId
+                            )
+                        )
+                    } else {
+                        current
+                    }
+                }
+                true
+            }
+            EditProfileExitDecision.EXIT -> {
+                completeEditProfileExit(
+                    destination = destination,
+                    expectedEditSessionId = profile.editSessionId
+                )
+                true
+            }
+        }
+    }
+
+    private fun completeEditProfileExit(
+        destination: EditProfileExitDestination,
+        expectedEditSessionId: Long
+    ) {
+        val state = _uiState.value
+        val profile = ownProfileStore.state.value
+        if (
+            state.route != AppRoute.EditProfile ||
+            profile.isSaving ||
+            profile.editSessionId != expectedEditSessionId
+        ) {
+            cancelEditProfileExit()
+            return
+        }
+        val previousContactActionOwner = state.route.directRoomActionOwnerKey()
+        ownProfileStore.cancelEdit()
+        _uiState.update { current ->
+            if (current.route != AppRoute.EditProfile) {
+                current.copy(pendingEditProfileExit = null)
+            } else {
+                current.withNavigationState(current.navState.exitEditProfile(destination))
+            }
+        }
+        val targetTab = (destination as? EditProfileExitDestination.Tab)?.tab
+        if (targetTab == AppTab.PROFILE) {
+            _uiState.value.matrixState.userIdOrNull()?.let(ownProfileStore::activate)
+        }
+        if (_uiState.value.route.directRoomActionOwnerKey() != previousContactActionOwner) {
+            directRoomActionCoordinator.cancel()
+        }
+    }
+
     fun openRoomDetails() {
         _uiState.update { current ->
-            current.copy(navState = current.navState.openRoomDetails())
+            current.withNavigationState(current.navState.openRoomDetails())
         }
     }
 
     fun openProfileSettings() {
         _uiState.update { current ->
-            current.copy(navState = current.navState.openProfileSettings())
+            current.withNavigationState(current.navState.openProfileSettings())
         }
     }
 
     fun openEditProfile() {
         ownProfileStore.beginEdit()
         _uiState.update { current ->
-            current.copy(navState = current.navState.openEditProfile())
+            current.withNavigationState(current.navState.openEditProfile())
+                .copy(pendingEditProfileExit = null)
         }
     }
 
     fun openChatThemeSettings() {
         _uiState.update { current ->
-            current.copy(navState = current.navState.openChatThemeSettings())
+            current.withNavigationState(current.navState.openChatThemeSettings())
         }
     }
 
@@ -751,12 +843,9 @@ class AppViewModel(
         ownProfileStore.removeAvatarDraft()
     }
 
-    fun cancelOwnProfileEdit() {
-        ownProfileStore.cancelEdit()
-    }
-
     fun saveOwnProfile() {
         _uiState.value.matrixState.userIdOrNull() ?: return
+        cancelEditProfileExit()
         ownProfileStore.save()
     }
 
@@ -870,7 +959,7 @@ class AppViewModel(
                 current
             } else {
                 didNavigate = true
-                current.copy(navState = nextNavState)
+                current.withNavigationState(nextNavState)
             }
         }
         return didNavigate
@@ -942,18 +1031,14 @@ class AppViewModel(
     fun startForwardMessage(target: MatrixForwardTarget) {
         chatComposerStore.startForwardPicker(target) ?: return
         _uiState.update { current ->
-            current.copy(
-                navState = current.navState.openForwardPicker()
-            )
+            current.withNavigationState(current.navState.openForwardPicker())
         }
     }
 
     fun cancelForwardPicker() {
         chatComposerStore.cancelForwardPicker()
         _uiState.update { current ->
-            current.copy(
-                navState = current.navState.closeForwardPicker()
-            )
+            current.withNavigationState(current.navState.closeForwardPicker())
         }
     }
 
@@ -1419,8 +1504,8 @@ class AppViewModel(
         if (matrixState.userIdOrNull() != userId) {
             return this
         }
-        return copy(
-            navState = navState.openChat(
+        return withNavigationState(
+            navState.openChat(
                 roomId = room.id,
                 displayName = room.displayName
             )

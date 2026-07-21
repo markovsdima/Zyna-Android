@@ -51,7 +51,22 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.chat.ChatFeatureState
 import com.zyna.app.ui.contacts.ContactsFeatureState
 import com.zyna.app.ui.glass.GlassInputBarView
-import com.zyna.app.ui.navigation.ZynaAppActions
+import com.zyna.app.ui.navigation.AppActions
+import com.zyna.app.ui.navigation.CallsFeatureActions
+import com.zyna.app.ui.navigation.ChatComposerActions
+import com.zyna.app.ui.navigation.ChatFeatureActions
+import com.zyna.app.ui.navigation.ChatMessageActions
+import com.zyna.app.ui.navigation.ChatNavigationActions
+import com.zyna.app.ui.navigation.ChatTimelineActions
+import com.zyna.app.ui.navigation.ContactsFeatureActions
+import com.zyna.app.ui.navigation.NavigationActions
+import com.zyna.app.ui.navigation.OwnProfileActions
+import com.zyna.app.ui.navigation.ProfileFeatureActions
+import com.zyna.app.ui.navigation.RoomsFeatureActions
+import com.zyna.app.ui.navigation.SettingsFeatureActions
+import com.zyna.app.ui.navigation.UserProfileActions
+import com.zyna.app.ui.navigation.ZynaRenderDependencies
+import com.zyna.app.ui.navigation.ZynaRootActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
 import com.zyna.app.ui.photo.PhotoMessageEditor
@@ -222,84 +237,8 @@ class MainActivity : AppCompatActivity() {
             ::handleVoiceRecorderAutoSendState
         )
 
-        val actions = ZynaAppActions(
-            matrixMediaLoader = appContainer.matrixMediaLoader,
-            audioPlaybackController = appContainer.audioPlaybackController,
-            voiceRecorderController = appContainer.voiceRecorderController,
-            onLogin = appViewModel::login,
-            onSessionSecurityAction = appViewModel::handleSessionSecurityAction,
-            onSelectTab = appViewModel::selectTab,
-            onNavigateBack = appViewModel::navigateBack,
-            onOpenRoom = appViewModel::openRoom,
-            onContactsSearchQueryChanged = appViewModel::setContactsSearchQuery,
-            onOpenUserProfile = appViewModel::openUserProfile,
-            onOpenContactChat = appViewModel::openContactChat,
-            onCallContact = appViewModel::callContact,
-            onOpenUserProfileChat = appViewModel::openUserProfileChat,
-            onCallUserProfile = appViewModel::callUserProfile,
-            onRefreshUserProfile = appViewModel::refreshUserProfile,
-            onOpenCallHistoryRoom = appViewModel::openCallHistoryRoom,
-            onCallHistoryItem = appViewModel::callHistoryItem,
-            onConsumePendingNativeMatrixRtcCallLaunch =
-                appViewModel::consumePendingNativeMatrixRtcCallLaunch,
-            onForwardRoomSelected = appViewModel::selectForwardRoom,
-            onCancelForwardPicker = appViewModel::cancelForwardPicker,
-            onStartNativeMatrixRtcCall = ::startNativeMatrixRtcCallWithPermission,
-            onCloseChat = appViewModel::closeChat,
-            onOpenRoomDetails = appViewModel::openRoomDetails,
-            onLoadOlderChatMessages = appViewModel::loadOlderChatMessages,
-            onLoadNewerChatMessages = appViewModel::loadNewerChatMessages,
-            onJumpToChatLiveEdge = appViewModel::jumpToChatLiveEdge,
-            onSendChatMessage = appViewModel::sendChatMessage,
-            onAttachPhotos = ::launchPhotoPicker,
-            onStartVoiceRecording = ::startVoiceRecordingWithPermission,
-            onStopVoiceRecording = ::stopVoiceRecordingToPreview,
-            onCancelVoiceRecording = ::cancelVoiceRecording,
-            onFinishVoiceRecordingForSend = ::finishVoiceRecordingForSend,
-            onSendVoiceRecording = ::sendVoiceRecording,
-            onToggleVoicePreviewPlayback = ::toggleVoicePreviewPlayback,
-            onReplyToMessage = appViewModel::setChatReplyTarget,
-            onReplyHeaderClicked = appViewModel::jumpToChatEvent,
-            onCancelReply = appViewModel::clearChatReplyTarget,
-            onEditMessage = appViewModel::setChatEditTarget,
-            onCancelEdit = appViewModel::clearChatEditTarget,
-            onForwardMessage = appViewModel::startForwardMessage,
-            onCancelForward = appViewModel::clearChatForwardTarget,
-            onToggleReaction = appViewModel::toggleReaction,
-            onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
-            onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
-            onRedactMessage = appViewModel::redactMessage,
-            onRedactMessages = appViewModel::redactMessages,
-            onDebugMarkOutgoingEnvelopeFailed = appViewModel::debugMarkOutgoingEnvelopeFailed,
-            onVisibleReadReceiptCandidate = appViewModel::updateVisibleReadReceiptCandidate,
-            onChatJumpTargetConsumed = appViewModel::clearChatJumpTarget,
-            onChatScrollToLiveEdgeConsumed = appViewModel::clearChatScrollToLiveEdgeRequest,
-            onOpenProfileSettings = appViewModel::openProfileSettings,
-            onOpenEditProfile = appViewModel::openEditProfile,
-            onRefreshOwnProfile = appViewModel::refreshOwnProfile,
-            onOwnProfileDisplayNameChanged = appViewModel::setOwnProfileDisplayNameDraft,
-            onPickOwnProfileAvatar = ::launchProfileAvatarPicker,
-            onRemoveOwnProfileAvatar = ::removeOwnProfileAvatarDraft,
-            onSaveOwnProfile = appViewModel::saveOwnProfile,
-            onOpenChatThemeSettings = appViewModel::openChatThemeSettings,
-            onOpenSessionSecurity = appViewModel::openSessionSecurity,
-            onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
-            onSelectAppThemeMode = appContainer.appThemeStore::setSelectedMode,
-            onSelectPresenceProvider = appContainer.presenceSettingsStore::setSelectedProvider,
-            onLogoutRequested = appViewModel::requestLogout,
-            onLogoutCancelled = appViewModel::cancelLogout,
-            onLogoutConfirmed = {
-                appViewModel.confirmLogout()
-                dismissNativeMatrixRtcCall()
-                pendingNativeMatrixRtcCall = null
-                pendingRecordAudioPermissionRequest = null
-                appContainer.nativeMatrixRtcCallService.leaveActiveCallAsync()
-                appContainer.audioPlaybackController.stop()
-                sendVoiceAfterFinish = false
-                appContainer.voiceRecorderController.clear()
-                appContainer.matrixAudioMediaLoader.clear()
-            }
-        )
+        val actions = createRootActions()
+        val renderDependencies = createRenderDependencies()
 
         onBackPressedDispatcher.addCallback(
             this,
@@ -421,6 +360,7 @@ class MainActivity : AppCompatActivity() {
                         callHistory = input.callHistory,
                         chat = input.chat,
                         actions = actions,
+                        dependencies = renderDependencies,
                         preferences = input.preferences
                     )
                     startPendingNativeMatrixRtcCallIfNeeded(state, actions)
@@ -437,6 +377,124 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun createRootActions(): ZynaRootActions {
+        return ZynaRootActions(
+            app = AppActions(
+                onLogin = appViewModel::login,
+                onSessionSecurityAction = appViewModel::handleSessionSecurityAction
+            ),
+            navigation = NavigationActions(
+                onSelectTab = appViewModel::selectTab,
+                onNavigateBack = appViewModel::navigateBack
+            ),
+            contacts = ContactsFeatureActions(
+                onSearchQueryChanged = appViewModel::setContactsSearchQuery,
+                onOpenChat = appViewModel::openContactChat,
+                onCall = appViewModel::callContact
+            ),
+            calls = CallsFeatureActions(
+                onOpenHistoryRoom = appViewModel::openCallHistoryRoom,
+                onCallHistoryItem = appViewModel::callHistoryItem,
+                onConsumePendingLaunch = appViewModel::consumePendingNativeMatrixRtcCallLaunch,
+                onStart = ::startNativeMatrixRtcCallWithPermission
+            ),
+            rooms = RoomsFeatureActions(
+                onOpenRoom = appViewModel::openRoom,
+                onForwardRoomSelected = appViewModel::selectForwardRoom
+            ),
+            chat = ChatFeatureActions(
+                navigation = ChatNavigationActions(
+                    onClose = appViewModel::closeChat,
+                    onOpenRoomDetails = appViewModel::openRoomDetails
+                ),
+                timeline = ChatTimelineActions(
+                    onLoadOlder = appViewModel::loadOlderChatMessages,
+                    onLoadNewer = appViewModel::loadNewerChatMessages,
+                    onJumpToLiveEdge = appViewModel::jumpToChatLiveEdge,
+                    onReplyHeaderClicked = appViewModel::jumpToChatEvent,
+                    onVisibleReadReceiptCandidate =
+                        appViewModel::updateVisibleReadReceiptCandidate,
+                    onJumpTargetConsumed = appViewModel::clearChatJumpTarget,
+                    onScrollToLiveEdgeConsumed =
+                        appViewModel::clearChatScrollToLiveEdgeRequest
+                ),
+                composer = ChatComposerActions(
+                    onSendMessage = appViewModel::sendChatMessage,
+                    onAttachPhotos = ::launchPhotoPicker,
+                    onStartVoiceRecording = ::startVoiceRecordingWithPermission,
+                    onStopVoiceRecording = ::stopVoiceRecordingToPreview,
+                    onCancelVoiceRecording = ::cancelVoiceRecording,
+                    onFinishVoiceRecordingForSend = ::finishVoiceRecordingForSend,
+                    onSendVoiceRecording = ::sendVoiceRecording,
+                    onToggleVoicePreviewPlayback = ::toggleVoicePreviewPlayback,
+                    onReplyToMessage = appViewModel::setChatReplyTarget,
+                    onCancelReply = appViewModel::clearChatReplyTarget,
+                    onEditMessage = appViewModel::setChatEditTarget,
+                    onCancelEdit = appViewModel::clearChatEditTarget,
+                    onForwardMessage = appViewModel::startForwardMessage,
+                    onCancelForward = appViewModel::clearChatForwardTarget
+                ),
+                messages = ChatMessageActions(
+                    onToggleReaction = appViewModel::toggleReaction,
+                    onRetryOutgoingEnvelope = appViewModel::retryOutgoingEnvelope,
+                    onDiscardOutgoingEnvelope = appViewModel::discardOutgoingEnvelope,
+                    onRedactMessage = appViewModel::redactMessage,
+                    onRedactMessages = appViewModel::redactMessages,
+                    onDebugMarkOutgoingEnvelopeFailed =
+                        appViewModel::debugMarkOutgoingEnvelopeFailed
+                )
+            ),
+            profile = ProfileFeatureActions(
+                user = UserProfileActions(
+                    onOpen = appViewModel::openUserProfile,
+                    onOpenChat = appViewModel::openUserProfileChat,
+                    onCall = appViewModel::callUserProfile,
+                    onRefresh = appViewModel::refreshUserProfile
+                ),
+                own = OwnProfileActions(
+                    onOpenSettings = appViewModel::openProfileSettings,
+                    onOpenEdit = appViewModel::openEditProfile,
+                    onRefresh = appViewModel::refreshOwnProfile,
+                    onDisplayNameChanged = appViewModel::setOwnProfileDisplayNameDraft,
+                    onPickAvatar = ::launchProfileAvatarPicker,
+                    onRemoveAvatar = ::removeOwnProfileAvatarDraft,
+                    onSave = appViewModel::saveOwnProfile
+                )
+            ),
+            settings = SettingsFeatureActions(
+                onOpenChatTheme = appViewModel::openChatThemeSettings,
+                onOpenSessionSecurity = appViewModel::openSessionSecurity,
+                onSelectChatBubbleTheme = appContainer.chatBubbleThemeStore::setSelectedTheme,
+                onSelectAppThemeMode = appContainer.appThemeStore::setSelectedMode,
+                onSelectPresenceProvider =
+                    appContainer.presenceSettingsStore::setSelectedProvider,
+                onLogoutRequested = appViewModel::requestLogout,
+                onLogoutCancelled = appViewModel::cancelLogout,
+                onLogoutConfirmed = ::confirmLogout
+            )
+        )
+    }
+
+    private fun createRenderDependencies(): ZynaRenderDependencies {
+        return ZynaRenderDependencies(
+            matrixMediaLoader = appContainer.matrixMediaLoader,
+            audioPlaybackController = appContainer.audioPlaybackController,
+            voiceRecorderController = appContainer.voiceRecorderController
+        )
+    }
+
+    private fun confirmLogout() {
+        appViewModel.confirmLogout()
+        dismissNativeMatrixRtcCall()
+        pendingNativeMatrixRtcCall = null
+        pendingRecordAudioPermissionRequest = null
+        appContainer.nativeMatrixRtcCallService.leaveActiveCallAsync()
+        appContainer.audioPlaybackController.stop()
+        sendVoiceAfterFinish = false
+        appContainer.voiceRecorderController.clear()
+        appContainer.matrixAudioMediaLoader.clear()
     }
 
     private fun cancelVoiceComposerIfRouteChanged(previous: AppUiState, next: AppUiState) {
@@ -494,7 +552,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startPendingNativeMatrixRtcCallIfNeeded(
         state: AppUiState,
-        actions: ZynaAppActions
+        actions: ZynaRootActions
     ) {
         val pendingLaunch = state.pendingNativeMatrixRtcCallLaunch ?: return
         val activeChatRoute = state.activeChatRoute ?: return
@@ -502,7 +560,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        actions.onConsumePendingNativeMatrixRtcCallLaunch(pendingLaunch.requestId)
+        actions.calls.onConsumePendingLaunch(pendingLaunch.requestId)
         startNativeMatrixRtcCallWithPermission(
             roomId = pendingLaunch.roomId,
             roomName = pendingLaunch.roomName

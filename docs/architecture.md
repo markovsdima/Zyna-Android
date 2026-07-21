@@ -44,6 +44,13 @@ direct user interaction, but they must not become competing state sources.
 `AppViewModel` sits beside this flow. It owns application routing and connects
 features, but it should not absorb their internal state or coroutine lifecycle.
 
+At the render boundary, root actions are grouped by feature rather than kept in
+one flat callback list. Large features may split their group further by
+responsibility, as chat does for navigation, timeline, composer, and message
+actions. Runtime rendering dependencies such as media and playback controllers
+stay separate from user actions. `ZynaRootHostView` adapts these root groups to
+the narrower `*ScreenViewActions` required by each screen.
+
 ## Main Components
 
 ### Views
@@ -266,9 +273,10 @@ layout, permissions, or platform integration.
 
 ## Current Intentional Trade-offs
 
-- `AppViewModel` has a broad public forwarding API because the root host uses a
-  single action surface. New large features should prefer feature-specific
-  action groups instead of growing one flat bundle indefinitely.
+- `AppViewModel` has a broad public forwarding API because `MainActivity`
+  assembles the feature-grouped root action surface. This facade is
+  intentional; a new large feature should add its own action group instead of
+  expanding unrelated groups.
 - `MainActivity` and `ZynaRootHostView` are large platform/render boundaries.
   Split them when a subsystem gains independent lifecycle or test value, not
   only because of line count.

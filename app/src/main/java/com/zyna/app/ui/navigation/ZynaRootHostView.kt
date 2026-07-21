@@ -103,7 +103,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
     private var latestChat: ChatFeatureState? = null
-    private var latestActions: ZynaAppActions? = null
+    private var latestActions: ZynaRootActions? = null
+    private var latestDependencies: ZynaRenderDependencies? = null
     private var latestPreferences: ZynaRootPreferences? = null
     private var renderSequence = 0L
     private var didScheduleVulkanWarmup = false
@@ -177,7 +178,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
 
         tabBar.onTabSelected = { tab ->
-            latestActions?.onSelectTab(tab.toAppTab())
+            latestActions?.navigation?.onSelectTab(tab.toAppTab())
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -226,7 +227,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
         preferences: ZynaRootPreferences
     ) {
         val renderStart = ZynaPerfLog.start()
@@ -243,6 +245,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         latestCallHistory = callHistory
         latestChat = chat
         latestActions = actions
+        latestDependencies = dependencies
         latestPreferences = preferences
 
         renderLatest(animated = true)
@@ -284,7 +287,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         ) {
             return true
         }
-        return actions.onNavigateBack()
+        return actions.navigation.onNavigateBack()
     }
 
     fun handleSystemBackStarted(): Boolean {
@@ -320,7 +323,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         systemBackInProgress = false
         suppressNavigationTouches()
         navigationStack.finishInteractivePop {
-            latestActions?.onNavigateBack() == true
+            latestActions?.navigation?.onNavigateBack() == true
         }
         return true
     }
@@ -451,7 +454,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         suppressNavigationTouches()
         if (shouldFinish && actions != null) {
             navigationStack.finishInteractivePop {
-                actions.onNavigateBack()
+                actions.navigation.onNavigateBack()
             }
         } else {
             navigationStack.cancelInteractivePop()
@@ -562,6 +565,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val callHistory = latestCallHistory ?: return
         val chat = latestChat ?: return
         val actions = latestActions ?: return
+        val dependencies = latestDependencies ?: return
         val preferences = latestPreferences ?: return
         if (state.route == AppRoute.Login || state.route is AppRoute.RecoveryKey) {
             roomsScrollAnchors.clear()
@@ -575,6 +579,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             callHistory,
             chat,
             actions,
+            dependencies,
             preferences
         )
         ZynaPerfLog.end(
@@ -676,7 +681,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
         chat: ChatFeatureState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
         preferences: ZynaRootPreferences
     ): List<ZynaScreenEntry> {
         val stack = state.navigationStack
@@ -689,7 +695,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.Contacts -> contactsEntry(
                     roomList,
                     contacts,
-                    actions
+                    actions,
+                    dependencies
                 )
                 is AppRoute.UserProfile -> userProfileEntry(
                     state,
@@ -697,13 +704,15 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     profile.user,
                     contacts,
                     actions,
+                    dependencies,
                     route
                 )
-                AppRoute.Calls -> callsEntry(callHistory, actions)
+                AppRoute.Calls -> callsEntry(callHistory, actions, dependencies)
                 AppRoute.Rooms -> roomsEntry(
                     state = state,
                     roomList = roomList,
                     actions = actions,
+                    dependencies = dependencies,
                     title = "Chats",
                     onBack = null,
                     withBottomPadding = isTop && state.navState.showsTabs
@@ -712,12 +721,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state = state,
                     roomList = roomList,
                     actions = actions,
+                    dependencies = dependencies,
                     title = "Forward to",
-                    onBack = { actions.onNavigateBack() },
+                    onBack = { actions.navigation.onNavigateBack() },
                     withBottomPadding = false
                 )
-                AppRoute.Profile -> profileEntry(profile.own, actions)
-                AppRoute.EditProfile -> editProfileEntry(profile.own, actions)
+                AppRoute.Profile -> profileEntry(profile.own, actions, dependencies)
+                AppRoute.EditProfile -> editProfileEntry(profile.own, actions, dependencies)
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(
@@ -731,6 +741,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     roomList,
                     chat,
                     actions,
+                    dependencies,
                     preferences,
                     route
                 )
@@ -738,13 +749,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
     }
 
-    private fun loginEntry(state: AppUiState, actions: ZynaAppActions): ZynaScreenEntry {
+    private fun loginEntry(state: AppUiState, actions: ZynaRootActions): ZynaScreenEntry {
         return composeEntry("login") {
             ZynaAndroidTheme {
                 LoginScreen(
                     isBusy = state.isBusy,
                     errorMessage = state.errorMessage,
-                    onLogin = actions.onLogin
+                    onLogin = actions.app.onLogin
                 )
             }
         }
@@ -752,7 +763,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun recoveryEntry(
         state: AppUiState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
         route: AppRoute.RecoveryKey
     ): ZynaScreenEntry {
         return composeEntry("recovery:${route.userId}") {
@@ -760,7 +771,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 SessionSecurityScreen(
                     userId = route.userId,
                     state = state.sessionSecurity,
-                    onAction = actions.onSessionSecurityAction
+                    onAction = actions.app.onSessionSecurityAction
                 )
             }
         }
@@ -768,7 +779,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun sessionSecurityEntry(
         state: AppUiState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
         route: AppRoute.SessionSecurity
     ): ZynaScreenEntry {
         return composeEntry("security:${route.userId}") {
@@ -776,7 +787,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 SessionSecurityScreen(
                     userId = route.userId,
                     state = state.sessionSecurity,
-                    onAction = actions.onSessionSecurityAction
+                    onAction = actions.app.onSessionSecurityAction
                 )
             }
         }
@@ -785,7 +796,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun contactsEntry(
         roomList: RoomListState,
         contacts: ContactsFeatureState,
-        actions: ZynaAppActions
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "contacts:root",
@@ -799,20 +811,20 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         errorMessage = contacts.directRoomAction.errorMessage
                             ?: contacts.directory.searchErrorMessage,
                         actionUserId = contacts.directRoomAction.activeUserId,
-                        matrixMediaLoader = actions.matrixMediaLoader,
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = ContactsScreenViewActions(
-                        onSearchQueryChanged = actions.onContactsSearchQueryChanged,
+                        onSearchQueryChanged = actions.contacts.onSearchQueryChanged,
                         onOpenProfile = { contact ->
-                            actions.onOpenUserProfile(
+                            actions.profile.user.onOpen(
                                 contact.userId,
                                 contact.displayName,
                                 contact.avatarUrl
                             )
                         },
-                        onOpenChat = actions.onOpenContactChat,
-                        onCall = actions.onCallContact
+                        onOpenChat = actions.contacts.onOpenChat,
+                        onCall = actions.contacts.onCall
                     )
                 )
             }
@@ -821,7 +833,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun callsEntry(
         callHistory: CallHistoryState,
-        actions: ZynaAppActions
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "calls:root",
@@ -830,12 +843,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 (view as CallsScreenView).render(
                     state = CallsScreenViewState(
                         calls = callHistory.calls,
-                        matrixMediaLoader = actions.matrixMediaLoader,
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = CallsScreenViewActions(
-                        onOpenRoom = actions.onOpenCallHistoryRoom,
-                        onCall = actions.onCallHistoryItem
+                        onOpenRoom = actions.calls.onOpenHistoryRoom,
+                        onCall = actions.calls.onCallHistoryItem
                     )
                 )
             }
@@ -847,7 +860,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         roomList: RoomListState,
         userProfile: UserProfileState,
         contacts: ContactsFeatureState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
         route: AppRoute.UserProfile
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -862,13 +876,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         presence = state.presenceByUserId[route.userId],
                         actionUserId = contacts.directRoomAction.activeUserId,
                         actionErrorMessage = contacts.directRoomAction.errorMessage,
-                        matrixMediaLoader = actions.matrixMediaLoader
+                        matrixMediaLoader = dependencies.matrixMediaLoader
                     ),
                     actions = UserProfileScreenViewActions(
-                        onBack = { actions.onNavigateBack() },
-                        onMessage = actions.onOpenUserProfileChat,
-                        onCall = actions.onCallUserProfile,
-                        onRefresh = actions.onRefreshUserProfile
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onMessage = actions.profile.user.onOpenChat,
+                        onCall = actions.profile.user.onCall,
+                        onRefresh = actions.profile.user.onRefresh
                     )
                 )
             }
@@ -878,7 +892,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun roomsEntry(
         state: AppUiState,
         roomList: RoomListState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
         title: String,
         onBack: (() -> Unit)?,
         withBottomPadding: Boolean
@@ -909,7 +924,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isSynchronizing = roomList.isSynchronizing,
                         title = title,
                         showBack = onBack != null,
-                        matrixMediaLoader = actions.matrixMediaLoader,
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
                         presenceByUserId = state.presenceByUserId,
                         initialScrollAnchor = roomsScrollAnchors[entryKey],
                         bottomContentPaddingPx = if (withBottomPadding) {
@@ -920,9 +935,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     ),
                     actions = RoomsScreenViewActions(
                         onOpenRoom = if (title == "Forward to") {
-                            actions.onForwardRoomSelected
+                            actions.rooms.onForwardRoomSelected
                         } else {
-                            actions.onOpenRoom
+                            actions.rooms.onOpenRoom
                         },
                         onBack = onBack
                     )
@@ -953,7 +968,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun profileEntry(
         ownProfile: OwnProfileState,
-        actions: ZynaAppActions
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "profile:root",
@@ -962,13 +978,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 (view as ProfileScreenView).render(
                     state = ProfileScreenViewState(
                         profile = ownProfile,
-                        matrixMediaLoader = actions.matrixMediaLoader,
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = ProfileScreenViewActions(
-                        onEditProfile = actions.onOpenEditProfile,
-                        onOpenSettings = actions.onOpenProfileSettings,
-                        onRefreshProfile = actions.onRefreshOwnProfile
+                        onEditProfile = actions.profile.own.onOpenEdit,
+                        onOpenSettings = actions.profile.own.onOpenSettings,
+                        onRefreshProfile = actions.profile.own.onRefresh
                     )
                 )
             }
@@ -977,7 +993,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun editProfileEntry(
         ownProfile: OwnProfileState,
-        actions: ZynaAppActions
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "profile:edit",
@@ -986,15 +1003,15 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 (view as EditProfileScreenView).render(
                     state = EditProfileScreenViewState(
                         profile = ownProfile,
-                        matrixMediaLoader = actions.matrixMediaLoader,
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = EditProfileScreenViewActions(
-                        onBack = { actions.onNavigateBack() },
-                        onDisplayNameChanged = actions.onOwnProfileDisplayNameChanged,
-                        onPickAvatar = actions.onPickOwnProfileAvatar,
-                        onRemoveAvatar = actions.onRemoveOwnProfileAvatar,
-                        onSave = actions.onSaveOwnProfile
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onDisplayNameChanged = actions.profile.own.onDisplayNameChanged,
+                        onPickAvatar = actions.profile.own.onPickAvatar,
+                        onRemoveAvatar = actions.profile.own.onRemoveAvatar,
+                        onSave = actions.profile.own.onSave
                     )
                 )
             }
@@ -1003,7 +1020,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun settingsEntry(
         state: AppUiState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
         preferences: ZynaRootPreferences
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -1023,14 +1040,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = SettingsScreenViewActions(
-                        onBack = { actions.onNavigateBack() },
-                        onOpenChatTheme = actions.onOpenChatThemeSettings,
-                        onSelectAppThemeMode = actions.onSelectAppThemeMode,
-                        onSelectPresenceProvider = actions.onSelectPresenceProvider,
-                        onOpenSessionSecurity = actions.onOpenSessionSecurity,
-                        onLogoutRequested = actions.onLogoutRequested,
-                        onLogoutConfirmed = actions.onLogoutConfirmed,
-                        onLogoutCancelled = actions.onLogoutCancelled
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onOpenChatTheme = actions.settings.onOpenChatTheme,
+                        onSelectAppThemeMode = actions.settings.onSelectAppThemeMode,
+                        onSelectPresenceProvider = actions.settings.onSelectPresenceProvider,
+                        onOpenSessionSecurity = actions.settings.onOpenSessionSecurity,
+                        onLogoutRequested = actions.settings.onLogoutRequested,
+                        onLogoutConfirmed = actions.settings.onLogoutConfirmed,
+                        onLogoutCancelled = actions.settings.onLogoutCancelled
                     )
                 )
             }
@@ -1038,7 +1055,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     private fun chatThemeSettingsEntry(
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
         preferences: ZynaRootPreferences
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -1051,8 +1068,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset
                     ),
                     actions = ChatThemeSettingsScreenViewActions(
-                        onBack = { actions.onNavigateBack() },
-                        onSelectTheme = actions.onSelectChatBubbleTheme
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onSelectTheme = actions.settings.onSelectChatBubbleTheme
                     )
                 )
             }
@@ -1062,7 +1079,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun roomDetailsEntry(
         state: AppUiState,
         roomList: RoomListState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
         route: AppRoute.RoomDetails
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
@@ -1083,10 +1100,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isMarkedUnread = room?.isMarkedUnread == true
                     ),
                     actions = RoomDetailsScreenViewActions(
-                        onBack = { actions.onNavigateBack() },
+                        onBack = { actions.navigation.onNavigateBack() },
                         onOpenDirectUserProfile = {
                             room?.directUserId?.takeIf { it.isNotBlank() }?.let { userId ->
-                                actions.onOpenUserProfile(
+                                actions.profile.user.onOpen(
                                     userId,
                                     displayName,
                                     room.avatarUrl
@@ -1103,7 +1120,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         roomList: RoomListState,
         chat: ChatFeatureState,
-        actions: ZynaAppActions,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
         preferences: ZynaRootPreferences,
         route: AppRoute.Chat
     ): ZynaScreenEntry {
@@ -1163,46 +1181,51 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         replyTarget = composer.replyTarget,
                         editTarget = composer.editTarget,
                         forwardTarget = composer.forwardTarget,
-                        matrixMediaLoader = actions.matrixMediaLoader,
-                        audioPlaybackController = actions.audioPlaybackController,
-                        voiceRecorderController = actions.voiceRecorderController,
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
+                        audioPlaybackController = dependencies.audioPlaybackController,
+                        voiceRecorderController = dependencies.voiceRecorderController,
                         jumpTargetEventId = timeline.jumpTargetEventId,
                         callBanner = callInfo.banner,
                         chatBubbleTheme = preferences.chatBubbleTheme
                     ),
                     actions = ChatScreenViewActions(
                         onStartCall = {
-                            actions.onStartNativeMatrixRtcCall(route.roomId, route.displayName)
+                            actions.calls.onStart(route.roomId, route.displayName)
                         },
-                        onBack = actions.onCloseChat,
-                        onOpenRoomDetails = actions.onOpenRoomDetails,
-                        onLoadOlder = actions.onLoadOlderChatMessages,
-                        onLoadNewer = actions.onLoadNewerChatMessages,
-                        onJumpToLiveEdge = actions.onJumpToChatLiveEdge,
-                        onSendMessage = actions.onSendChatMessage,
-                        onAttachPhotos = actions.onAttachPhotos,
-                        onStartVoiceRecording = actions.onStartVoiceRecording,
-                        onStopVoiceRecording = actions.onStopVoiceRecording,
-                        onCancelVoiceRecording = actions.onCancelVoiceRecording,
-                        onFinishVoiceRecordingForSend = actions.onFinishVoiceRecordingForSend,
-                        onSendVoiceRecording = actions.onSendVoiceRecording,
-                        onToggleVoicePreviewPlayback = actions.onToggleVoicePreviewPlayback,
-                        onReplyToMessage = actions.onReplyToMessage,
-                        onReplyHeaderClicked = actions.onReplyHeaderClicked,
-                        onCancelReply = actions.onCancelReply,
-                        onEditMessage = actions.onEditMessage,
-                        onCancelEdit = actions.onCancelEdit,
-                        onForwardMessage = actions.onForwardMessage,
-                        onCancelForward = actions.onCancelForward,
-                        onToggleReaction = actions.onToggleReaction,
-                        onRetryOutgoingEnvelope = actions.onRetryOutgoingEnvelope,
-                        onDiscardOutgoingEnvelope = actions.onDiscardOutgoingEnvelope,
-                        onRedactMessage = actions.onRedactMessage,
-                        onRedactMessages = actions.onRedactMessages,
-                        onDebugMarkOutgoingEnvelopeFailed = actions.onDebugMarkOutgoingEnvelopeFailed,
-                        onVisibleReadReceiptCandidate = actions.onVisibleReadReceiptCandidate,
-                        onJumpTargetConsumed = actions.onChatJumpTargetConsumed,
-                        onScrollToLiveEdgeConsumed = actions.onChatScrollToLiveEdgeConsumed
+                        onBack = actions.chat.navigation.onClose,
+                        onOpenRoomDetails = actions.chat.navigation.onOpenRoomDetails,
+                        onLoadOlder = actions.chat.timeline.onLoadOlder,
+                        onLoadNewer = actions.chat.timeline.onLoadNewer,
+                        onJumpToLiveEdge = actions.chat.timeline.onJumpToLiveEdge,
+                        onSendMessage = actions.chat.composer.onSendMessage,
+                        onAttachPhotos = actions.chat.composer.onAttachPhotos,
+                        onStartVoiceRecording = actions.chat.composer.onStartVoiceRecording,
+                        onStopVoiceRecording = actions.chat.composer.onStopVoiceRecording,
+                        onCancelVoiceRecording = actions.chat.composer.onCancelVoiceRecording,
+                        onFinishVoiceRecordingForSend =
+                            actions.chat.composer.onFinishVoiceRecordingForSend,
+                        onSendVoiceRecording = actions.chat.composer.onSendVoiceRecording,
+                        onToggleVoicePreviewPlayback =
+                            actions.chat.composer.onToggleVoicePreviewPlayback,
+                        onReplyToMessage = actions.chat.composer.onReplyToMessage,
+                        onReplyHeaderClicked = actions.chat.timeline.onReplyHeaderClicked,
+                        onCancelReply = actions.chat.composer.onCancelReply,
+                        onEditMessage = actions.chat.composer.onEditMessage,
+                        onCancelEdit = actions.chat.composer.onCancelEdit,
+                        onForwardMessage = actions.chat.composer.onForwardMessage,
+                        onCancelForward = actions.chat.composer.onCancelForward,
+                        onToggleReaction = actions.chat.messages.onToggleReaction,
+                        onRetryOutgoingEnvelope = actions.chat.messages.onRetryOutgoingEnvelope,
+                        onDiscardOutgoingEnvelope = actions.chat.messages.onDiscardOutgoingEnvelope,
+                        onRedactMessage = actions.chat.messages.onRedactMessage,
+                        onRedactMessages = actions.chat.messages.onRedactMessages,
+                        onDebugMarkOutgoingEnvelopeFailed =
+                            actions.chat.messages.onDebugMarkOutgoingEnvelopeFailed,
+                        onVisibleReadReceiptCandidate =
+                            actions.chat.timeline.onVisibleReadReceiptCandidate,
+                        onJumpTargetConsumed = actions.chat.timeline.onJumpTargetConsumed,
+                        onScrollToLiveEdgeConsumed =
+                            actions.chat.timeline.onScrollToLiveEdgeConsumed
                     )
                 )
                 ZynaPerfLog.end(

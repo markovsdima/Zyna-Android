@@ -20,6 +20,7 @@ import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomKind
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
@@ -53,6 +54,9 @@ import com.zyna.app.ui.contacts.DirectRoomActionState
 import com.zyna.app.ui.contacts.ResolvedDirectRoomAction
 import com.zyna.app.ui.contacts.createContactsStore
 import com.zyna.app.ui.contacts.createDirectRoomActionCoordinator
+import com.zyna.app.ui.invitemembers.InviteMembersState
+import com.zyna.app.ui.invitemembers.InviteMembersTarget
+import com.zyna.app.ui.invitemembers.createInviteMembersStore
 import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.profile.createOwnProfileStore
@@ -72,6 +76,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,6 +104,11 @@ private data class RoomDetailsRouteInput(
 private data class RoomMembersRouteInput(
     val target: RoomMembersTarget,
     val expectedJoinedCount: Long?
+)
+
+private data class InviteMembersRouteInput(
+    val target: InviteMembersTarget,
+    val seedCanInviteMembers: Boolean
 )
 
 data class AppUiState(
@@ -222,6 +232,13 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomMembersState: StateFlow<RoomMembersState> = roomMembersStore.state
+    private val inviteMembersStore = createInviteMembersStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onAllInvitesSent = ::handleAllInvitesSent,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val inviteMembersState: StateFlow<InviteMembersState> = inviteMembersStore.state
     private val chatTimelineStore = createChatTimelineStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -290,6 +307,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeInviteMembersRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeRoomMembersPrefetchInputs()
         }
 
@@ -326,6 +347,7 @@ class AppViewModel(
                     roomListStore.deactivate()
                     roomDetailsStore.deactivate()
                     roomMembersStore.clearSession()
+                    inviteMembersStore.clearSession()
                 }
                 if (
                     nextUserId == null ||
@@ -715,6 +737,9 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
+        if (route is AppRoute.InviteRoomMembers && inviteMembersStore.state.value.isSending) {
+            return true
+        }
         if (
             route == AppRoute.EditProfile &&
             requestEditProfileExit(EditProfileExitDestination.Back)
@@ -874,6 +899,52 @@ class AppViewModel(
 
     fun setRoomMembersSearchQuery(query: String) {
         roomMembersStore.setSearchQuery(query)
+    }
+
+    fun openInviteRoomMembers() {
+        val current = _uiState.value
+        val routeRoomId = when (val route = current.route) {
+            is AppRoute.RoomDetails -> route.roomId
+            is AppRoute.RoomMembers -> route.roomId
+            else -> return
+        }
+        val sessionUserId = current.matrixState.userIdOrNull() ?: return
+        val target = RoomDetailsTarget(sessionUserId, routeRoomId)
+        val liveDetails = roomDetailsStore.state.value
+            .takeIf { state -> state.target == target }
+            ?.details
+        val details = liveDetails
+            ?: roomListStore.state.value.roomForId(routeRoomId)?.roomDetails
+            ?: return
+        if (
+            details.kind == MatrixRoomKind.DIRECT ||
+            details.capabilities.canInviteMembers != true
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.withNavigationState(state.navState.openInviteRoomMembers())
+        }
+    }
+
+    fun retryInviteMembersPreparation() {
+        inviteMembersStore.retryPreparation()
+    }
+
+    fun setInviteMembersSearchQuery(query: String) {
+        inviteMembersStore.setSearchQuery(query)
+    }
+
+    fun retryInviteMembersSearch() {
+        inviteMembersStore.retrySearch()
+    }
+
+    fun toggleInviteMemberSelection(profile: MatrixUserProfile) {
+        inviteMembersStore.toggleSelection(profile)
+    }
+
+    fun sendRoomMemberInvites() {
+        inviteMembersStore.sendInvites()
     }
 
     fun openProfileSettings() {
@@ -1559,7 +1630,7 @@ class AppViewModel(
 
     private suspend fun observeRoomDetailsRouteInputs() {
         combine(_uiState, roomListStore.state) { state, roomList ->
-            val route = state.route as? AppRoute.RoomDetails
+            val route = state.navState.activeRoomDetailsRoute
             val userId = state.matrixState.userIdOrNull()
             if (route == null || userId == null) {
                 null
@@ -1575,6 +1646,58 @@ class AppViewModel(
             } else {
                 roomDetailsStore.activate(input.target, input.seed)
             }
+        }
+    }
+
+    private suspend fun observeInviteMembersRouteInputs() {
+        combine(
+            _uiState,
+            roomListStore.state,
+            roomDetailsStore.state
+        ) { state, roomList, roomDetails ->
+            val route = state.route as? AppRoute.InviteRoomMembers
+            val userId = state.matrixState.userIdOrNull()
+            if (route == null || userId == null) {
+                return@combine null
+            }
+            val target = RoomDetailsTarget(userId, route.roomId)
+            val details = roomDetails
+                .takeIf { it.target == target }
+                ?.details
+                ?: roomList.roomForId(route.roomId)?.roomDetails
+            if (details == null || details.kind == MatrixRoomKind.DIRECT) {
+                null
+            } else {
+                InviteMembersRouteInput(
+                    target = InviteMembersTarget(userId, route.roomId),
+                    seedCanInviteMembers = details.capabilities.canInviteMembers == true
+                )
+            }
+        }.distinctUntilChanged().collect { input ->
+            if (input == null) {
+                inviteMembersStore.deactivate()
+            } else {
+                inviteMembersStore.activate(
+                    target = input.target,
+                    seedCanInviteMembers = input.seedCanInviteMembers
+                )
+            }
+        }
+    }
+
+    private fun handleAllInvitesSent(target: InviteMembersTarget) {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.InviteRoomMembers ?: return
+        if (
+            route.roomId != target.roomId ||
+            current.matrixState.userIdOrNull() != target.userId
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.navState.popActiveStack()
+                ?.let(state::withNavigationState)
+                ?: state
         }
     }
 
@@ -1701,6 +1824,7 @@ class AppViewModel(
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.shortLogId()})"
+            is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

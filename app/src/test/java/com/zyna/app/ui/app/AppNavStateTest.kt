@@ -277,6 +277,43 @@ class AppNavStateTest {
     }
 
     @Test
+    fun inviteMembersPushesFromDetailsAndMembersAndPopsToItsOwner() {
+        val roomId = "!room:example.org"
+        val detailsState = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+            .openRoomDetails()
+        val inviteRoute = AppRoute.InviteRoomMembers(roomId)
+
+        val fromDetails = detailsState.openInviteRoomMembers()
+        assertEquals(inviteRoute, fromDetails.top)
+        assertEquals(AppRoute.RoomDetails(roomId), fromDetails.activeRoomDetailsRoute)
+        assertEquals(AppRoute.RoomDetails(roomId), fromDetails.popActiveStack()?.top)
+
+        val fromMembers = detailsState.openRoomMembers().openInviteRoomMembers()
+        assertEquals(inviteRoute, fromMembers.top)
+        assertEquals(AppRoute.RoomDetails(roomId), fromMembers.activeRoomDetailsRoute)
+        assertEquals(AppRoute.RoomMembers(roomId), fromMembers.popActiveStack()?.top)
+        assertFalse(fromMembers.showsTabs)
+    }
+
+    @Test
+    fun openInviteMembers_isIgnoredWithoutOwnedDetailsOrMembersRoute() {
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = "!room:example.org", displayName = "Room")
+        val malformedMembersState = chatState.copy(
+            chatsStack = chatState.chatsStack + AppRoute.RoomMembers("!other:example.org")
+        )
+
+        assertEquals(chatState, chatState.openInviteRoomMembers())
+        assertEquals(malformedMembersState, malformedMembersState.openInviteRoomMembers())
+        assertEquals(AppNavState(), AppNavState().openInviteRoomMembers())
+        assertNull(chatState.activeRoomDetailsRoute)
+        assertNull(malformedMembersState.activeRoomDetailsRoute)
+    }
+
+    @Test
     fun userProfilePushesOnContactsStackAndHidesTabs() {
         val profileRoute = AppRoute.UserProfile(userId = "@alice:example.org")
         val state = AppNavState()

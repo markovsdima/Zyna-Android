@@ -20,6 +20,7 @@ import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReactionSender
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomAccess
+import com.zyna.app.data.matrix.MatrixRoomCapabilities
 import com.zyna.app.data.matrix.MatrixRoomDetails
 import com.zyna.app.data.matrix.MatrixRoomEncryption
 import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
@@ -195,6 +196,8 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         } else {
             existingRoom?.detailsCanonicalAlias
         },
+        detailsCanInviteMembers = roomDetails?.capabilities?.canInviteMembers
+            ?: existingRoom?.detailsCanInviteMembers,
         detailsUpdatedAtMillis = if (roomDetails != null) {
             updatedAtMillis
         } else {
@@ -243,6 +246,7 @@ class LocalCacheRepository(
                     historyVisibility = details.historyVisibility.name,
                     pinnedEventCount = details.pinnedEventCount,
                     canonicalAlias = details.canonicalAlias,
+                    canInviteMembers = details.capabilities.canInviteMembers,
                     detailsUpdatedAtMillis = now
                 )
                 if (updated == 0) {
@@ -270,6 +274,7 @@ class LocalCacheRepository(
                                 detailsHistoryVisibility = details.historyVisibility.name,
                                 detailsPinnedEventCount = details.pinnedEventCount,
                                 detailsCanonicalAlias = details.canonicalAlias,
+                                detailsCanInviteMembers = details.capabilities.canInviteMembers,
                                 detailsUpdatedAtMillis = now
                             )
                         )
@@ -2165,7 +2170,10 @@ class LocalCacheRepository(
                 MatrixRoomHistoryVisibility.CUSTOM
             ),
             pinnedEventCount = room.detailsPinnedEventCount ?: 0,
-            canonicalAlias = room.detailsCanonicalAlias
+            canonicalAlias = room.detailsCanonicalAlias,
+            capabilities = MatrixRoomCapabilities(
+                canInviteMembers = room.detailsCanInviteMembers
+            )
         )
     }
 

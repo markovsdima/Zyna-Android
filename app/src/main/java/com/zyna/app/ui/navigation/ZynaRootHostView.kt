@@ -41,6 +41,10 @@ import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
+import com.zyna.app.ui.invitemembers.InviteMembersScreenView
+import com.zyna.app.ui.invitemembers.InviteMembersScreenViewActions
+import com.zyna.app.ui.invitemembers.InviteMembersScreenViewState
+import com.zyna.app.ui.invitemembers.InviteMembersState
 import com.zyna.app.ui.profile.EditProfileScreenView
 import com.zyna.app.ui.profile.EditProfileScreenViewActions
 import com.zyna.app.ui.profile.EditProfileScreenViewState
@@ -58,6 +62,7 @@ import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
 import com.zyna.app.ui.roomdetails.RoomDetailsState
+import com.zyna.app.ui.roomdetails.RoomFeatureState
 import com.zyna.app.ui.roommembers.RoomMembersScreenView
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
@@ -110,8 +115,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
     private var latestRoomList: RoomListState? = null
-    private var latestRoomDetails: RoomDetailsState? = null
-    private var latestRoomMembers: RoomMembersState? = null
+    private var latestRoom: RoomFeatureState? = null
     private var latestContacts: ContactsFeatureState? = null
     private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
@@ -237,8 +241,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     fun render(
         state: AppUiState,
         roomList: RoomListState,
-        roomDetails: RoomDetailsState,
-        roomMembers: RoomMembersState,
+        room: RoomFeatureState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -256,8 +259,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
         latestState = state
         latestRoomList = roomList
-        latestRoomDetails = roomDetails
-        latestRoomMembers = roomMembers
+        latestRoom = room
         latestContacts = contacts
         latestProfile = profile
         latestCallHistory = callHistory
@@ -550,6 +552,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             }
         }
         if (
+            state.route is AppRoute.InviteRoomMembers &&
+            latestRoom?.inviteMembers?.isSending == true
+        ) {
+            return false
+        }
+        if (
             state.route is AppRoute.Chat &&
             (navigationStack.topView() as? ChatScreenView)?.canStartNavigationBackGesture() != true
         ) {
@@ -597,8 +605,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val roomList = latestRoomList ?: return
-        val roomDetails = latestRoomDetails ?: return
-        val roomMembers = latestRoomMembers ?: return
+        val room = latestRoom ?: return
         val contacts = latestContacts ?: return
         val profile = latestProfile ?: return
         val callHistory = latestCallHistory ?: return
@@ -613,8 +620,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val entries = entriesFor(
             state,
             roomList,
-            roomDetails,
-            roomMembers,
+            room,
             contacts,
             profile,
             callHistory,
@@ -729,8 +735,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun entriesFor(
         state: AppUiState,
         roomList: RoomListState,
-        roomDetails: RoomDetailsState,
-        roomMembers: RoomMembersState,
+        room: RoomFeatureState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -793,14 +798,21 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(
-                    roomDetails,
+                    room.details,
                     roomList,
                     actions,
                     dependencies,
                     route
                 )
                 is AppRoute.RoomMembers -> roomMembersEntry(
-                    roomMembers = roomMembers,
+                    roomMembers = room.members,
+                    roomDetails = room.details,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
+                )
+                is AppRoute.InviteRoomMembers -> inviteMembersEntry(
+                    inviteMembers = room.inviteMembers,
                     actions = actions,
                     dependencies = dependencies,
                     route = route
@@ -1183,6 +1195,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         historyVisibility = details?.historyVisibility,
                         pinnedEventCount = details?.pinnedEventCount,
                         canonicalAlias = details?.canonicalAlias,
+                        canInviteMembers = details?.capabilities?.canInviteMembers == true,
                         unreadCount = seed?.unreadCount ?: 0,
                         isMarkedUnread = seed?.isMarkedUnread == true,
                         isLoading = routeState?.isLoading ?: (details == null),
@@ -1201,6 +1214,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             }
                         },
                         onOpenMembers = actions.roomDetails.onOpenMembers,
+                        onOpenInviteMembers = actions.roomDetails.onOpenInviteMembers,
                         onRetry = actions.roomDetails.onRefresh
                     )
                 )
@@ -1210,6 +1224,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun roomMembersEntry(
         roomMembers: RoomMembersState,
+        roomDetails: RoomDetailsState,
         actions: ZynaRootActions,
         dependencies: ZynaRenderDependencies,
         route: AppRoute.RoomMembers
@@ -1224,6 +1239,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         searchQuery = routeState?.searchQuery.orEmpty(),
                         invitedMembers = routeState?.invitedMembers.orEmpty(),
                         joinedMembers = routeState?.joinedMembers.orEmpty(),
+                        canInviteMembers = roomDetails
+                            .takeIf { it.target?.roomId == route.roomId }
+                            ?.details
+                            ?.capabilities
+                            ?.canInviteMembers == true,
                         isLoading = routeState?.isLoading ?: true,
                         errorMessage = routeState?.errorMessage,
                         matrixMediaLoader = dependencies.matrixMediaLoader
@@ -1231,6 +1251,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions = RoomMembersScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onRetry = actions.roomMembers.onRetry,
+                        onOpenInviteMembers = actions.roomMembers.onOpenInviteMembers,
                         onSearchQueryChanged = actions.roomMembers.onSearchQueryChanged,
                         onOpenProfile = { member ->
                             actions.profile.user.onOpen(
@@ -1239,6 +1260,54 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                                 member.avatarUrl
                             )
                         }
+                    )
+                )
+            }
+        )
+    }
+
+    private fun inviteMembersEntry(
+        inviteMembers: InviteMembersState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.InviteRoomMembers
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "inviteMembers:${route.roomId}",
+            createView = { context -> InviteMembersScreenView(context) },
+            updateView = { view ->
+                val routeState = inviteMembers.takeIf { it.target?.roomId == route.roomId }
+                    ?: InviteMembersState(
+                        canInviteMembers = true,
+                        isPreparing = true
+                    )
+                (view as InviteMembersScreenView).render(
+                    state = InviteMembersScreenViewState(
+                        searchQuery = routeState.searchQuery,
+                        selectedMembers = routeState.selectedMembers,
+                        searchResults = routeState.searchResults,
+                        canInviteMembers = routeState.canInviteMembers,
+                        canSubmit = routeState.canSubmit,
+                        isPreparing = routeState.isPreparing,
+                        isSearching = routeState.isSearching,
+                        isSending = routeState.isSending,
+                        preparationErrorMessage = routeState.preparationErrorMessage,
+                        permissionErrorMessage = routeState.permissionErrorMessage,
+                        searchErrorMessage = routeState.searchErrorMessage,
+                        sendErrorMessage = routeState.sendErrorMessage,
+                        failedInviteCount = routeState.failedInviteCount,
+                        permissionDenied = routeState.permissionDenied,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = InviteMembersScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetryPreparation = actions.inviteMembers.onRetryPreparation,
+                        onRetrySearch = actions.inviteMembers.onRetrySearch,
+                        onSearchQueryChanged = actions.inviteMembers.onSearchQueryChanged,
+                        onToggleSelection = { candidate ->
+                            actions.inviteMembers.onToggleSelection(candidate.profile)
+                        },
+                        onSend = actions.inviteMembers.onSend
                     )
                 )
             }
@@ -1568,6 +1637,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
+            is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

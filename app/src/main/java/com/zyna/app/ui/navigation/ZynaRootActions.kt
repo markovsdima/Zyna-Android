@@ -6,6 +6,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.media.VoiceRecorderController
@@ -23,6 +24,7 @@ data class ZynaRootActions(
     val rooms: RoomsFeatureActions,
     val roomDetails: RoomDetailsFeatureActions,
     val roomMembers: RoomMembersFeatureActions,
+    val inviteMembers: InviteMembersFeatureActions,
     val chat: ChatFeatureActions,
     val profile: ProfileFeatureActions,
     val settings: SettingsFeatureActions
@@ -58,12 +60,22 @@ data class RoomsFeatureActions(
 
 data class RoomDetailsFeatureActions(
     val onRefresh: () -> Unit,
-    val onOpenMembers: () -> Unit
+    val onOpenMembers: () -> Unit,
+    val onOpenInviteMembers: () -> Unit
 )
 
 data class RoomMembersFeatureActions(
     val onRetry: () -> Unit,
-    val onSearchQueryChanged: (String) -> Unit
+    val onSearchQueryChanged: (String) -> Unit,
+    val onOpenInviteMembers: () -> Unit
+)
+
+data class InviteMembersFeatureActions(
+    val onRetryPreparation: () -> Unit,
+    val onRetrySearch: () -> Unit,
+    val onSearchQueryChanged: (String) -> Unit,
+    val onToggleSelection: (MatrixUserProfile) -> Unit,
+    val onSend: () -> Unit
 )
 
 data class ChatFeatureActions(

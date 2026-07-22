@@ -53,6 +53,7 @@ interface CachedRoomDao {
             detailsHistoryVisibility = :historyVisibility,
             detailsPinnedEventCount = :pinnedEventCount,
             detailsCanonicalAlias = :canonicalAlias,
+            detailsCanInviteMembers = COALESCE(:canInviteMembers, detailsCanInviteMembers),
             detailsUpdatedAtMillis = :detailsUpdatedAtMillis
         WHERE userId = :userId AND id = :roomId
         """
@@ -67,6 +68,7 @@ interface CachedRoomDao {
         historyVisibility: String,
         pinnedEventCount: Int,
         canonicalAlias: String?,
+        canInviteMembers: Boolean?,
         detailsUpdatedAtMillis: Long
     ): Int
 

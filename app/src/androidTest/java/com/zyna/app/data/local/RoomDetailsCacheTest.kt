@@ -4,6 +4,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.zyna.app.data.matrix.MatrixRoomAccess
+import com.zyna.app.data.matrix.MatrixRoomCapabilities
 import com.zyna.app.data.matrix.MatrixRoomDetails
 import com.zyna.app.data.matrix.MatrixRoomEncryption
 import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
@@ -98,6 +99,23 @@ class RoomDetailsCacheTest {
         )
     }
 
+    @Test
+    fun unknownCapabilityDoesNotOverwriteAKnownCachedPermission() = runBlocking {
+        val knownDetails = roomDetails(displayName = "Cached group")
+        repository.cacheRoomDetails(USER_ID, knownDetails)
+
+        val updatedDetails = knownDetails.copy(
+            topic = "Updated topic",
+            capabilities = MatrixRoomCapabilities()
+        )
+        repository.cacheRoomDetails(USER_ID, updatedDetails)
+
+        assertEquals(
+            updatedDetails.copy(capabilities = knownDetails.capabilities),
+            repository.observeRoomDetails(USER_ID, ROOM_ID).first { it != null }
+        )
+    }
+
     private fun roomDetails(displayName: String): MatrixRoomDetails {
         return MatrixRoomDetails(
             roomId = ROOM_ID,
@@ -111,7 +129,8 @@ class RoomDetailsCacheTest {
             access = MatrixRoomAccess.PRIVATE,
             historyVisibility = MatrixRoomHistoryVisibility.INVITED,
             pinnedEventCount = 2,
-            canonicalAlias = "#cached:example.org"
+            canonicalAlias = "#cached:example.org",
+            capabilities = MatrixRoomCapabilities(canInviteMembers = true)
         )
     }
 

@@ -16,6 +16,7 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixRoomAccess
 import com.zyna.app.data.matrix.MatrixRoomEncryption
@@ -37,6 +38,7 @@ internal data class RoomDetailsScreenViewState(
     val historyVisibility: MatrixRoomHistoryVisibility?,
     val pinnedEventCount: Int?,
     val canonicalAlias: String?,
+    val canInviteMembers: Boolean,
     val unreadCount: Long,
     val isMarkedUnread: Boolean,
     val isLoading: Boolean,
@@ -48,6 +50,7 @@ internal data class RoomDetailsScreenViewActions(
     val onBack: () -> Unit,
     val onOpenDirectUserProfile: () -> Unit,
     val onOpenMembers: () -> Unit,
+    val onOpenInviteMembers: () -> Unit,
     val onRetry: () -> Unit
 )
 
@@ -140,9 +143,15 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         isClickable = true
         isFocusable = true
     }
+    private val inviteAction = quickActionView(
+        context.getString(R.string.invite_members_action)
+    ).apply {
+        isEnabled = true
+        isClickable = true
+        isFocusable = true
+    }
     private val mediaAction = quickActionView("Media")
     private val searchAction = quickActionView("Search")
-    private val muteAction = quickActionView("Mute")
     private val infoHeader = sectionHeader("Info")
     private val roomIdRow = RoomDetailsRowView(context).apply {
         title = "Room ID"
@@ -279,9 +288,9 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             }
         )
         quickActions.addView(membersAction, quickActionLayoutParams())
+        quickActions.addView(inviteAction, quickActionLayoutParams())
         quickActions.addView(mediaAction, quickActionLayoutParams())
         quickActions.addView(searchAction, quickActionLayoutParams())
-        quickActions.addView(muteAction, quickActionLayoutParams())
         content.addView(
             quickActions,
             LinearLayout.LayoutParams(
@@ -335,6 +344,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         backButton.setOnClickListener { actions.onBack() }
         retryButton.setOnClickListener { actions.onRetry() }
         val showsMembers = state.kind != MatrixRoomKind.DIRECT
+        val showsInvite = showsMembers && state.canInviteMembers
         membersAction.visibility = if (showsMembers) VISIBLE else GONE
         membersAction.isFocusable = showsMembers
         membersRow.visibility = if (showsMembers) VISIBLE else GONE
@@ -346,6 +356,11 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             membersAction.setOnClickListener(null)
             membersRow.setOnClickListener(null)
         }
+        inviteAction.visibility = if (showsInvite) VISIBLE else GONE
+        inviteAction.isFocusable = showsInvite
+        inviteAction.setOnClickListener(
+            if (showsInvite) View.OnClickListener { actions.onOpenInviteMembers() } else null
+        )
         avatarView.render(
             userId = state.directUserId?.takeIf { it.isNotBlank() } ?: state.roomId,
             displayName = state.displayName,
@@ -415,7 +430,10 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         membersAction.setTextColor(palette.actionText)
         membersAction.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
         membersAction.alpha = 1f
-        listOf(mediaAction, searchAction, muteAction).forEach { action ->
+        inviteAction.setTextColor(palette.actionText)
+        inviteAction.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
+        inviteAction.alpha = 1f
+        listOf(mediaAction, searchAction).forEach { action ->
             action.setTextColor(palette.actionText)
             action.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
             action.alpha = DISABLED_ALPHA

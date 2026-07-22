@@ -64,6 +64,9 @@ sealed interface AppRoute {
     data class RoomMembers(
         val roomId: String
     ) : AppRoute
+    data class InviteRoomMembers(
+        val roomId: String
+    ) : AppRoute
     data class Chat(
         val roomId: String,
         val displayName: String
@@ -94,6 +97,22 @@ data class AppNavState(
                 return null
             }
             return chatsStack.filterIsInstance<AppRoute.Chat>().lastOrNull()
+        }
+
+    val activeRoomDetailsRoute: AppRoute.RoomDetails?
+        get() {
+            if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+                return null
+            }
+            val roomId = when (val topRoute = chatsStack.lastOrNull()) {
+                is AppRoute.RoomDetails -> topRoute.roomId
+                is AppRoute.RoomMembers -> topRoute.roomId
+                is AppRoute.InviteRoomMembers -> topRoute.roomId
+                else -> return null
+            }
+            return chatsStack
+                .filterIsInstance<AppRoute.RoomDetails>()
+                .lastOrNull { detailsRoute -> detailsRoute.roomId == roomId }
         }
 
     val showsTabs: Boolean
@@ -238,6 +257,24 @@ data class AppNavState(
         }
         val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
         return copy(chatsStack = chatsStack + AppRoute.RoomMembers(detailsRoute.roomId))
+    }
+
+    fun openInviteRoomMembers(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+            return this
+        }
+        val roomId = when (val route = chatsStack.lastOrNull()) {
+            is AppRoute.RoomDetails -> route.roomId
+            is AppRoute.RoomMembers -> route.roomId
+            else -> return this
+        }
+        val ownsRoom = chatsStack.any { route ->
+            route is AppRoute.RoomDetails && route.roomId == roomId
+        }
+        if (!ownsRoom) {
+            return this
+        }
+        return copy(chatsStack = chatsStack + AppRoute.InviteRoomMembers(roomId))
     }
 
     fun openProfileSettings(): AppNavState {

@@ -934,6 +934,24 @@ class MatrixClientService(
         } ?: error("Matrix room is not available")
     }
 
+    suspend fun canInviteRoomMembers(roomId: String): Boolean = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            room.getPowerLevels().use { powerLevels ->
+                powerLevels.canOwnUserInvite()
+            }
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun inviteRoomMember(roomId: String, userId: String) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val normalizedUserId = userId.trim()
+        require(normalizedUserId.isNotEmpty()) { "User ID is required" }
+        activeClient.getRoom(roomId)?.use { room ->
+            room.inviteUserById(normalizedUserId)
+        } ?: error("Matrix room is not available")
+    }
+
     fun roomListChangeSignals(): Flow<Unit> = callbackFlow {
         val service = roomListService
         if (service == null) {
@@ -1061,7 +1079,7 @@ class MatrixClientService(
 
         fun emit(roomInfo: RoomInfo) {
             val details = try {
-                roomInfo.toMatrixRoomDetails()
+                roomInfo.toMatrixRoomDetails(resolveCapabilities = true)
             } finally {
                 roomInfo.destroy()
             }
@@ -2272,7 +2290,7 @@ class MatrixClientService(
         val roomInfo = runCatching { roomInfo() }.getOrNull()
         try {
             val latestPreview = latestEvent().toRoomPreview()
-            val details = roomInfo?.toMatrixRoomDetails()
+            val details = roomInfo?.toMatrixRoomDetails(resolveCapabilities = false)
             return MatrixRoomSummary(
                 id = id(),
                 displayName = displayName()
@@ -2305,7 +2323,9 @@ class MatrixClientService(
             ?.takeIf { it.isNotBlank() }
     }
 
-    private fun RoomInfo.toMatrixRoomDetails(): MatrixRoomDetails {
+    private fun RoomInfo.toMatrixRoomDetails(
+        resolveCapabilities: Boolean
+    ): MatrixRoomDetails {
         val directUserId = directUserId()
         val kind = when {
             isSpace -> MatrixRoomKind.SPACE
@@ -2346,7 +2366,14 @@ class MatrixClientService(
                 is RoomHistoryVisibility.Custom -> MatrixRoomHistoryVisibility.CUSTOM
             },
             pinnedEventCount = pinnedEventIds.size,
-            canonicalAlias = canonicalAlias?.takeIf { it.isNotBlank() }
+            canonicalAlias = canonicalAlias?.takeIf { it.isNotBlank() },
+            capabilities = MatrixRoomCapabilities(
+                canInviteMembers = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
+                    powerLevels?.canOwnUserInvite()
+                } else {
+                    null
+                }
+            )
         )
     }
 

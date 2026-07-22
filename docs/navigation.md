@@ -11,6 +11,9 @@ navigation.
 - `ZynaRootHostView` renders the current stack and must not own navigation
   state such as the selected tab or nested screen flags.
 - A screen is represented by a typed `AppRoute`.
+- Typed parent routes may expose a derived active owner while matching child
+  routes are on top. This keeps parent feature observations alive for children
+  without moving navigation ownership into a store or view.
 - Navigation changes go through reducer-like functions on `AppNavState` and
   view-model actions.
 - Views may consume back only for internal UI state, such as an opened media

@@ -1,4 +1,4 @@
-package com.zyna.app.ui.roommembers
+package com.zyna.app.ui.invitemembers
 
 import android.content.Context
 import android.content.res.Configuration
@@ -26,48 +26,53 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
-import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberMembership
-import com.zyna.app.data.matrix.MatrixRoomMemberRole
 import com.zyna.app.ui.avatar.MatrixAvatarView
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
-internal data class RoomMembersScreenViewState(
+internal data class InviteMembersScreenViewState(
     val searchQuery: String,
-    val invitedMembers: List<MatrixRoomMember>,
-    val joinedMembers: List<MatrixRoomMember>,
+    val selectedMembers: List<InviteMemberCandidate>,
+    val searchResults: List<InviteMemberCandidate>,
     val canInviteMembers: Boolean,
-    val isLoading: Boolean,
-    val errorMessage: String?,
+    val canSubmit: Boolean,
+    val isPreparing: Boolean,
+    val isSearching: Boolean,
+    val isSending: Boolean,
+    val preparationErrorMessage: String?,
+    val permissionErrorMessage: String?,
+    val searchErrorMessage: String?,
+    val sendErrorMessage: String?,
+    val failedInviteCount: Int,
+    val permissionDenied: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?
 )
 
-internal data class RoomMembersScreenViewActions(
+internal data class InviteMembersScreenViewActions(
     val onBack: () -> Unit,
-    val onRetry: () -> Unit,
-    val onOpenInviteMembers: () -> Unit,
+    val onRetryPreparation: () -> Unit,
+    val onRetrySearch: () -> Unit,
     val onSearchQueryChanged: (String) -> Unit,
-    val onOpenProfile: (MatrixRoomMember) -> Unit
+    val onToggleSelection: (InviteMemberCandidate) -> Unit,
+    val onSend: () -> Unit
 )
 
-internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
+internal class InviteMembersScreenView(context: Context) : FrameLayout(context) {
     private val density = resources.displayMetrics.density
     private var palette = SettingsPalette.from(context)
     private var statusTopInset = 0
     private var bottomInset = 0
     private var isApplyingSearchState = false
-    private var actions: RoomMembersScreenViewActions? = null
+    private var actions: InviteMembersScreenViewActions? = null
 
-    private val root = LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
-    }
+    private val root = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
     private val topBar = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
     }
     private val backButton = TextView(context).apply {
-        text = context.getString(R.string.room_members_back)
+        text = context.getString(R.string.common_cancel)
         textSize = 16f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
@@ -76,7 +81,7 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         isFocusable = true
     }
     private val titleText = TextView(context).apply {
-        text = context.getString(R.string.room_members_title)
+        text = context.getString(R.string.invite_members_title)
         textSize = 17f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
@@ -84,10 +89,8 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }
-    private val inviteButton = TextView(context).apply {
-        text = "+"
-        contentDescription = context.getString(R.string.room_members_invite)
-        textSize = 28f
+    private val sendButton = TextView(context).apply {
+        textSize = 16f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
         includeFontPadding = false
@@ -96,7 +99,7 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
     }
     private val searchField = EditText(context).apply {
         setSingleLine(true)
-        hint = context.getString(R.string.room_members_search_hint)
+        hint = context.getString(R.string.invite_members_search_hint)
         textSize = 16f
         imeOptions = EditorInfo.IME_ACTION_SEARCH
         inputType = android.text.InputType.TYPE_CLASS_TEXT
@@ -115,7 +118,7 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         ellipsize = TextUtils.TruncateAt.END
     }
     private val retryButton = TextView(context).apply {
-        text = context.getString(R.string.room_members_retry)
+        text = context.getString(R.string.invite_members_retry)
         textSize = 14f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
@@ -129,9 +132,9 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         clipToPadding = false
         itemAnimator = null
     }
-    private val adapter = RoomMembersAdapter(
-        invitedTitle = context.getString(R.string.room_members_invited_section),
-        joinedTitle = context.getString(R.string.room_members_joined_section)
+    private val adapter = InviteMembersAdapter(
+        selectedTitle = context.getString(R.string.invite_members_selected_section),
+        resultsTitle = context.getString(R.string.invite_members_results_section)
     )
 
     init {
@@ -159,7 +162,7 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         )
         topBar.addView(
-            inviteButton,
+            sendButton,
             LinearLayout.LayoutParams(dp(TOP_BAR_SIDE_WIDTH_DP), ViewGroup.LayoutParams.MATCH_PARENT)
         )
         root.addView(
@@ -234,7 +237,7 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
             }
             if (bottomInset != systemBars.bottom) {
                 bottomInset = systemBars.bottom
-                updateListPadding()
+                recyclerView.updatePadding(bottom = bottomInset + dp(12))
             }
             insets
         }
@@ -253,24 +256,42 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         adapter.notifyAppearanceChanged()
     }
 
-    fun render(state: RoomMembersScreenViewState, actions: RoomMembersScreenViewActions) {
+    fun render(state: InviteMembersScreenViewState, actions: InviteMembersScreenViewActions) {
         this.actions = actions
         adapter.actions = actions
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.palette = palette
 
-        backButton.setOnClickListener { actions.onBack() }
-        inviteButton.visibility = if (state.canInviteMembers) VISIBLE else INVISIBLE
-        inviteButton.isEnabled = state.canInviteMembers
-        inviteButton.setOnClickListener(
-            if (state.canInviteMembers) {
-                View.OnClickListener { actions.onOpenInviteMembers() }
-            } else {
-                null
-            }
+        backButton.isEnabled = !state.isSending
+        backButton.alpha = if (state.isSending) DISABLED_ALPHA else 1f
+        backButton.setOnClickListener(
+            if (state.isSending) null else View.OnClickListener { actions.onBack() }
         )
-        retryButton.setOnClickListener { actions.onRetry() }
-
+        retryButton.setOnClickListener {
+            if (
+                state.searchErrorMessage != null &&
+                state.preparationErrorMessage == null &&
+                state.permissionErrorMessage == null
+            ) {
+                actions.onRetrySearch()
+            } else {
+                actions.onRetryPreparation()
+            }
+        }
+        sendButton.text = when {
+            state.isSending -> context.getString(R.string.invite_members_sending)
+            state.selectedMembers.isEmpty() -> context.getString(R.string.invite_members_send)
+            else -> context.getString(
+                R.string.invite_members_send_count,
+                state.selectedMembers.size
+            )
+        }
+        sendButton.isEnabled = state.canSubmit
+        sendButton.alpha = if (state.canSubmit || state.isSending) 1f else DISABLED_ALPHA
+        sendButton.setOnClickListener(
+            if (state.canSubmit) View.OnClickListener { actions.onSend() } else null
+        )
+        searchField.isEnabled = !state.isSending && !state.permissionDenied
         if (searchField.text.toString() != state.searchQuery) {
             isApplyingSearchState = true
             searchField.setText(state.searchQuery)
@@ -278,22 +299,46 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
             isApplyingSearchState = false
         }
 
-        val visibleCount = state.invitedMembers.size + state.joinedMembers.size
-        statusText.text = when {
-            state.errorMessage != null -> state.errorMessage
-            state.isLoading -> context.getString(R.string.room_members_loading)
-            visibleCount == 0 && state.searchQuery.isNotBlank() -> {
-                context.getString(R.string.room_members_no_results)
+        statusText.text = state.statusText(context)
+        retryButton.visibility = if (
+            state.preparationErrorMessage != null ||
+            state.permissionErrorMessage != null ||
+            state.searchErrorMessage != null
+        ) VISIBLE else INVISIBLE
+        adapter.submit(
+            selected = state.selectedMembers,
+            results = state.searchResults,
+            interactionsEnabled = !state.isSending && state.canInviteMembers
+        )
+    }
+
+    private fun InviteMembersScreenViewState.statusText(context: Context): String {
+        return when {
+            permissionDenied -> context.getString(R.string.invite_members_permission_denied)
+            permissionErrorMessage != null -> {
+                context.getString(R.string.invite_members_permission_error)
             }
-            visibleCount == 0 -> context.getString(R.string.room_members_empty)
+            preparationErrorMessage != null -> {
+                context.getString(R.string.invite_members_preparation_error)
+            }
+            isPreparing -> context.getString(R.string.invite_members_preparing)
+            failedInviteCount > 0 -> resources.getQuantityString(
+                R.plurals.invite_members_failed_count,
+                failedInviteCount,
+                failedInviteCount
+            )
+            sendErrorMessage != null -> context.getString(R.string.invite_members_send_error)
+            searchQuery.isBlank() -> context.getString(R.string.invite_members_search_prompt)
+            searchQuery.trim().length < INVITE_MEMBERS_MIN_SEARCH_LENGTH -> {
+                context.getString(R.string.invite_members_min_characters)
+            }
+            isSearching -> context.getString(R.string.invite_members_searching)
+            searchErrorMessage != null -> context.getString(R.string.invite_members_search_error)
+            searchResults.isEmpty() && selectedMembers.isEmpty() -> {
+                context.getString(R.string.invite_members_no_results)
+            }
             else -> ""
         }
-        retryButton.visibility = if (state.errorMessage != null) VISIBLE else INVISIBLE
-
-        adapter.submitMembers(
-            invited = state.invitedMembers,
-            joined = state.joinedMembers
-        )
     }
 
     private fun applyPalette() {
@@ -301,8 +346,8 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.actionText)
-        inviteButton.setTextColor(palette.actionText)
         titleText.setTextColor(palette.titleText)
+        sendButton.setTextColor(palette.actionText)
         searchField.setTextColor(palette.primaryText)
         searchField.setHintTextColor(palette.secondaryText)
         searchField.background = roundedDrawable(palette.surface, dp(12))
@@ -320,10 +365,6 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         topBar.layoutParams = params
     }
 
-    private fun updateListPadding() {
-        recyclerView.updatePadding(bottom = bottomInset + dp(12))
-    }
-
     private fun roundedDrawable(color: Int, radiusPx: Int): GradientDrawable {
         return GradientDrawable().apply {
             setColor(color)
@@ -331,149 +372,144 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         }
     }
 
-    private fun dp(value: Int): Int {
-        return (value * density).roundToInt()
-    }
+    private fun dp(value: Int): Int = (value * density).roundToInt()
 
     private companion object {
         const val TOP_BAR_HEIGHT_DP = 64
-        const val TOP_BAR_SIDE_WIDTH_DP = 88
+        const val TOP_BAR_SIDE_WIDTH_DP = 96
         const val STATUS_ROW_HEIGHT_DP = 44
+        const val DISABLED_ALPHA = 0.42f
     }
 }
 
-private class RoomMembersAdapter(
-    invitedTitle: String,
-    joinedTitle: String
+private class InviteMembersAdapter(
+    selectedTitle: String,
+    resultsTitle: String
 ) {
-    private val invitedHeader = RoomMemberHeaderAdapter(invitedTitle)
-    private val invitedMembers = RoomMemberListAdapter()
-    private val joinedHeader = RoomMemberHeaderAdapter(joinedTitle)
-    private val joinedMembers = RoomMemberListAdapter()
+    private val selectedHeader = InviteMemberHeaderAdapter(selectedTitle)
+    private val selectedMembers = InviteMemberListAdapter(selectedSection = true)
+    private val resultsHeader = InviteMemberHeaderAdapter(resultsTitle)
+    private val results = InviteMemberListAdapter(selectedSection = false)
     private var submissionGeneration = 0L
 
     val recyclerAdapter = ConcatAdapter(
-        invitedHeader,
-        invitedMembers,
-        joinedHeader,
-        joinedMembers
+        selectedHeader,
+        selectedMembers,
+        resultsHeader,
+        results
     )
 
-    var actions: RoomMembersScreenViewActions? = null
+    var actions: InviteMembersScreenViewActions? = null
         set(value) {
             field = value
-            invitedMembers.actions = value
-            joinedMembers.actions = value
+            selectedMembers.actions = value
+            results.actions = value
         }
-
     var matrixMediaLoader: MatrixMediaLoader? = null
         set(value) {
             field = value
-            invitedMembers.matrixMediaLoader = value
-            joinedMembers.matrixMediaLoader = value
+            selectedMembers.matrixMediaLoader = value
+            results.matrixMediaLoader = value
         }
-
     var palette: SettingsPalette? = null
         set(value) {
             field = value
-            invitedHeader.palette = value
-            invitedMembers.palette = value
-            joinedHeader.palette = value
-            joinedMembers.palette = value
+            selectedHeader.palette = value
+            selectedMembers.palette = value
+            resultsHeader.palette = value
+            results.palette = value
         }
 
-    fun submitMembers(
-        invited: List<MatrixRoomMember>,
-        joined: List<MatrixRoomMember>
+    fun submit(
+        selected: List<InviteMemberCandidate>,
+        results: List<InviteMemberCandidate>,
+        interactionsEnabled: Boolean
     ) {
         submissionGeneration += 1
         val generation = submissionGeneration
-        var invitedCommitted = false
-        var joinedCommitted = false
+        var selectedCommitted = false
+        var resultsCommitted = false
 
         fun updateHeadersAfterBothListsCommit() {
             if (
                 generation == submissionGeneration &&
-                invitedCommitted &&
-                joinedCommitted
+                selectedCommitted &&
+                resultsCommitted
             ) {
-                invitedHeader.setVisible(invited.isNotEmpty())
-                joinedHeader.setVisible(invited.isNotEmpty() && joined.isNotEmpty())
+                selectedHeader.setVisible(selected.isNotEmpty())
+                resultsHeader.setVisible(results.isNotEmpty())
             }
         }
 
-        invitedMembers.submitList(invited) {
-            invitedCommitted = true
+        selectedMembers.interactionsEnabled = interactionsEnabled
+        this.results.interactionsEnabled = interactionsEnabled
+        selectedMembers.submitList(selected) {
+            selectedCommitted = true
             updateHeadersAfterBothListsCommit()
         }
-        joinedMembers.submitList(joined) {
-            joinedCommitted = true
+        this.results.submitList(results) {
+            resultsCommitted = true
             updateHeadersAfterBothListsCommit()
         }
     }
 
     fun notifyAppearanceChanged() {
-        invitedHeader.notifyAppearanceChanged()
-        invitedMembers.notifyDataSetChanged()
-        joinedHeader.notifyAppearanceChanged()
-        joinedMembers.notifyDataSetChanged()
+        selectedHeader.notifyAppearanceChanged()
+        selectedMembers.notifyDataSetChanged()
+        resultsHeader.notifyAppearanceChanged()
+        results.notifyDataSetChanged()
     }
 }
 
-private class RoomMemberHeaderAdapter(
+private class InviteMemberHeaderAdapter(
     private val title: String
-) : RecyclerView.Adapter<RoomMemberHeaderViewHolder>() {
+) : RecyclerView.Adapter<InviteMemberHeaderViewHolder>() {
     var palette: SettingsPalette? = null
     private var isVisible = false
 
     override fun getItemCount(): Int = if (isVisible) 1 else 0
 
-    override fun onCreateViewHolder(
-        parent: ViewGroup,
-        viewType: Int
-    ): RoomMemberHeaderViewHolder {
-        return RoomMemberHeaderViewHolder(parent.context)
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): InviteMemberHeaderViewHolder {
+        return InviteMemberHeaderViewHolder(parent.context)
     }
 
-    override fun onBindViewHolder(holder: RoomMemberHeaderViewHolder, position: Int) {
-        holder.bind(
-            title = title,
-            palette = palette ?: SettingsPalette.from(holder.itemView.context)
-        )
+    override fun onBindViewHolder(holder: InviteMemberHeaderViewHolder, position: Int) {
+        holder.bind(title, palette ?: SettingsPalette.from(holder.itemView.context))
     }
 
     fun setVisible(visible: Boolean) {
-        if (isVisible == visible) {
-            return
-        }
+        if (isVisible == visible) return
         isVisible = visible
-        if (visible) {
-            notifyItemInserted(0)
-        } else {
-            notifyItemRemoved(0)
-        }
+        if (visible) notifyItemInserted(0) else notifyItemRemoved(0)
     }
 
     fun notifyAppearanceChanged() {
-        if (isVisible) {
-            notifyItemChanged(0)
-        }
+        if (isVisible) notifyItemChanged(0)
     }
 }
 
-private class RoomMemberListAdapter :
-    ListAdapter<MatrixRoomMember, RoomMemberViewHolder>(RoomMemberDiffCallback) {
-    var actions: RoomMembersScreenViewActions? = null
+private class InviteMemberListAdapter(
+    private val selectedSection: Boolean
+) : ListAdapter<InviteMemberCandidate, InviteMemberViewHolder>(InviteMemberDiffCallback) {
+    var actions: InviteMembersScreenViewActions? = null
     var matrixMediaLoader: MatrixMediaLoader? = null
     var palette: SettingsPalette? = null
+    var interactionsEnabled = true
+        set(value) {
+            if (field == value) return
+            field = value
+            notifyDataSetChanged()
+        }
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RoomMemberViewHolder {
-        return RoomMemberViewHolder(parent.context)
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): InviteMemberViewHolder {
+        return InviteMemberViewHolder(parent.context)
     }
 
-    override fun onBindViewHolder(holder: RoomMemberViewHolder, position: Int) {
+    override fun onBindViewHolder(holder: InviteMemberViewHolder, position: Int) {
         holder.bind(
-            member = getItem(position),
+            candidate = getItem(position),
+            isSelected = selectedSection,
+            interactionsEnabled = interactionsEnabled,
             matrixMediaLoader = matrixMediaLoader,
             palette = palette ?: SettingsPalette.from(holder.itemView.context),
             actions = actions
@@ -481,7 +517,7 @@ private class RoomMemberListAdapter :
     }
 }
 
-private class RoomMemberHeaderViewHolder(context: Context) : RecyclerView.ViewHolder(
+private class InviteMemberHeaderViewHolder(context: Context) : RecyclerView.ViewHolder(
     TextView(context).apply {
         layoutParams = RecyclerView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -490,8 +526,12 @@ private class RoomMemberHeaderViewHolder(context: Context) : RecyclerView.ViewHo
         textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
         includeFontPadding = true
-        isFocusable = true
-        updatePadding(left = dp(context, 16), right = dp(context, 16), top = dp(context, 14), bottom = dp(context, 6))
+        updatePadding(
+            left = dp(context, 16),
+            right = dp(context, 16),
+            top = dp(context, 14),
+            bottom = dp(context, 6)
+        )
     }
 ) {
     private val textView = itemView as TextView
@@ -500,28 +540,29 @@ private class RoomMemberHeaderViewHolder(context: Context) : RecyclerView.ViewHo
         textView.text = title.uppercase()
         textView.setTextColor(palette.secondaryText)
         textView.setBackgroundColor(palette.background)
-        textView.contentDescription = title
     }
 }
 
-private class RoomMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
+private class InviteMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
     LinearLayout(context).apply {
-        orientation = LinearLayout.VERTICAL
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
         layoutParams = RecyclerView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
         )
+        updatePadding(
+            left = dp(context, 16),
+            right = dp(context, 16),
+            top = dp(context, 9),
+            bottom = dp(context, 9)
+        )
+        isClickable = true
+        isFocusable = true
     }
 ) {
     private val density = context.resources.displayMetrics.density
-    private val root = itemView as LinearLayout
-    private val row = LinearLayout(context).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        isClickable = true
-        isFocusable = true
-        updatePadding(left = dp(16), right = dp(16), top = dp(9), bottom = dp(9))
-    }
+    private val row = itemView as LinearLayout
     private val avatar = MatrixAvatarView(context)
     private val textColumn = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -540,23 +581,18 @@ private class RoomMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
         ellipsize = TextUtils.TruncateAt.MIDDLE
         includeFontPadding = true
     }
-    private val roleText = TextView(context).apply {
-        textSize = 12f
+    private val accessory = TextView(context).apply {
+        textSize = 13f
         typeface = Typeface.DEFAULT_BOLD
         gravity = Gravity.CENTER
         includeFontPadding = false
-        maxLines = 1
         updatePadding(left = dp(9), right = dp(9), top = dp(5), bottom = dp(5))
     }
-    private val separator = View(context)
 
     init {
-        root.addView(row)
         row.addView(
             avatar,
-            LinearLayout.LayoutParams(dp(44), dp(44)).apply {
-                rightMargin = dp(12)
-            }
+            LinearLayout.LayoutParams(dp(44), dp(44)).apply { rightMargin = dp(12) }
         )
         textColumn.addView(nameText)
         textColumn.addView(userIdText)
@@ -565,103 +601,94 @@ private class RoomMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         )
         row.addView(
-            roleText,
+            accessory,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                leftMargin = dp(8)
-            }
-        )
-        root.addView(
-            separator,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1).apply {
-                leftMargin = dp(72)
-            }
+            ).apply { leftMargin = dp(8) }
         )
     }
 
     fun bind(
-        member: MatrixRoomMember,
+        candidate: InviteMemberCandidate,
+        isSelected: Boolean,
+        interactionsEnabled: Boolean,
         matrixMediaLoader: MatrixMediaLoader?,
         palette: SettingsPalette,
-        actions: RoomMembersScreenViewActions?
+        actions: InviteMembersScreenViewActions?
     ) {
-        root.setBackgroundColor(palette.background)
+        val profile = candidate.profile
         row.setBackgroundColor(palette.background)
         avatar.setPaletteBackground(palette.background)
         avatar.render(
-            userId = member.userId,
-            displayName = member.displayNameOrUserId,
-            avatarUrl = member.avatarUrl,
+            userId = profile.userId,
+            displayName = profile.effectiveDisplayName,
+            avatarUrl = profile.avatarUrl,
             localAvatarPath = null,
             matrixMediaLoader = matrixMediaLoader,
             sizePx = dp(44)
         )
-        nameText.text = member.displayNameOrUserId
-        userIdText.text = member.userId
+        nameText.text = profile.effectiveDisplayName
+        userIdText.text = profile.userId
         nameText.setTextColor(palette.titleText)
         userIdText.setTextColor(palette.secondaryText)
-        separator.setBackgroundColor(palette.separator)
 
-        val roleLabel = member.roleLabel(itemView.context)
-        roleText.text = roleLabel.orEmpty()
-        roleText.visibility = if (roleLabel == null) View.GONE else View.VISIBLE
-        roleText.setTextColor(palette.actionText)
-        roleText.background = roundedDrawable(palette.selectedFill, dp(12))
+        val membershipLabel = when (candidate.membership) {
+            MatrixRoomMemberMembership.JOINED -> {
+                itemView.context.getString(R.string.invite_members_already_member)
+            }
+            MatrixRoomMemberMembership.INVITED -> {
+                itemView.context.getString(R.string.invite_members_already_invited)
+            }
+            null -> null
+        }
+        accessory.text = when {
+            membershipLabel != null -> membershipLabel
+            isSelected -> itemView.context.getString(R.string.invite_members_remove)
+            else -> itemView.context.getString(R.string.invite_members_add)
+        }
+        accessory.setTextColor(palette.actionText)
+        accessory.background = GradientDrawable().apply {
+            setColor(palette.selectedFill)
+            cornerRadius = dp(12).toFloat()
+        }
 
-        row.setOnClickListener { actions?.onOpenProfile(member) }
+        val canToggle = interactionsEnabled && membershipLabel == null
+        row.isEnabled = canToggle
+        row.alpha = if (membershipLabel == null) 1f else DISABLED_ALPHA
+        row.setOnClickListener(
+            if (canToggle) {
+                View.OnClickListener { actions?.onToggleSelection(candidate) }
+            } else {
+                null
+            }
+        )
         itemView.contentDescription = buildString {
-            append(member.displayNameOrUserId)
+            append(profile.effectiveDisplayName)
             append(". ")
-            append(member.userId)
-            roleLabel?.let {
-                append(". ")
-                append(it)
-            }
+            append(profile.userId)
+            append(". ")
+            append(accessory.text)
         }
     }
 
-    private fun MatrixRoomMember.roleLabel(context: Context): String? {
-        if (membership == MatrixRoomMemberMembership.INVITED) {
-            return context.getString(R.string.room_member_invited)
-        }
-        return when (role) {
-            MatrixRoomMemberRole.OWNER -> context.getString(R.string.room_member_role_owner)
-            MatrixRoomMemberRole.ADMIN -> context.getString(R.string.room_member_role_admin)
-            MatrixRoomMemberRole.MODERATOR -> {
-                context.getString(R.string.room_member_role_moderator)
-            }
-            MatrixRoomMemberRole.MEMBER -> null
-        }
-    }
+    private fun dp(value: Int): Int = (value * density).roundToInt()
 
-    private fun roundedDrawable(color: Int, radiusPx: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = radiusPx.toFloat()
-        }
-    }
-
-    private fun dp(value: Int): Int {
-        return (value * density).roundToInt()
+    private companion object {
+        const val DISABLED_ALPHA = 0.52f
     }
 }
 
-private object RoomMemberDiffCallback : DiffUtil.ItemCallback<MatrixRoomMember>() {
+private object InviteMemberDiffCallback : DiffUtil.ItemCallback<InviteMemberCandidate>() {
     override fun areItemsTheSame(
-        oldItem: MatrixRoomMember,
-        newItem: MatrixRoomMember
-    ): Boolean {
-        return oldItem.userId == newItem.userId && oldItem.membership == newItem.membership
-    }
+        oldItem: InviteMemberCandidate,
+        newItem: InviteMemberCandidate
+    ): Boolean = oldItem.profile.userId == newItem.profile.userId
 
     override fun areContentsTheSame(
-        oldItem: MatrixRoomMember,
-        newItem: MatrixRoomMember
-    ): Boolean {
-        return oldItem == newItem
-    }
+        oldItem: InviteMemberCandidate,
+        newItem: InviteMemberCandidate
+    ): Boolean = oldItem == newItem
 }
 
 private fun dp(context: Context, value: Int): Int {

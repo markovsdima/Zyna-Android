@@ -23,6 +23,11 @@ enum class MatrixRoomHistoryVisibility {
     CUSTOM
 }
 
+data class MatrixRoomCapabilities(
+    /** Null means the capability has not been resolved for the active room. */
+    val canInviteMembers: Boolean? = null
+)
+
 /**
  * Immutable Matrix-independent projection used by the room-details feature.
  * SDK-owned values are mapped and disposed before this model crosses the data boundary.
@@ -39,5 +44,6 @@ data class MatrixRoomDetails(
     val access: MatrixRoomAccess,
     val historyVisibility: MatrixRoomHistoryVisibility,
     val pinnedEventCount: Int,
-    val canonicalAlias: String?
+    val canonicalAlias: String?,
+    val capabilities: MatrixRoomCapabilities = MatrixRoomCapabilities()
 )

@@ -3,7 +3,9 @@ package com.zyna.app.ui.roomdetails
 import androidx.annotation.MainThread
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixClientService
+import com.zyna.app.data.matrix.MatrixRoomCapabilities
 import com.zyna.app.data.matrix.MatrixRoomDetails
+import com.zyna.app.data.matrix.MatrixRoomKind
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +32,7 @@ data class RoomDetailsState(
 internal class RoomDetailsDriver(
     val observeCachedDetails: (userId: String, roomId: String) -> Flow<MatrixRoomDetails?>,
     val observeLiveDetails: (roomId: String) -> Flow<MatrixRoomDetails>,
+    val loadCapabilities: suspend (roomId: String) -> MatrixRoomCapabilities,
     val cacheDetails: suspend (userId: String, details: MatrixRoomDetails) -> Unit
 )
 
@@ -39,6 +42,7 @@ internal class RoomDetailsDriver(
  * The target includes the session user so a late callback from an old session cannot update
  * a room with the same id after account replacement. In-memory room-list details seed the first
  * frame, the Room flow restores persisted details, and live values are written through to cache.
+ * Invite permission is resolved only for an active non-direct room when live data leaves it unknown.
  */
 internal class RoomDetailsStore(
     private val scope: CoroutineScope,
@@ -50,8 +54,12 @@ internal class RoomDetailsStore(
 
     private var generation = 0L
     private var livePublishedGeneration = Long.MIN_VALUE
+    private var liveCapabilityRevision = 0L
+    private var capabilityLoadGeneration = Long.MIN_VALUE
+    private var resolvedCapabilities: MatrixRoomCapabilities? = null
     private var cacheJob: Job? = null
     private var liveJob: Job? = null
+    private var capabilitiesJob: Job? = null
 
     @MainThread
     fun activate(target: RoomDetailsTarget, seed: MatrixRoomSummary?) {
@@ -62,7 +70,11 @@ internal class RoomDetailsStore(
         val compatibleSeed = seed?.takeIf { it.id == normalizedTarget.roomId }
         if (
             _state.value.target == normalizedTarget &&
-            (cacheJob?.isActive == true || liveJob?.isActive == true)
+            (
+                cacheJob?.isActive == true ||
+                    liveJob?.isActive == true ||
+                    capabilitiesJob?.isActive == true
+                )
         ) {
             if (_state.value.seed != compatibleSeed) {
                 val seededDetails = compatibleSeed?.roomDetails
@@ -95,15 +107,25 @@ internal class RoomDetailsStore(
 
     @MainThread
     fun deactivate() {
-        if (_state.value.target == null && cacheJob == null && liveJob == null) {
+        if (
+            _state.value.target == null &&
+            cacheJob == null &&
+            liveJob == null &&
+            capabilitiesJob == null
+        ) {
             return
         }
         generation += 1
         livePublishedGeneration = Long.MIN_VALUE
+        liveCapabilityRevision = 0L
+        capabilityLoadGeneration = Long.MIN_VALUE
+        resolvedCapabilities = null
         cacheJob?.cancel()
         cacheJob = null
         liveJob?.cancel()
         liveJob = null
+        capabilitiesJob?.cancel()
+        capabilitiesJob = null
         _state.value = RoomDetailsState()
     }
 
@@ -115,8 +137,12 @@ internal class RoomDetailsStore(
         generation += 1
         val requestGeneration = generation
         livePublishedGeneration = Long.MIN_VALUE
+        liveCapabilityRevision = 0L
+        capabilityLoadGeneration = Long.MIN_VALUE
+        resolvedCapabilities = retainedDetails?.capabilities.knownOrNull()
         cacheJob?.cancel()
         liveJob?.cancel()
+        capabilitiesJob?.cancel()
         _state.value = RoomDetailsState(
             target = target,
             seed = seed,
@@ -129,13 +155,20 @@ internal class RoomDetailsStore(
                 driver.observeCachedDetails(target.userId, target.roomId).collect { cachedDetails ->
                     if (
                         !isCurrent(target, requestGeneration) ||
-                        livePublishedGeneration == requestGeneration ||
                         cachedDetails?.roomId != target.roomId
                     ) {
                         return@collect
                     }
+                    val cachedCapabilities = cachedDetails?.capabilities.knownOrNull()
+                    if (resolvedCapabilities == null && cachedCapabilities != null) {
+                        resolvedCapabilities = cachedCapabilities
+                    }
+                    if (livePublishedGeneration == requestGeneration) {
+                        publishResolvedCapabilities(target, requestGeneration)
+                        return@collect
+                    }
                     _state.value = _state.value.copy(
-                        details = cachedDetails,
+                        details = cachedDetails?.withCapabilitiesFallback(resolvedCapabilities),
                         isLoading = false,
                         errorMessage = null
                     )
@@ -162,14 +195,23 @@ internal class RoomDetailsStore(
                     if (!isCurrent(target, requestGeneration) || details.roomId != target.roomId) {
                         return@collect
                     }
+                    val liveCapabilities = details.capabilities.knownOrNull()
+                    liveCapabilities?.let {
+                        liveCapabilityRevision += 1
+                        resolvedCapabilities = it
+                    }
+                    val resolvedDetails = details.withCapabilitiesFallback(resolvedCapabilities)
                     livePublishedGeneration = requestGeneration
                     _state.value = _state.value.copy(
-                        details = details,
+                        details = resolvedDetails,
                         isLoading = false,
                         errorMessage = null
                     )
+                    if (liveCapabilities == null) {
+                        startCapabilitiesLoad(target, requestGeneration, resolvedDetails)
+                    }
                     try {
-                        driver.cacheDetails(target.userId, details)
+                        driver.cacheDetails(target.userId, resolvedDetails)
                     } catch (error: CancellationException) {
                         throw error
                     } catch (error: Throwable) {
@@ -203,6 +245,90 @@ internal class RoomDetailsStore(
         }
     }
 
+    private fun startCapabilitiesLoad(
+        target: RoomDetailsTarget,
+        requestGeneration: Long,
+        details: MatrixRoomDetails
+    ) {
+        if (
+            details.kind == MatrixRoomKind.DIRECT ||
+            capabilityLoadGeneration == requestGeneration
+        ) {
+            return
+        }
+        capabilityLoadGeneration = requestGeneration
+        val capabilityRevisionAtStart = liveCapabilityRevision
+        val nextCapabilitiesJob = scope.launch {
+            try {
+                val capabilities = driver.loadCapabilities(target.roomId).knownOrNull()
+                    ?: return@launch
+                if (
+                    !isCurrent(target, requestGeneration) ||
+                    liveCapabilityRevision != capabilityRevisionAtStart
+                ) {
+                    return@launch
+                }
+                resolvedCapabilities = capabilities
+                val details = _state.value.details ?: return@launch
+                val resolvedDetails = details.copy(capabilities = capabilities)
+                if (resolvedDetails == details) {
+                    return@launch
+                }
+                _state.value = _state.value.copy(details = resolvedDetails)
+                try {
+                    driver.cacheDetails(target.userId, resolvedDetails)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (isCurrent(target, requestGeneration)) {
+                        onWarning("Failed to cache room details", error)
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (!isCurrent(target, requestGeneration)) {
+                    return@launch
+                }
+                onWarning("Failed to load room capabilities", error)
+            }
+        }
+        capabilitiesJob = nextCapabilitiesJob
+        nextCapabilitiesJob.invokeOnCompletion {
+            if (capabilitiesJob === nextCapabilitiesJob) {
+                capabilitiesJob = null
+            }
+        }
+    }
+
+    private fun publishResolvedCapabilities(
+        target: RoomDetailsTarget,
+        requestGeneration: Long
+    ) {
+        val capabilities = resolvedCapabilities ?: return
+        if (!isCurrent(target, requestGeneration)) {
+            return
+        }
+        val details = _state.value.details ?: return
+        if (details.capabilities.knownOrNull() != null) {
+            return
+        }
+        _state.value = _state.value.copy(details = details.copy(capabilities = capabilities))
+    }
+
+    private fun MatrixRoomDetails.withCapabilitiesFallback(
+        fallback: MatrixRoomCapabilities?
+    ): MatrixRoomDetails {
+        if (capabilities.knownOrNull() != null || fallback == null) {
+            return this
+        }
+        return copy(capabilities = fallback)
+    }
+
+    private fun MatrixRoomCapabilities?.knownOrNull(): MatrixRoomCapabilities? {
+        return this?.takeIf { it.canInviteMembers != null }
+    }
+
     private fun isCurrent(target: RoomDetailsTarget, requestGeneration: Long): Boolean {
         return generation == requestGeneration && _state.value.target == target
     }
@@ -228,6 +354,11 @@ internal fun createRoomDetailsStore(
         driver = RoomDetailsDriver(
             observeCachedDetails = localCacheRepository::observeRoomDetails,
             observeLiveDetails = matrixClientService::roomDetailsUpdates,
+            loadCapabilities = { roomId ->
+                MatrixRoomCapabilities(
+                    canInviteMembers = matrixClientService.canInviteRoomMembers(roomId)
+                )
+            },
             cacheDetails = localCacheRepository::cacheRoomDetails
         ),
         onWarning = onWarning

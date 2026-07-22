@@ -196,11 +196,23 @@ and supports fast startup.
 This is not a pull-to-refresh contract. Reactive SDK signals and session
 activation drive synchronization.
 
+Capabilities that require an SDK/FFI query should be resolved for the active
+feature target, then written through to the cache. A broad list snapshot must
+represent an unavailable capability as unknown and preserve a cached known
+value; it must not perform one capability query per list item or turn missing
+SDK data into a definitive denial.
+
 ## Coroutine and Lifecycle Rules
 
 - A store or coordinator that starts a job owns its cancellation.
 - `activate(target)` and `deactivate()` should define target lifetime when a
   feature observes long-lived flows.
+- Route ownership may cover a typed route subtree rather than only the top
+  route. A parent store should remain active while matching child routes need
+  its live state, and deactivate as soon as navigation leaves that subtree.
+  Derive this ownership in the router, include target identity in the check,
+  and cover it with navigation tests instead of inferring it independently in
+  each feature.
 - Capture session, route, room, or user identity in every asynchronous request.
 - Re-check ownership after suspension before committing state or navigation.
 - Use a generation or request identity when cancellation alone cannot reject a

@@ -47,6 +47,7 @@ internal data class RoomDetailsScreenViewState(
 internal data class RoomDetailsScreenViewActions(
     val onBack: () -> Unit,
     val onOpenDirectUserProfile: () -> Unit,
+    val onOpenMembers: () -> Unit,
     val onRetry: () -> Unit
 )
 
@@ -134,7 +135,11 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
     }
-    private val membersAction = quickActionView("Members")
+    private val membersAction = quickActionView("Members").apply {
+        isEnabled = true
+        isClickable = true
+        isFocusable = true
+    }
     private val mediaAction = quickActionView("Media")
     private val searchAction = quickActionView("Search")
     private val muteAction = quickActionView("Mute")
@@ -158,7 +163,12 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         showsAccessory = false
     }
     private val sectionsHeader = sectionHeader("Sections")
-    private val membersRow = disabledRow("Members")
+    private val membersRow = RoomDetailsRowView(context).apply {
+        title = "Members"
+        showsAccessory = true
+        isClickable = true
+        isFocusable = true
+    }
     private val pinnedRow = disabledRow("Pinned Messages")
     private val mediaRow = disabledRow("Shared Media")
     private val securityRow = disabledRow("Security & Privacy")
@@ -324,6 +334,18 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     fun render(state: RoomDetailsScreenViewState, actions: RoomDetailsScreenViewActions) {
         backButton.setOnClickListener { actions.onBack() }
         retryButton.setOnClickListener { actions.onRetry() }
+        val showsMembers = state.kind != MatrixRoomKind.DIRECT
+        membersAction.visibility = if (showsMembers) VISIBLE else GONE
+        membersAction.isFocusable = showsMembers
+        membersRow.visibility = if (showsMembers) VISIBLE else GONE
+        membersRow.isFocusable = showsMembers
+        if (showsMembers) {
+            membersAction.setOnClickListener { actions.onOpenMembers() }
+            membersRow.setOnClickListener { actions.onOpenMembers() }
+        } else {
+            membersAction.setOnClickListener(null)
+            membersRow.setOnClickListener(null)
+        }
         avatarView.render(
             userId = state.directUserId?.takeIf { it.isNotBlank() } ?: state.roomId,
             displayName = state.displayName,
@@ -352,10 +374,12 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         addressRow.visibility = if (state.canonicalAlias.isNullOrBlank()) GONE else VISIBLE
         unreadRow.detail = state.unreadLabel()
         unreadRow.visibility = if (state.unreadCount > 0 || state.isMarkedUnread) VISIBLE else GONE
-        membersAction.text = state.joinedMemberCount
-            ?.let { count -> "Members\n$count" }
-            ?: "Members"
-        membersRow.detail = state.joinedMemberCount?.toString() ?: loadingValue(state)
+        if (showsMembers) {
+            membersAction.text = state.joinedMemberCount
+                ?.let { count -> "Members\n$count" }
+                ?: "Members"
+            membersRow.detail = state.joinedMemberCount?.toString() ?: loadingValue(state)
+        }
         pinnedRow.detail = state.pinnedEventCount?.toString() ?: loadingValue(state)
         securityRow.detail = listOfNotNull(
             state.encryption?.label(),
@@ -388,7 +412,10 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         statusText.setTextColor(palette.secondaryText)
         retryButton.setTextColor(palette.actionText)
         retryButton.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
-        listOf(membersAction, mediaAction, searchAction, muteAction).forEach { action ->
+        membersAction.setTextColor(palette.actionText)
+        membersAction.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
+        membersAction.alpha = 1f
+        listOf(mediaAction, searchAction, muteAction).forEach { action ->
             action.setTextColor(palette.actionText)
             action.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
             action.alpha = DISABLED_ALPHA

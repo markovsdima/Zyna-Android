@@ -241,6 +241,42 @@ class AppNavStateTest {
     }
 
     @Test
+    fun roomMembersPushesOverRoomDetailsAndPopsBackToIt() {
+        val chatRoute = AppRoute.Chat(roomId = "!room:example.org", displayName = "Room")
+        val detailsRoute = AppRoute.RoomDetails(roomId = chatRoute.roomId)
+        val membersRoute = AppRoute.RoomMembers(roomId = chatRoute.roomId)
+        val state = AppNavState()
+            .enterMain()
+            .openChat(chatRoute.roomId, chatRoute.displayName)
+            .openRoomDetails()
+            .openRoomMembers()
+
+        assertEquals(
+            listOf(AppRoute.Rooms, chatRoute, detailsRoute, membersRoute),
+            state.visibleStack
+        )
+        assertEquals(membersRoute, state.top)
+        assertEquals(chatRoute, state.activeChatRoute)
+        assertFalse(state.showsTabs)
+
+        val closedState = state.popActiveStack()
+
+        requireNotNull(closedState)
+        assertEquals(listOf(AppRoute.Rooms, chatRoute, detailsRoute), closedState.visibleStack)
+        assertEquals(detailsRoute, closedState.top)
+    }
+
+    @Test
+    fun openRoomMembers_isIgnoredWithoutTopRoomDetailsRoute() {
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = "!room:example.org", displayName = "Room")
+
+        assertEquals(chatState, chatState.openRoomMembers())
+        assertEquals(AppNavState(), AppNavState().openRoomMembers())
+    }
+
+    @Test
     fun userProfilePushesOnContactsStackAndHidesTabs() {
         val profileRoute = AppRoute.UserProfile(userId = "@alice:example.org")
         val state = AppNavState()

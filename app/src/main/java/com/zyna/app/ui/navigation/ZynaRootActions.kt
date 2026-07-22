@@ -22,6 +22,7 @@ data class ZynaRootActions(
     val calls: CallsFeatureActions,
     val rooms: RoomsFeatureActions,
     val roomDetails: RoomDetailsFeatureActions,
+    val roomMembers: RoomMembersFeatureActions,
     val chat: ChatFeatureActions,
     val profile: ProfileFeatureActions,
     val settings: SettingsFeatureActions
@@ -56,7 +57,13 @@ data class RoomsFeatureActions(
 )
 
 data class RoomDetailsFeatureActions(
-    val onRefresh: () -> Unit
+    val onRefresh: () -> Unit,
+    val onOpenMembers: () -> Unit
+)
+
+data class RoomMembersFeatureActions(
+    val onRetry: () -> Unit,
+    val onSearchQueryChanged: (String) -> Unit
 )
 
 data class ChatFeatureActions(

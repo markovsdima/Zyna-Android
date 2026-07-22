@@ -58,6 +58,10 @@ import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
 import com.zyna.app.ui.roomdetails.RoomDetailsState
+import com.zyna.app.ui.roommembers.RoomMembersScreenView
+import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
+import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
+import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.rooms.RoomsScreenView
 import com.zyna.app.ui.rooms.RoomsScreenViewActions
 import com.zyna.app.ui.rooms.RoomsScrollAnchor
@@ -107,6 +111,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var latestState: AppUiState? = null
     private var latestRoomList: RoomListState? = null
     private var latestRoomDetails: RoomDetailsState? = null
+    private var latestRoomMembers: RoomMembersState? = null
     private var latestContacts: ContactsFeatureState? = null
     private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
@@ -233,6 +238,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         roomList: RoomListState,
         roomDetails: RoomDetailsState,
+        roomMembers: RoomMembersState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -251,6 +257,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         latestState = state
         latestRoomList = roomList
         latestRoomDetails = roomDetails
+        latestRoomMembers = roomMembers
         latestContacts = contacts
         latestProfile = profile
         latestCallHistory = callHistory
@@ -591,6 +598,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val state = latestState ?: return
         val roomList = latestRoomList ?: return
         val roomDetails = latestRoomDetails ?: return
+        val roomMembers = latestRoomMembers ?: return
         val contacts = latestContacts ?: return
         val profile = latestProfile ?: return
         val callHistory = latestCallHistory ?: return
@@ -606,6 +614,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             state,
             roomList,
             roomDetails,
+            roomMembers,
             contacts,
             profile,
             callHistory,
@@ -721,6 +730,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         roomList: RoomListState,
         roomDetails: RoomDetailsState,
+        roomMembers: RoomMembersState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -788,6 +798,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions,
                     dependencies,
                     route
+                )
+                is AppRoute.RoomMembers -> roomMembersEntry(
+                    roomMembers = roomMembers,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
                 )
                 is AppRoute.Chat -> chatEntry(
                     state,
@@ -1184,7 +1200,45 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                                 )
                             }
                         },
+                        onOpenMembers = actions.roomDetails.onOpenMembers,
                         onRetry = actions.roomDetails.onRefresh
+                    )
+                )
+            }
+        )
+    }
+
+    private fun roomMembersEntry(
+        roomMembers: RoomMembersState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.RoomMembers
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "roomMembers:${route.roomId}",
+            createView = { context -> RoomMembersScreenView(context) },
+            updateView = { view ->
+                val routeState = roomMembers.takeIf { it.target?.roomId == route.roomId }
+                (view as RoomMembersScreenView).render(
+                    state = RoomMembersScreenViewState(
+                        searchQuery = routeState?.searchQuery.orEmpty(),
+                        invitedMembers = routeState?.invitedMembers.orEmpty(),
+                        joinedMembers = routeState?.joinedMembers.orEmpty(),
+                        isLoading = routeState?.isLoading ?: true,
+                        errorMessage = routeState?.errorMessage,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = RoomMembersScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetry = actions.roomMembers.onRetry,
+                        onSearchQueryChanged = actions.roomMembers.onSearchQueryChanged,
+                        onOpenProfile = { member ->
+                            actions.profile.user.onOpen(
+                                member.userId,
+                                member.displayName,
+                                member.avatarUrl
+                            )
+                        }
                     )
                 )
             }
@@ -1513,6 +1567,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.RecoveryKey -> "RecoveryKey"
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
+            is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

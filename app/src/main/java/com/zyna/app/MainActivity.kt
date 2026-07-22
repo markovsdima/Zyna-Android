@@ -65,6 +65,7 @@ import com.zyna.app.ui.navigation.OwnProfileActions
 import com.zyna.app.ui.navigation.ProfileFeatureActions
 import com.zyna.app.ui.navigation.RoomsFeatureActions
 import com.zyna.app.ui.navigation.RoomDetailsFeatureActions
+import com.zyna.app.ui.navigation.RoomMembersFeatureActions
 import com.zyna.app.ui.navigation.SettingsFeatureActions
 import com.zyna.app.ui.navigation.UserProfileActions
 import com.zyna.app.ui.navigation.ZynaRenderDependencies
@@ -80,6 +81,7 @@ import com.zyna.app.ui.profile.ProfileAvatarPickRequest
 import com.zyna.app.ui.profile.createProfileAvatarCropDriver
 import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.roomdetails.RoomDetailsState
+import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
@@ -96,13 +98,15 @@ class MainActivity : AppCompatActivity() {
     private data class AppFeatureInput(
         val state: AppUiState,
         val roomList: RoomListState,
-        val roomDetails: RoomDetailsState
+        val roomDetails: RoomDetailsState,
+        val roomMembers: RoomMembersState
     )
 
     private data class RootFeatureInput(
         val state: AppUiState,
         val roomList: RoomListState,
         val roomDetails: RoomDetailsState,
+        val roomMembers: RoomMembersState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -113,6 +117,7 @@ class MainActivity : AppCompatActivity() {
         val state: AppUiState,
         val roomList: RoomListState,
         val roomDetails: RoomDetailsState,
+        val roomMembers: RoomMembersState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -330,12 +335,14 @@ class MainActivity : AppCompatActivity() {
                         combine(
                             appViewModel.uiState,
                             appViewModel.roomListState,
-                            appViewModel.roomDetailsState
-                        ) { state, roomList, roomDetails ->
+                            appViewModel.roomDetailsState,
+                            appViewModel.roomMembersState
+                        ) { state, roomList, roomDetails, roomMembers ->
                             AppFeatureInput(
                                 state = state,
                                 roomList = roomList,
-                                roomDetails = roomDetails
+                                roomDetails = roomDetails,
+                                roomMembers = roomMembers
                             )
                         },
                         combine(
@@ -370,6 +377,7 @@ class MainActivity : AppCompatActivity() {
                             state = app.state,
                             roomList = app.roomList,
                             roomDetails = app.roomDetails,
+                            roomMembers = app.roomMembers,
                             contacts = contacts,
                             profile = profile,
                             callHistory = callHistory,
@@ -384,6 +392,7 @@ class MainActivity : AppCompatActivity() {
                         state = feature.state,
                         roomList = feature.roomList,
                         roomDetails = feature.roomDetails,
+                        roomMembers = feature.roomMembers,
                         contacts = feature.contacts,
                         profile = feature.profile,
                         callHistory = feature.callHistory,
@@ -411,6 +420,7 @@ class MainActivity : AppCompatActivity() {
                         state = state,
                         roomList = input.roomList,
                         roomDetails = input.roomDetails,
+                        roomMembers = input.roomMembers,
                         contacts = input.contacts,
                         profile = input.profile,
                         callHistory = input.callHistory,
@@ -464,7 +474,12 @@ class MainActivity : AppCompatActivity() {
                 onForwardRoomSelected = appViewModel::selectForwardRoom
             ),
             roomDetails = RoomDetailsFeatureActions(
-                onRefresh = appViewModel::refreshRoomDetails
+                onRefresh = appViewModel::refreshRoomDetails,
+                onOpenMembers = appViewModel::openRoomMembers
+            ),
+            roomMembers = RoomMembersFeatureActions(
+                onRetry = appViewModel::retryRoomMembers,
+                onSearchQueryChanged = appViewModel::setRoomMembersSearchQuery
             ),
             chat = ChatFeatureActions(
                 navigation = ChatNavigationActions(
@@ -1288,6 +1303,7 @@ private fun AppRoute.perfName(): String {
         is AppRoute.RecoveryKey -> "RecoveryKey"
         is AppRoute.SessionSecurity -> "SessionSecurity"
         is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
+        is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"
         is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

@@ -40,6 +40,7 @@ import java.io.File
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
@@ -81,6 +82,7 @@ import org.matrix.rustcomponents.sdk.MessageFormat
 import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageLikeEventContent
 import org.matrix.rustcomponents.sdk.MessageType
+import org.matrix.rustcomponents.sdk.MembershipState
 import org.matrix.rustcomponents.sdk.MsgLikeContent
 import org.matrix.rustcomponents.sdk.MsgLikeKind
 import org.matrix.rustcomponents.sdk.NotificationEvent
@@ -88,6 +90,7 @@ import org.matrix.rustcomponents.sdk.NotificationItem
 import org.matrix.rustcomponents.sdk.NotificationProcessSetup
 import org.matrix.rustcomponents.sdk.NotificationStatus
 import org.matrix.rustcomponents.sdk.ProfileDetails
+import org.matrix.rustcomponents.sdk.PowerLevel
 import org.matrix.rustcomponents.sdk.RawRoomRelationsDirection
 import org.matrix.rustcomponents.sdk.RawRoomRelationsOptions
 import org.matrix.rustcomponents.sdk.ReceiptType
@@ -124,10 +127,13 @@ import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.UserProfile
 import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
+import org.matrix.rustcomponents.sdk.RoomMember as RustRoomMember
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.coroutineContext
 import uniffi.matrix_sdk_base.EncryptionState
 import uniffi.matrix_sdk.BackupDownloadStrategy
+import uniffi.matrix_sdk.RoomMemberRole
 import uniffi.matrix_sdk_ui.LatestEventValueLocalState
 import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
 
@@ -897,6 +903,35 @@ class MatrixClientService(
             }
             ?.sortedBy { it.displayName.lowercase() }
             ?: emptyList()
+    }
+
+    suspend fun loadRoomMembers(
+        roomId: String,
+        useCachedSnapshot: Boolean
+    ): List<MatrixRoomMember> = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            val iterator = if (useCachedSnapshot) {
+                room.membersNoSync()
+            } else {
+                room.members()
+            }
+            iterator.use { members ->
+                buildList(
+                    capacity = members.len().coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
+                ) {
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val chunk = members.nextChunk(ROOM_MEMBERS_CHUNK_SIZE.toUInt())
+                            ?: break
+                        if (chunk.isEmpty()) {
+                            break
+                        }
+                        chunk.mapNotNullTo(this) { member -> member.toMatrixRoomMemberOrNull() }
+                    }
+                }
+            }
+        } ?: error("Matrix room is not available")
     }
 
     fun roomListChangeSignals(): Flow<Unit> = callbackFlow {
@@ -2315,6 +2350,42 @@ class MatrixClientService(
         )
     }
 
+    private fun RustRoomMember.toMatrixRoomMemberOrNull(): MatrixRoomMember? {
+        val mappedMembership = when (membership) {
+            MembershipState.Invite -> MatrixRoomMemberMembership.INVITED
+            MembershipState.Join -> MatrixRoomMemberMembership.JOINED
+            MembershipState.Ban,
+            MembershipState.Knock,
+            MembershipState.Leave,
+            is MembershipState.Custom -> return null
+        }
+        val mappedPowerLevel = when (val level = powerLevel) {
+            PowerLevel.Infinite -> Long.MAX_VALUE
+            is PowerLevel.Value -> level.value
+        }
+        val mappedRole = when (suggestedRoleForPowerLevel) {
+            RoomMemberRole.CREATOR -> MatrixRoomMemberRole.OWNER
+            RoomMemberRole.ADMINISTRATOR -> {
+                if (mappedPowerLevel >= ROOM_MEMBER_OWNER_POWER_LEVEL) {
+                    MatrixRoomMemberRole.OWNER
+                } else {
+                    MatrixRoomMemberRole.ADMIN
+                }
+            }
+            RoomMemberRole.MODERATOR -> MatrixRoomMemberRole.MODERATOR
+            RoomMemberRole.USER -> MatrixRoomMemberRole.MEMBER
+        }
+        return MatrixRoomMember(
+            userId = userId,
+            displayName = displayName?.takeIf { it.isNotBlank() },
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
+            membership = mappedMembership,
+            role = mappedRole,
+            powerLevel = mappedPowerLevel,
+            isNameAmbiguous = isNameAmbiguous
+        )
+    }
+
     private fun RoomInfo.toRoomCallInfo(
         directHasActiveCall: Boolean,
         directParticipantUserIds: List<String>
@@ -3045,6 +3116,8 @@ class MatrixClientService(
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
         const val ROOM_LIST_LIVE_PAGE_SIZE = 512
+        const val ROOM_MEMBERS_CHUNK_SIZE = 512
+        const val ROOM_MEMBER_OWNER_POWER_LEVEL = 150L
         const val MAX_REACTION_RELATION_PAGES = 20
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"

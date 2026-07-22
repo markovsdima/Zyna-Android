@@ -61,6 +61,9 @@ sealed interface AppRoute {
     data class RoomDetails(
         val roomId: String
     ) : AppRoute
+    data class RoomMembers(
+        val roomId: String
+    ) : AppRoute
     data class Chat(
         val roomId: String,
         val displayName: String
@@ -227,6 +230,14 @@ data class AppNavState(
         }
         val chatRoute = chatsStack.lastOrNull() as? AppRoute.Chat ?: return this
         return copy(chatsStack = chatsStack + AppRoute.RoomDetails(chatRoute.roomId))
+    }
+
+    fun openRoomMembers(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+            return this
+        }
+        val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
+        return copy(chatsStack = chatsStack + AppRoute.RoomMembers(detailsRoute.roomId))
     }
 
     fun openProfileSettings(): AppNavState {

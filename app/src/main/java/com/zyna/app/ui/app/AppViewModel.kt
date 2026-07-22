@@ -18,6 +18,7 @@ import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
+import com.zyna.app.data.matrix.MatrixRoomKind
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
@@ -59,6 +60,9 @@ import com.zyna.app.ui.profile.createUserProfileStore
 import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.roomdetails.RoomDetailsTarget
 import com.zyna.app.ui.roomdetails.createRoomDetailsStore
+import com.zyna.app.ui.roommembers.RoomMembersState
+import com.zyna.app.ui.roommembers.RoomMembersTarget
+import com.zyna.app.ui.roommembers.createRoomMembersStore
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
 import com.zyna.app.util.ZynaPerfLog
@@ -90,6 +94,11 @@ data class PendingEditProfileExit(
 private data class RoomDetailsRouteInput(
     val target: RoomDetailsTarget,
     val seed: MatrixRoomSummary?
+)
+
+private data class RoomMembersRouteInput(
+    val target: RoomMembersTarget,
+    val expectedJoinedCount: Long?
 )
 
 data class AppUiState(
@@ -207,6 +216,12 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomDetailsState: StateFlow<RoomDetailsState> = roomDetailsStore.state
+    private val roomMembersStore = createRoomMembersStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomMembersState: StateFlow<RoomMembersState> = roomMembersStore.state
     private val chatTimelineStore = createChatTimelineStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -271,6 +286,14 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeRoomMembersRouteInputs()
+        }
+
+        viewModelScope.launch {
+            observeRoomMembersPrefetchInputs()
+        }
+
+        viewModelScope.launch {
             combine(_uiState, roomListStore.state) { state, roomList ->
                 state to roomList
             }.collect { (state, roomList) ->
@@ -302,6 +325,7 @@ class AppViewModel(
                 ) {
                     roomListStore.deactivate()
                     roomDetailsStore.deactivate()
+                    roomMembersStore.clearSession()
                 }
                 if (
                     nextUserId == null ||
@@ -818,6 +842,38 @@ class AppViewModel(
 
     fun refreshRoomDetails() {
         roomDetailsStore.refresh()
+    }
+
+    fun openRoomMembers() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomDetails ?: return
+        val sessionUserId = current.matrixState.userIdOrNull() ?: return
+        val detailsKind = roomDetailsStore.state.value
+            .takeIf { state ->
+                state.target == RoomDetailsTarget(
+                    userId = sessionUserId,
+                    roomId = route.roomId
+                )
+            }
+            ?.details
+            ?.kind
+        val roomKind = detailsKind
+            ?: roomListStore.state.value.roomForId(route.roomId)?.kind
+            ?: return
+        if (roomKind == MatrixRoomKind.DIRECT) {
+            return
+        }
+        _uiState.update { current ->
+            current.withNavigationState(current.navState.openRoomMembers())
+        }
+    }
+
+    fun retryRoomMembers() {
+        roomMembersStore.retry()
+    }
+
+    fun setRoomMembersSearchQuery(query: String) {
+        roomMembersStore.setSearchQuery(query)
     }
 
     fun openProfileSettings() {
@@ -1522,6 +1578,72 @@ class AppViewModel(
         }
     }
 
+    private suspend fun observeRoomMembersRouteInputs() {
+        combine(_uiState, roomListStore.state) { state, roomList ->
+            val route = state.route as? AppRoute.RoomMembers
+            val userId = state.matrixState.userIdOrNull()
+            if (route == null || userId == null) {
+                null
+            } else {
+                RoomMembersRouteInput(
+                    target = RoomMembersTarget(userId = userId, roomId = route.roomId),
+                    expectedJoinedCount = roomList.roomForId(route.roomId)
+                        ?.roomDetails
+                        ?.joinedMemberCount
+                )
+            }
+        }.collect { input ->
+            if (input == null) {
+                roomMembersStore.deactivate()
+            } else {
+                roomMembersStore.activate(
+                    target = input.target,
+                    expectedJoinedCount = input.expectedJoinedCount
+                )
+            }
+        }
+    }
+
+    private suspend fun observeRoomMembersPrefetchInputs() {
+        combine(
+            _uiState,
+            roomListStore.state,
+            roomDetailsStore.state
+        ) { state, roomList, roomDetails ->
+            val route = state.route as? AppRoute.RoomDetails
+            val userId = state.matrixState.userIdOrNull()
+            if (route == null || userId == null) {
+                return@combine null
+            }
+
+            val seed = roomList.roomForId(route.roomId)
+            val liveDetails = roomDetails
+                .takeIf {
+                    it.target == RoomDetailsTarget(userId = userId, roomId = route.roomId)
+                }
+                ?.details
+            val kind = liveDetails?.kind ?: seed?.kind
+            if (kind == null || kind == MatrixRoomKind.DIRECT) {
+                null
+            } else {
+                RoomMembersRouteInput(
+                    target = RoomMembersTarget(userId = userId, roomId = route.roomId),
+                    expectedJoinedCount = liveDetails?.joinedMemberCount
+                        ?: seed?.roomDetails?.joinedMemberCount
+                )
+            }
+        }.collect { input ->
+            if (input == null) {
+                roomMembersStore.stopPrefetch()
+            } else {
+                roomMembersStore.prefetch(
+                    target = input.target,
+                    expectedJoinedCount = input.expectedJoinedCount
+                )
+            }
+        }
+    }
+
     private fun List<MatrixRoomSummary>.directPresenceUserIds(): Set<String> {
         return asSequence()
             .mapNotNull { room -> room.directUserId?.takeIf { it.isNotBlank() } }
@@ -1578,6 +1700,7 @@ class AppViewModel(
             is AppRoute.RecoveryKey -> "RecoveryKey"
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
+            is AppRoute.RoomMembers -> "RoomMembers(${roomId.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

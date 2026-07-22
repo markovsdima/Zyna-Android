@@ -16,19 +16,38 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.matrix.MatrixRoomAccess
+import com.zyna.app.data.matrix.MatrixRoomEncryption
+import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
+import com.zyna.app.data.matrix.MatrixRoomKind
+import com.zyna.app.ui.avatar.MatrixAvatarView
 import kotlin.math.roundToInt
 
 internal data class RoomDetailsScreenViewState(
     val roomId: String,
     val displayName: String,
+    val avatarUrl: String?,
     val directUserId: String?,
+    val kind: MatrixRoomKind,
+    val topic: String?,
+    val joinedMemberCount: Long?,
+    val encryption: MatrixRoomEncryption?,
+    val access: MatrixRoomAccess?,
+    val historyVisibility: MatrixRoomHistoryVisibility?,
+    val pinnedEventCount: Int?,
+    val canonicalAlias: String?,
     val unreadCount: Long,
-    val isMarkedUnread: Boolean
+    val isMarkedUnread: Boolean,
+    val isLoading: Boolean,
+    val errorMessage: String?,
+    val matrixMediaLoader: MatrixMediaLoader?
 )
 
 internal data class RoomDetailsScreenViewActions(
     val onBack: () -> Unit,
-    val onOpenDirectUserProfile: () -> Unit
+    val onOpenDirectUserProfile: () -> Unit,
+    val onRetry: () -> Unit
 )
 
 internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
@@ -36,7 +55,6 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     private var palette = RoomDetailsPalette.from(context)
     private var statusTopInset = 0
     private var bottomInset = 0
-    private var avatarDrawableColor: Int? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -73,12 +91,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER_HORIZONTAL
         updatePadding(left = dp(16), right = dp(16), top = dp(18), bottom = dp(24))
     }
-    private val avatarText = TextView(context).apply {
-        gravity = Gravity.CENTER
-        textSize = 34f
-        typeface = Typeface.DEFAULT_BOLD
-        includeFontPadding = false
-    }
+    private val avatarView = MatrixAvatarView(context)
     private val nameText = TextView(context).apply {
         gravity = Gravity.CENTER
         textSize = 24f
@@ -91,15 +104,32 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER
         textSize = 14f
         includeFontPadding = true
-        maxLines = 2
+        maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
+        minHeight = dp(SUBTITLE_MIN_HEIGHT_DP)
     }
     private val tagRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
     }
     private val typeTag = tagView()
-    private val unreadTag = tagView()
+    private val encryptionTag = tagView()
+    private val statusText = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 14f
+        includeFontPadding = true
+        maxLines = 3
+    }
+    private val retryButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = "Retry"
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+        includeFontPadding = true
+        isClickable = true
+        isFocusable = true
+        updatePadding(left = dp(16), right = dp(16), top = dp(9), bottom = dp(9))
+    }
     private val quickActions = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
@@ -123,11 +153,16 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         title = "Unread"
         showsAccessory = false
     }
+    private val addressRow = RoomDetailsRowView(context).apply {
+        title = "Address"
+        showsAccessory = false
+    }
     private val sectionsHeader = sectionHeader("Sections")
     private val membersRow = disabledRow("Members")
     private val pinnedRow = disabledRow("Pinned Messages")
     private val mediaRow = disabledRow("Shared Media")
     private val securityRow = disabledRow("Security & Privacy")
+    private val historyRow = disabledRow("Room History")
 
     init {
         setBackgroundColor(palette.background)
@@ -183,7 +218,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         content.addView(
-            avatarText,
+            avatarView,
             LinearLayout.LayoutParams(dp(AVATAR_SIZE_DP), dp(AVATAR_SIZE_DP))
         )
         content.addView(
@@ -205,7 +240,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             }
         )
         tagRow.addView(typeTag, tagLayoutParams())
-        tagRow.addView(unreadTag, tagLayoutParams())
+        tagRow.addView(encryptionTag, tagLayoutParams())
         content.addView(
             tagRow,
             LinearLayout.LayoutParams(
@@ -213,6 +248,24 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
                 topMargin = dp(12)
+            }
+        )
+        content.addView(
+            statusText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10)
+            }
+        )
+        content.addView(
+            retryButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
             }
         )
         quickActions.addView(membersAction, quickActionLayoutParams())
@@ -231,12 +284,14 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         content.addView(infoHeader)
         content.addView(roomIdRow, rowLayoutParams())
         content.addView(directUserRow, rowLayoutParams())
+        content.addView(addressRow, rowLayoutParams())
         content.addView(unreadRow, rowLayoutParams())
         content.addView(sectionsHeader)
         content.addView(membersRow, rowLayoutParams())
         content.addView(pinnedRow, rowLayoutParams())
         content.addView(mediaRow, rowLayoutParams())
         content.addView(securityRow, rowLayoutParams())
+        content.addView(historyRow, rowLayoutParams())
 
         applyPalette()
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -268,13 +323,21 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
 
     fun render(state: RoomDetailsScreenViewState, actions: RoomDetailsScreenViewActions) {
         backButton.setOnClickListener { actions.onBack() }
-        avatarText.text = state.displayName.avatarInitial()
-        updateAvatarBackground(state.stableAvatarColor())
+        retryButton.setOnClickListener { actions.onRetry() }
+        avatarView.render(
+            userId = state.directUserId?.takeIf { it.isNotBlank() } ?: state.roomId,
+            displayName = state.displayName,
+            avatarUrl = state.avatarUrl,
+            localAvatarPath = null,
+            matrixMediaLoader = state.matrixMediaLoader,
+            sizePx = dp(AVATAR_SIZE_DP)
+        )
         nameText.text = state.displayName
-        subtitleText.text = state.roomId
-        typeTag.text = if (state.directUserId.isNullOrBlank()) "Group" else "Direct"
-        unreadTag.text = state.unreadLabel()
-        unreadTag.visibility = if (state.unreadCount > 0 || state.isMarkedUnread) VISIBLE else GONE
+        val subtitle = state.subtitle()
+        subtitleText.text = subtitle.ifBlank { EMPTY_SUBTITLE_PLACEHOLDER }
+        subtitleText.contentDescription = subtitle.takeIf { it.isNotBlank() }
+        typeTag.text = state.kind.label()
+        encryptionTag.text = state.encryption?.label() ?: loadingValue(state)
         roomIdRow.detail = state.roomId
         directUserRow.detail = state.directUserId.orEmpty()
         val hasDirectUser = !state.directUserId.isNullOrBlank()
@@ -285,8 +348,23 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         } else {
             directUserRow.setOnClickListener(null)
         }
+        addressRow.detail = state.canonicalAlias.orEmpty()
+        addressRow.visibility = if (state.canonicalAlias.isNullOrBlank()) GONE else VISIBLE
         unreadRow.detail = state.unreadLabel()
         unreadRow.visibility = if (state.unreadCount > 0 || state.isMarkedUnread) VISIBLE else GONE
+        membersAction.text = state.joinedMemberCount
+            ?.let { count -> "Members\n$count" }
+            ?: "Members"
+        membersRow.detail = state.joinedMemberCount?.toString() ?: loadingValue(state)
+        pinnedRow.detail = state.pinnedEventCount?.toString() ?: loadingValue(state)
+        securityRow.detail = listOfNotNull(
+            state.encryption?.label(),
+            state.access?.label()
+        ).joinToString(separator = " · ").ifBlank { loadingValue(state) }
+        historyRow.detail = state.historyVisibility?.label() ?: loadingValue(state)
+        statusText.text = state.errorMessage.orEmpty()
+        statusText.visibility = if (statusText.text.isNullOrBlank()) GONE else VISIBLE
+        retryButton.visibility = if (state.errorMessage != null) VISIBLE else GONE
         contentDescription = "${state.displayName}. ${state.roomId}"
     }
 
@@ -298,21 +376,34 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         titleText.setTextColor(palette.titleText)
         scrollView.setBackgroundColor(palette.background)
         content.setBackgroundColor(palette.background)
-        avatarText.setTextColor(palette.avatarText)
+        avatarView.setPaletteBackground(palette.background)
         nameText.setTextColor(palette.titleText)
         subtitleText.setTextColor(palette.secondaryText)
         infoHeader.setTextColor(palette.secondaryText)
         sectionsHeader.setTextColor(palette.secondaryText)
         typeTag.setTextColor(palette.tagText)
         typeTag.background = roundedDrawable(palette.tagFill, TAG_RADIUS_DP)
-        unreadTag.setTextColor(palette.tagText)
-        unreadTag.background = roundedDrawable(palette.tagFill, TAG_RADIUS_DP)
+        encryptionTag.setTextColor(palette.tagText)
+        encryptionTag.background = roundedDrawable(palette.tagFill, TAG_RADIUS_DP)
+        statusText.setTextColor(palette.secondaryText)
+        retryButton.setTextColor(palette.actionText)
+        retryButton.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
         listOf(membersAction, mediaAction, searchAction, muteAction).forEach { action ->
             action.setTextColor(palette.actionText)
             action.background = roundedDrawable(palette.surface, CARD_RADIUS_DP)
             action.alpha = DISABLED_ALPHA
         }
-        listOf(roomIdRow, directUserRow, unreadRow, membersRow, pinnedRow, mediaRow, securityRow).forEach { row ->
+        listOf(
+            roomIdRow,
+            directUserRow,
+            addressRow,
+            unreadRow,
+            membersRow,
+            pinnedRow,
+            mediaRow,
+            securityRow,
+            historyRow
+        ).forEach { row ->
             row.setPalette(palette)
         }
     }
@@ -344,7 +435,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
             includeFontPadding = true
-            maxLines = 1
+            maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
             isEnabled = false
         }
@@ -403,21 +494,6 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         )
     }
 
-    private fun updateAvatarBackground(color: Int) {
-        if (avatarDrawableColor == color) {
-            return
-        }
-        avatarDrawableColor = color
-        avatarText.background = circleDrawable(color)
-    }
-
-    private fun circleDrawable(color: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
-        }
-    }
-
     private fun roundedDrawable(color: Int, radiusDp: Int): GradientDrawable {
         return GradientDrawable().apply {
             cornerRadius = dp(radiusDp).toFloat()
@@ -433,23 +509,53 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         }
     }
 
-    private fun RoomDetailsScreenViewState.stableAvatarColor(): Int {
-        val source = directUserId?.takeIf { it.isNotBlank() } ?: roomId
-        val colors = palette.avatarColors
-        return colors[source.djb2HashIndex(colors.size)]
+    private fun RoomDetailsScreenViewState.subtitle(): String {
+        return topic?.takeIf { it.isNotBlank() }
+            ?: joinedMemberCount
+                ?.takeIf { kind != MatrixRoomKind.DIRECT }
+                ?.let { count -> "$count members" }
+            ?: canonicalAlias.orEmpty()
     }
 
-    private fun String.avatarInitial(): String {
-        return trim().firstOrNull()?.uppercaseChar()?.toString() ?: "#"
+    private fun loadingValue(state: RoomDetailsScreenViewState): String {
+        return if (state.isLoading) "Loading" else "Unavailable"
     }
 
-    private fun String.djb2HashIndex(size: Int): Int {
-        if (size <= 0) return 0
-        var hash = 5381
-        forEach { char ->
-            hash = ((hash shl 5) + hash) + char.code
+    private fun MatrixRoomKind.label(): String {
+        return when (this) {
+            MatrixRoomKind.DIRECT -> "Direct"
+            MatrixRoomKind.GROUP -> "Group"
+            MatrixRoomKind.SPACE -> "Space"
         }
-        return (hash and Int.MAX_VALUE) % size
+    }
+
+    private fun MatrixRoomEncryption.label(): String {
+        return when (this) {
+            MatrixRoomEncryption.ENCRYPTED -> "Encrypted"
+            MatrixRoomEncryption.NOT_ENCRYPTED -> "Not encrypted"
+            MatrixRoomEncryption.UNKNOWN -> "Encryption unknown"
+        }
+    }
+
+    private fun MatrixRoomAccess.label(): String {
+        return when (this) {
+            MatrixRoomAccess.PUBLIC -> "Public"
+            MatrixRoomAccess.PRIVATE -> "Private"
+            MatrixRoomAccess.ASK_TO_JOIN -> "Ask to join"
+            MatrixRoomAccess.RESTRICTED -> "Restricted access"
+            MatrixRoomAccess.CUSTOM -> "Custom access"
+            MatrixRoomAccess.UNKNOWN -> "Access unknown"
+        }
+    }
+
+    private fun MatrixRoomHistoryVisibility.label(): String {
+        return when (this) {
+            MatrixRoomHistoryVisibility.SHARED -> "New members can see history"
+            MatrixRoomHistoryVisibility.INVITED -> "History from invite"
+            MatrixRoomHistoryVisibility.JOINED -> "History from joining"
+            MatrixRoomHistoryVisibility.WORLD_READABLE -> "History visible to anyone"
+            MatrixRoomHistoryVisibility.CUSTOM -> "Custom history"
+        }
     }
 
     private fun dp(value: Int): Int {
@@ -459,10 +565,12 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     private companion object {
         const val TOP_BAR_HEIGHT_DP = 64
         const val AVATAR_SIZE_DP = 96
+        const val SUBTITLE_MIN_HEIGHT_DP = 20
         const val ROW_HEIGHT_DP = 56
         const val CARD_RADIUS_DP = 8
         const val TAG_RADIUS_DP = 12
         const val DISABLED_ALPHA = 0.48f
+        const val EMPTY_SUBTITLE_PLACEHOLDER = "\u00A0"
     }
 }
 
@@ -558,8 +666,6 @@ private data class RoomDetailsPalette(
     val primaryText: Int,
     val secondaryText: Int,
     val actionText: Int,
-    val avatarColors: List<Int>,
-    val avatarText: Int,
     val tagFill: Int,
     val tagText: Int
 ) {
@@ -575,15 +681,6 @@ private data class RoomDetailsPalette(
                     primaryText = Color.rgb(232, 225, 229),
                     secondaryText = Color.rgb(202, 196, 208),
                     actionText = Color.rgb(208, 188, 255),
-                    avatarColors = listOf(
-                        Color.rgb(88, 86, 214),
-                        Color.rgb(52, 199, 89),
-                        Color.rgb(255, 149, 0),
-                        Color.rgb(255, 45, 85),
-                        Color.rgb(90, 200, 250),
-                        Color.rgb(175, 82, 222)
-                    ),
-                    avatarText = Color.WHITE,
                     tagFill = Color.argb(42, 255, 255, 255),
                     tagText = Color.rgb(232, 225, 229)
                 )
@@ -595,15 +692,6 @@ private data class RoomDetailsPalette(
                     primaryText = Color.rgb(29, 27, 32),
                     secondaryText = Color.rgb(73, 69, 79),
                     actionText = Color.rgb(103, 80, 164),
-                    avatarColors = listOf(
-                        Color.rgb(88, 86, 214),
-                        Color.rgb(52, 199, 89),
-                        Color.rgb(255, 149, 0),
-                        Color.rgb(255, 45, 85),
-                        Color.rgb(0, 122, 255),
-                        Color.rgb(175, 82, 222)
-                    ),
-                    avatarText = Color.WHITE,
                     tagFill = Color.rgb(231, 224, 236),
                     tagText = Color.rgb(73, 69, 79)
                 )

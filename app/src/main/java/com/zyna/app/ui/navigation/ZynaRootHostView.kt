@@ -19,6 +19,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.ViewCompat
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixClientState
+import com.zyna.app.data.matrix.MatrixRoomKind
 import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
@@ -56,6 +57,7 @@ import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenView
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
+import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.rooms.RoomsScreenView
 import com.zyna.app.ui.rooms.RoomsScreenViewActions
 import com.zyna.app.ui.rooms.RoomsScrollAnchor
@@ -104,6 +106,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var lastRouteKey: String? = null
     private var latestState: AppUiState? = null
     private var latestRoomList: RoomListState? = null
+    private var latestRoomDetails: RoomDetailsState? = null
     private var latestContacts: ContactsFeatureState? = null
     private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
@@ -229,6 +232,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     fun render(
         state: AppUiState,
         roomList: RoomListState,
+        roomDetails: RoomDetailsState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -246,6 +250,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         }
         latestState = state
         latestRoomList = roomList
+        latestRoomDetails = roomDetails
         latestContacts = contacts
         latestProfile = profile
         latestCallHistory = callHistory
@@ -585,6 +590,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun renderLatest(animated: Boolean) {
         val state = latestState ?: return
         val roomList = latestRoomList ?: return
+        val roomDetails = latestRoomDetails ?: return
         val contacts = latestContacts ?: return
         val profile = latestProfile ?: return
         val callHistory = latestCallHistory ?: return
@@ -599,6 +605,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val entries = entriesFor(
             state,
             roomList,
+            roomDetails,
             contacts,
             profile,
             callHistory,
@@ -713,6 +720,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun entriesFor(
         state: AppUiState,
         roomList: RoomListState,
+        roomDetails: RoomDetailsState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -775,9 +783,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.Settings -> settingsEntry(state, actions, preferences)
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(
-                    state,
+                    roomDetails,
                     roomList,
                     actions,
+                    dependencies,
                     route
                 )
                 is AppRoute.Chat -> chatEntry(
@@ -1127,39 +1136,55 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     private fun roomDetailsEntry(
-        state: AppUiState,
+        roomDetails: RoomDetailsState,
         roomList: RoomListState,
         actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
         route: AppRoute.RoomDetails
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "roomDetails:${route.roomId}",
             createView = { context -> RoomDetailsScreenView(context) },
             updateView = { view ->
-                val room = roomList.roomForId(route.roomId)
-                val chatRoute = state.activeChatRoute?.takeIf { it.roomId == route.roomId }
-                val displayName = room?.displayName
-                    ?: chatRoute?.displayName
+                val routeState = roomDetails.takeIf { it.target?.roomId == route.roomId }
+                val seed = routeState?.seed ?: roomList.roomForId(route.roomId)
+                val details = routeState?.details ?: seed?.roomDetails
+                val displayName = details?.displayName
+                    ?: seed?.displayName
                     ?: route.roomId
+                val directUserId = details?.directUserId ?: seed?.directUserId
                 (view as RoomDetailsScreenView).render(
                     state = RoomDetailsScreenViewState(
                         roomId = route.roomId,
                         displayName = displayName,
-                        directUserId = room?.directUserId,
-                        unreadCount = room?.unreadCount ?: 0,
-                        isMarkedUnread = room?.isMarkedUnread == true
+                        avatarUrl = details?.avatarUrl ?: seed?.avatarUrl,
+                        directUserId = directUserId,
+                        kind = details?.kind ?: seed?.kind ?: MatrixRoomKind.GROUP,
+                        topic = details?.topic,
+                        joinedMemberCount = details?.joinedMemberCount,
+                        encryption = details?.encryption,
+                        access = details?.access,
+                        historyVisibility = details?.historyVisibility,
+                        pinnedEventCount = details?.pinnedEventCount,
+                        canonicalAlias = details?.canonicalAlias,
+                        unreadCount = seed?.unreadCount ?: 0,
+                        isMarkedUnread = seed?.isMarkedUnread == true,
+                        isLoading = routeState?.isLoading ?: (details == null),
+                        errorMessage = routeState?.errorMessage,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
                     ),
                     actions = RoomDetailsScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onOpenDirectUserProfile = {
-                            room?.directUserId?.takeIf { it.isNotBlank() }?.let { userId ->
+                            directUserId?.takeIf { it.isNotBlank() }?.let { userId ->
                                 actions.profile.user.onOpen(
                                     userId,
                                     displayName,
-                                    room.avatarUrl
+                                    details?.avatarUrl ?: seed?.avatarUrl
                                 )
                             }
-                        }
+                        },
+                        onRetry = actions.roomDetails.onRefresh
                     )
                 )
             }

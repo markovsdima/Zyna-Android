@@ -56,6 +56,9 @@ import com.zyna.app.ui.profile.OwnProfileState
 import com.zyna.app.ui.profile.UserProfileState
 import com.zyna.app.ui.profile.createOwnProfileStore
 import com.zyna.app.ui.profile.createUserProfileStore
+import com.zyna.app.ui.roomdetails.RoomDetailsState
+import com.zyna.app.ui.roomdetails.RoomDetailsTarget
+import com.zyna.app.ui.roomdetails.createRoomDetailsStore
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
 import com.zyna.app.util.ZynaPerfLog
@@ -82,6 +85,11 @@ data class LogoutConfirmationState(
 data class PendingEditProfileExit(
     val destination: EditProfileExitDestination,
     val editSessionId: Long
+)
+
+private data class RoomDetailsRouteInput(
+    val target: RoomDetailsTarget,
+    val seed: MatrixRoomSummary?
 )
 
 data class AppUiState(
@@ -192,6 +200,13 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomListState: StateFlow<RoomListState> = roomListStore.state
+    private val roomDetailsStore = createRoomDetailsStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomDetailsState: StateFlow<RoomDetailsState> = roomDetailsStore.state
     private val chatTimelineStore = createChatTimelineStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -252,6 +267,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeRoomDetailsRouteInputs()
+        }
+
+        viewModelScope.launch {
             combine(_uiState, roomListStore.state) { state, roomList ->
                 state to roomList
             }.collect { (state, roomList) ->
@@ -282,6 +301,7 @@ class AppViewModel(
                     matrixState is MatrixClientState.Error
                 ) {
                     roomListStore.deactivate()
+                    roomDetailsStore.deactivate()
                 }
                 if (
                     nextUserId == null ||
@@ -794,6 +814,10 @@ class AppViewModel(
         _uiState.update { current ->
             current.withNavigationState(current.navState.openRoomDetails())
         }
+    }
+
+    fun refreshRoomDetails() {
+        roomDetailsStore.refresh()
     }
 
     fun openProfileSettings() {
@@ -1473,6 +1497,27 @@ class AppViewModel(
                     lastProfileUserIds = nextProfileUserIds
                     presenceRepository.register(PRESENCE_TAG_PROFILE, nextProfileUserIds)
                 }
+            }
+        }
+    }
+
+    private suspend fun observeRoomDetailsRouteInputs() {
+        combine(_uiState, roomListStore.state) { state, roomList ->
+            val route = state.route as? AppRoute.RoomDetails
+            val userId = state.matrixState.userIdOrNull()
+            if (route == null || userId == null) {
+                null
+            } else {
+                RoomDetailsRouteInput(
+                    target = RoomDetailsTarget(userId = userId, roomId = route.roomId),
+                    seed = roomList.roomForId(route.roomId)
+                )
+            }
+        }.collect { input ->
+            if (input == null) {
+                roomDetailsStore.deactivate()
+            } else {
+                roomDetailsStore.activate(input.target, input.seed)
             }
         }
     }

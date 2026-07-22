@@ -13,6 +13,7 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.ui.avatar.MatrixAvatarView
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
@@ -68,7 +69,7 @@ internal class ProfileScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER_HORIZONTAL
         updatePadding(left = dp(20), right = dp(20), top = dp(36))
     }
-    private val avatarView = ProfileAvatarView(context)
+    private val avatarView = MatrixAvatarView(context)
     private val nameText = TextView(context).apply {
         textSize = 26f
         typeface = Typeface.DEFAULT_BOLD
@@ -265,7 +266,7 @@ internal class ProfileScreenView(context: Context) : FrameLayout(context) {
         settingsButton.setTextColor(palette.actionText)
         scrollView.setBackgroundColor(palette.background)
         content.setBackgroundColor(palette.background)
-        avatarView.setPalette(palette)
+        avatarView.setPaletteBackground(palette.background)
         nameText.setTextColor(palette.titleText)
         userIdText.setTextColor(palette.secondaryText)
         editButton.setTextColor(palette.actionText)

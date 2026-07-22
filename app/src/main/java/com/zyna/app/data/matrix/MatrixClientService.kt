@@ -73,6 +73,7 @@ import org.matrix.rustcomponents.sdk.EventTimelineItem
 import org.matrix.rustcomponents.sdk.FormattedBody
 import org.matrix.rustcomponents.sdk.ImageInfo
 import org.matrix.rustcomponents.sdk.ImageMessageContent
+import org.matrix.rustcomponents.sdk.JoinRule
 import org.matrix.rustcomponents.sdk.LatestEventValue
 import org.matrix.rustcomponents.sdk.MediaFileHandle
 import org.matrix.rustcomponents.sdk.MediaSource
@@ -93,6 +94,7 @@ import org.matrix.rustcomponents.sdk.ReceiptType
 import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomInfo
 import org.matrix.rustcomponents.sdk.RoomInfoListener
+import org.matrix.rustcomponents.sdk.RoomHistoryVisibility
 import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
 import org.matrix.rustcomponents.sdk.RoomListEntriesListener
 import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
@@ -160,19 +162,34 @@ data class MatrixContact(
     val roomId: String?
 )
 
+enum class MatrixRoomKind {
+    DIRECT,
+    GROUP,
+    SPACE
+}
+
 data class MatrixRoomSummary(
     val id: String,
     val displayName: String,
     val avatarUrl: String?,
     val directUserId: String? = null,
+    val isSpace: Boolean = false,
     val lastMessageText: String? = null,
     val lastMessageSenderName: String? = null,
     val lastMessageAtMillis: Long? = null,
     val lastOwnMessageStatus: MatrixLastOwnMessageStatus? = null,
     val unreadCount: Long = 0,
     val unreadMentionCount: Long = 0,
-    val isMarkedUnread: Boolean = false
-)
+    val isMarkedUnread: Boolean = false,
+    val roomDetails: MatrixRoomDetails? = null
+) {
+    val kind: MatrixRoomKind
+        get() = when {
+            isSpace -> MatrixRoomKind.SPACE
+            !directUserId.isNullOrBlank() -> MatrixRoomKind.DIRECT
+            else -> MatrixRoomKind.GROUP
+        }
+}
 
 internal data class MatrixRoomPreview(
     val body: String? = null,
@@ -988,6 +1005,57 @@ class MatrixClientService(
         awaitClose {
             cleanup()
         }
+    }.buffer(Channel.CONFLATED)
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.IO)
+
+    fun roomDetailsUpdates(roomId: String): Flow<MatrixRoomDetails> = callbackFlow {
+        val activeClient = client
+        if (activeClient == null) {
+            close(IllegalStateException("Matrix client is not ready"))
+            return@callbackFlow
+        }
+        val room = activeClient.getRoom(roomId)
+        if (room == null) {
+            close(IllegalStateException("Matrix room is not available"))
+            return@callbackFlow
+        }
+
+        var listenerHandle: TaskHandle? = null
+        val hasCleanedUp = AtomicBoolean(false)
+
+        fun emit(roomInfo: RoomInfo) {
+            val details = try {
+                roomInfo.toMatrixRoomDetails()
+            } finally {
+                roomInfo.destroy()
+            }
+            trySendBlocking(details)
+        }
+
+        fun cleanup() {
+            if (hasCleanedUp.compareAndSet(false, true)) {
+                listenerHandle?.cancelAndDestroy()
+                room.destroy()
+            }
+        }
+
+        try {
+            emit(room.roomInfo())
+            listenerHandle = room.subscribeToRoomInfoUpdates(
+                object : RoomInfoListener {
+                    override fun call(roomInfo: RoomInfo) {
+                        emit(roomInfo)
+                    }
+                }
+            )
+        } catch (error: Throwable) {
+            cleanup()
+            close(error)
+            return@callbackFlow
+        }
+
+        awaitClose(::cleanup)
     }.buffer(Channel.CONFLATED)
         .distinctUntilChanged()
         .flowOn(Dispatchers.IO)
@@ -2169,6 +2237,7 @@ class MatrixClientService(
         val roomInfo = runCatching { roomInfo() }.getOrNull()
         try {
             val latestPreview = latestEvent().toRoomPreview()
+            val details = roomInfo?.toMatrixRoomDetails()
             return MatrixRoomSummary(
                 id = id(),
                 displayName = displayName()
@@ -2177,13 +2246,15 @@ class MatrixClientService(
                     ?: id(),
                 avatarUrl = avatarUrl() ?: roomInfo?.avatarUrl,
                 directUserId = roomInfo?.directUserId(),
+                isSpace = roomInfo?.isSpace == true,
                 lastMessageText = latestPreview.body,
                 lastMessageSenderName = latestPreview.senderName,
                 lastMessageAtMillis = latestPreview.timestampMillis,
                 lastOwnMessageStatus = resolveLastOwnMessageStatus(latestPreview),
                 unreadCount = roomInfo?.numUnreadMessages?.toLong() ?: 0,
                 unreadMentionCount = roomInfo?.numUnreadMentions?.toLong() ?: 0,
-                isMarkedUnread = roomInfo?.isMarkedUnread ?: false
+                isMarkedUnread = roomInfo?.isMarkedUnread ?: false,
+                roomDetails = details
             )
         } finally {
             roomInfo?.destroy()
@@ -2197,6 +2268,51 @@ class MatrixClientService(
         return heroes.firstOrNull()
             ?.userId
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun RoomInfo.toMatrixRoomDetails(): MatrixRoomDetails {
+        val directUserId = directUserId()
+        val kind = when {
+            isSpace -> MatrixRoomKind.SPACE
+            directUserId != null -> MatrixRoomKind.DIRECT
+            else -> MatrixRoomKind.GROUP
+        }
+        return MatrixRoomDetails(
+            roomId = id,
+            displayName = displayName
+                ?.takeIf { it.isNotBlank() }
+                ?: rawName?.takeIf { it.isNotBlank() }
+                ?: id,
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() },
+            directUserId = directUserId,
+            kind = kind,
+            topic = topic?.takeIf { it.isNotBlank() },
+            joinedMemberCount = joinedMembersCount
+                .coerceAtMost(Long.MAX_VALUE.toULong())
+                .toLong(),
+            encryption = when (encryptionState) {
+                EncryptionState.ENCRYPTED -> MatrixRoomEncryption.ENCRYPTED
+                EncryptionState.NOT_ENCRYPTED -> MatrixRoomEncryption.NOT_ENCRYPTED
+                EncryptionState.UNKNOWN -> MatrixRoomEncryption.UNKNOWN
+            },
+            access = when (joinRule) {
+                JoinRule.Public -> MatrixRoomAccess.PUBLIC
+                JoinRule.Invite, JoinRule.Private -> MatrixRoomAccess.PRIVATE
+                JoinRule.Knock, is JoinRule.KnockRestricted -> MatrixRoomAccess.ASK_TO_JOIN
+                is JoinRule.Restricted -> MatrixRoomAccess.RESTRICTED
+                is JoinRule.Custom -> MatrixRoomAccess.CUSTOM
+                null -> MatrixRoomAccess.UNKNOWN
+            },
+            historyVisibility = when (historyVisibility) {
+                RoomHistoryVisibility.Shared -> MatrixRoomHistoryVisibility.SHARED
+                RoomHistoryVisibility.Invited -> MatrixRoomHistoryVisibility.INVITED
+                RoomHistoryVisibility.Joined -> MatrixRoomHistoryVisibility.JOINED
+                RoomHistoryVisibility.WorldReadable -> MatrixRoomHistoryVisibility.WORLD_READABLE
+                is RoomHistoryVisibility.Custom -> MatrixRoomHistoryVisibility.CUSTOM
+            },
+            pinnedEventCount = pinnedEventIds.size,
+            canonicalAlias = canonicalAlias?.takeIf { it.isNotBlank() }
+        )
     }
 
     private fun RoomInfo.toRoomCallInfo(

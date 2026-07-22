@@ -27,7 +27,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixContact
-import com.zyna.app.ui.profile.ProfileAvatarView
+import com.zyna.app.ui.avatar.MatrixAvatarView
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
@@ -289,7 +289,7 @@ private class ContactViewHolder(context: Context) : RecyclerView.ViewHolder(
         isFocusable = true
         updatePadding(left = dp(16), right = dp(12), top = dp(10), bottom = dp(10))
     }
-    private val avatar = ProfileAvatarView(context)
+    private val avatar = MatrixAvatarView(context)
     private val textColumn = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_VERTICAL
@@ -382,7 +382,7 @@ private class ContactViewHolder(context: Context) : RecyclerView.ViewHolder(
     ) {
         root.setBackgroundColor(palette.background)
         row.setBackgroundColor(palette.background)
-        avatar.setPalette(palette)
+        avatar.setPaletteBackground(palette.background)
         avatar.render(
             userId = contact.userId,
             displayName = contact.displayName,

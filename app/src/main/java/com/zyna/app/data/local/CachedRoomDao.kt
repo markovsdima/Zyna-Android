@@ -16,6 +16,9 @@ interface CachedRoomDao {
     @Query("SELECT * FROM rooms WHERE userId = :userId AND id = :roomId LIMIT 1")
     suspend fun roomSnapshot(userId: String, roomId: String): CachedRoomEntity?
 
+    @Query("SELECT * FROM rooms WHERE userId = :userId AND id = :roomId LIMIT 1")
+    fun observeRoom(userId: String, roomId: String): Flow<CachedRoomEntity?>
+
     @Upsert
     suspend fun upsertRooms(rooms: List<CachedRoomEntity>)
 
@@ -38,6 +41,33 @@ interface CachedRoomDao {
         lastMessageAtMillis: Long?,
         lastOwnMessageStatus: String?,
         updatedAtMillis: Long
+    ): Int
+
+    @Query(
+        """
+        UPDATE rooms
+        SET detailsTopic = :topic,
+            detailsJoinedMemberCount = :joinedMemberCount,
+            detailsEncryption = :encryption,
+            detailsAccess = :access,
+            detailsHistoryVisibility = :historyVisibility,
+            detailsPinnedEventCount = :pinnedEventCount,
+            detailsCanonicalAlias = :canonicalAlias,
+            detailsUpdatedAtMillis = :detailsUpdatedAtMillis
+        WHERE userId = :userId AND id = :roomId
+        """
+    )
+    suspend fun updateRoomDetails(
+        userId: String,
+        roomId: String,
+        topic: String?,
+        joinedMemberCount: Long,
+        encryption: String,
+        access: String,
+        historyVisibility: String,
+        pinnedEventCount: Int,
+        canonicalAlias: String?,
+        detailsUpdatedAtMillis: Long
     ): Int
 
     @Query("DELETE FROM rooms WHERE userId = :userId")

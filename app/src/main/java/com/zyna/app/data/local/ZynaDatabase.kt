@@ -19,7 +19,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         MatrixRtcCallEntity::class,
         MatrixRtcCallMembershipEntity::class
     ],
-    version = 21,
+    version = 22,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -73,7 +73,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_17_18,
                     MIGRATION_18_19,
                     MIGRATION_19_20,
-                    MIGRATION_20_21
+                    MIGRATION_20_21,
+                    MIGRATION_21_22
                 )
                 .build()
         }
@@ -480,6 +481,20 @@ abstract class ZynaDatabase : RoomDatabase() {
         private val MIGRATION_20_21 = object : Migration(20, 21) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE timeline_messages ADD COLUMN timelineDetailsJson TEXT")
+            }
+        }
+
+        private val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN isSpace INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsTopic TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsJoinedMemberCount INTEGER")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsEncryption TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsAccess TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsHistoryVisibility TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsPinnedEventCount INTEGER")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanonicalAlias TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsUpdatedAtMillis INTEGER")
             }
         }
     }

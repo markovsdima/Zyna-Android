@@ -15,6 +15,7 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.ui.avatar.MatrixAvatarView
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.presence.UserPresenceStatus
@@ -79,7 +80,7 @@ internal class UserProfileScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER_HORIZONTAL
         updatePadding(left = dp(20), right = dp(20), top = dp(32), bottom = dp(24))
     }
-    private val avatarView = ProfileAvatarView(context)
+    private val avatarView = MatrixAvatarView(context)
     private val nameText = TextView(context).apply {
         textSize = 26f
         typeface = Typeface.DEFAULT_BOLD
@@ -306,7 +307,7 @@ internal class UserProfileScreenView(context: Context) : FrameLayout(context) {
         titleText.setTextColor(palette.titleText)
         scrollView.setBackgroundColor(palette.background)
         content.setBackgroundColor(palette.background)
-        avatarView.setPalette(palette)
+        avatarView.setPaletteBackground(palette.background)
         nameText.setTextColor(palette.titleText)
         userIdText.setTextColor(palette.secondaryText)
         presenceText.setTextColor(palette.secondaryText)

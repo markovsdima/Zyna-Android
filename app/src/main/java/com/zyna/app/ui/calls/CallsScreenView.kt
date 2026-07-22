@@ -24,7 +24,7 @@ import com.zyna.app.R
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryItem
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryOutcome
 import com.zyna.app.data.media.MatrixMediaLoader
-import com.zyna.app.ui.profile.ProfileAvatarView
+import com.zyna.app.ui.avatar.MatrixAvatarView
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
@@ -214,7 +214,7 @@ private class CallViewHolder(context: Context) : RecyclerView.ViewHolder(
         isFocusable = true
         updatePadding(left = dp(16), right = dp(12), top = dp(10), bottom = dp(10))
     }
-    private val avatar = ProfileAvatarView(context)
+    private val avatar = MatrixAvatarView(context)
     private val textColumn = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_VERTICAL
@@ -285,7 +285,7 @@ private class CallViewHolder(context: Context) : RecyclerView.ViewHolder(
     ) {
         root.setBackgroundColor(palette.background)
         row.setBackgroundColor(palette.background)
-        avatar.setPalette(palette)
+        avatar.setPaletteBackground(palette.background)
         avatar.render(
             userId = item.senderId,
             displayName = item.title,

@@ -21,6 +21,7 @@ data class ZynaRootActions(
     val contacts: ContactsFeatureActions,
     val calls: CallsFeatureActions,
     val rooms: RoomsFeatureActions,
+    val roomDetails: RoomDetailsFeatureActions,
     val chat: ChatFeatureActions,
     val profile: ProfileFeatureActions,
     val settings: SettingsFeatureActions
@@ -52,6 +53,10 @@ data class CallsFeatureActions(
 data class RoomsFeatureActions(
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit
+)
+
+data class RoomDetailsFeatureActions(
+    val onRefresh: () -> Unit
 )
 
 data class ChatFeatureActions(

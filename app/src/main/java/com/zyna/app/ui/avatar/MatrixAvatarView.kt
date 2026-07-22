@@ -1,4 +1,4 @@
-package com.zyna.app.ui.profile
+package com.zyna.app.ui.avatar
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -13,7 +13,6 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import com.zyna.app.data.media.MatrixMediaLoader
-import com.zyna.app.ui.settings.SettingsPalette
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,14 +20,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-internal class ProfileAvatarView(context: Context) : FrameLayout(context) {
+internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
     private val density = resources.displayMetrics.density
     private val decodeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var palette = SettingsPalette.from(context)
+    private var paletteBackground = Color.WHITE
     private var loadHandle: AutoCloseable? = null
     private var localDecodeJob: Job? = null
     private var loadedKey: String? = null
     private var currentLoader: MatrixMediaLoader? = null
+    private var currentColorSeed: String? = null
 
     private val initialsText = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -78,8 +78,9 @@ internal class ProfileAvatarView(context: Context) : FrameLayout(context) {
         super.onDetachedFromWindow()
     }
 
-    fun setPalette(nextPalette: SettingsPalette) {
-        palette = nextPalette
+    fun setPaletteBackground(color: Int) {
+        paletteBackground = color
+        currentColorSeed?.let { seed -> setBackgroundColor(avatarColor(seed)) }
     }
 
     fun render(
@@ -91,9 +92,11 @@ internal class ProfileAvatarView(context: Context) : FrameLayout(context) {
         sizePx: Int
     ) {
         val name = displayName?.takeIf { it.isNotBlank() } ?: userId
+        val colorSeed = userId.ifBlank { name }
+        currentColorSeed = colorSeed
         initialsText.text = name.avatarInitial()
         initialsText.textSize = (sizePx / density / 2.65f).coerceAtLeast(18f)
-        setBackgroundColor(avatarColor(userId.ifBlank { name }))
+        setBackgroundColor(avatarColor(colorSeed))
 
         val localPath = localAvatarPath?.takeIf { it.isNotBlank() }
         if (localPath != null) {
@@ -192,7 +195,7 @@ internal class ProfileAvatarView(context: Context) : FrameLayout(context) {
     }
 
     private fun isDarkPalette(): Boolean {
-        return Color.luminance(palette.background) < 0.5f
+        return Color.luminance(paletteBackground) < 0.5f
     }
 
     private fun String.avatarInitial(): String {

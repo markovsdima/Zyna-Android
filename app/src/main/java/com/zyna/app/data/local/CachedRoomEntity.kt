@@ -12,6 +12,7 @@ data class CachedRoomEntity(
     val displayName: String,
     val avatarUrl: String?,
     val directUserId: String?,
+    val isSpace: Boolean = false,
     val lastMessageText: String?,
     val lastMessageSenderName: String?,
     val lastMessageAtMillis: Long?,
@@ -19,5 +20,13 @@ data class CachedRoomEntity(
     val unreadCount: Long,
     val unreadMentionCount: Long,
     val isMarkedUnread: Boolean,
-    val updatedAtMillis: Long
+    val updatedAtMillis: Long,
+    val detailsTopic: String? = null,
+    val detailsJoinedMemberCount: Long? = null,
+    val detailsEncryption: String? = null,
+    val detailsAccess: String? = null,
+    val detailsHistoryVisibility: String? = null,
+    val detailsPinnedEventCount: Int? = null,
+    val detailsCanonicalAlias: String? = null,
+    val detailsUpdatedAtMillis: Long? = null
 )

@@ -64,6 +64,7 @@ import com.zyna.app.ui.navigation.NavigationActions
 import com.zyna.app.ui.navigation.OwnProfileActions
 import com.zyna.app.ui.navigation.ProfileFeatureActions
 import com.zyna.app.ui.navigation.RoomsFeatureActions
+import com.zyna.app.ui.navigation.RoomDetailsFeatureActions
 import com.zyna.app.ui.navigation.SettingsFeatureActions
 import com.zyna.app.ui.navigation.UserProfileActions
 import com.zyna.app.ui.navigation.ZynaRenderDependencies
@@ -78,6 +79,7 @@ import com.zyna.app.ui.profile.ProfileAvatarCropState
 import com.zyna.app.ui.profile.ProfileAvatarPickRequest
 import com.zyna.app.ui.profile.createProfileAvatarCropDriver
 import com.zyna.app.ui.profile.ProfileFeatureState
+import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
@@ -93,12 +95,14 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
     private data class AppFeatureInput(
         val state: AppUiState,
-        val roomList: RoomListState
+        val roomList: RoomListState,
+        val roomDetails: RoomDetailsState
     )
 
     private data class RootFeatureInput(
         val state: AppUiState,
         val roomList: RoomListState,
+        val roomDetails: RoomDetailsState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -108,6 +112,7 @@ class MainActivity : AppCompatActivity() {
     private data class RootRenderInput(
         val state: AppUiState,
         val roomList: RoomListState,
+        val roomDetails: RoomDetailsState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -324,9 +329,14 @@ class MainActivity : AppCompatActivity() {
                     combine(
                         combine(
                             appViewModel.uiState,
-                            appViewModel.roomListState
-                        ) { state, roomList ->
-                            AppFeatureInput(state = state, roomList = roomList)
+                            appViewModel.roomListState,
+                            appViewModel.roomDetailsState
+                        ) { state, roomList, roomDetails ->
+                            AppFeatureInput(
+                                state = state,
+                                roomList = roomList,
+                                roomDetails = roomDetails
+                            )
                         },
                         combine(
                             appViewModel.contactsState,
@@ -359,6 +369,7 @@ class MainActivity : AppCompatActivity() {
                         RootFeatureInput(
                             state = app.state,
                             roomList = app.roomList,
+                            roomDetails = app.roomDetails,
                             contacts = contacts,
                             profile = profile,
                             callHistory = callHistory,
@@ -372,6 +383,7 @@ class MainActivity : AppCompatActivity() {
                     RootRenderInput(
                         state = feature.state,
                         roomList = feature.roomList,
+                        roomDetails = feature.roomDetails,
                         contacts = feature.contacts,
                         profile = feature.profile,
                         callHistory = feature.callHistory,
@@ -398,6 +410,7 @@ class MainActivity : AppCompatActivity() {
                     rootHost.render(
                         state = state,
                         roomList = input.roomList,
+                        roomDetails = input.roomDetails,
                         contacts = input.contacts,
                         profile = input.profile,
                         callHistory = input.callHistory,
@@ -449,6 +462,9 @@ class MainActivity : AppCompatActivity() {
             rooms = RoomsFeatureActions(
                 onOpenRoom = appViewModel::openRoom,
                 onForwardRoomSelected = appViewModel::selectForwardRoom
+            ),
+            roomDetails = RoomDetailsFeatureActions(
+                onRefresh = appViewModel::refreshRoomDetails
             ),
             chat = ChatFeatureActions(
                 navigation = ChatNavigationActions(

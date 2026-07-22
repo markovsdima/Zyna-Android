@@ -19,6 +19,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
+import com.zyna.app.ui.avatar.MatrixAvatarView
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.ui.settings.SettingsPalette
@@ -92,7 +93,7 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         gravity = Gravity.CENTER_HORIZONTAL
         updatePadding(left = dp(20), right = dp(20), top = dp(30))
     }
-    private val avatarView = ProfileAvatarView(context)
+    private val avatarView = MatrixAvatarView(context)
     private val changePhotoButton = TextView(context).apply {
         text = "Change Photo"
         textSize = 15f
@@ -387,7 +388,7 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         saveButton.setTextColor(palette.actionText)
         scrollView.setBackgroundColor(palette.background)
         content.setBackgroundColor(palette.background)
-        avatarView.setPalette(palette)
+        avatarView.setPaletteBackground(palette.background)
         changePhotoButton.setTextColor(palette.actionText)
         changePhotoButton.background = roundedDrawable(palette.selectedFill, dp(13))
         removePhotoButton.setTextColor(0xFFE5484D.toInt())

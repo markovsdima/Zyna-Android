@@ -19,6 +19,11 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReactionSender
 import com.zyna.app.data.matrix.MatrixReplyInfo
+import com.zyna.app.data.matrix.MatrixRoomAccess
+import com.zyna.app.data.matrix.MatrixRoomDetails
+import com.zyna.app.data.matrix.MatrixRoomEncryption
+import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
+import com.zyna.app.data.matrix.MatrixRoomKind
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixRtcCallEventDetails
 import com.zyna.app.data.matrix.toMatrixChatMessage
@@ -44,6 +49,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -115,6 +121,10 @@ private fun String.deliveryProgressRank(): Int {
     }
 }
 
+private inline fun <reified T : Enum<T>> String?.toCachedEnumOrDefault(default: T): T {
+    return this?.let { value -> enumValues<T>().firstOrNull { it.name == value } } ?: default
+}
+
 internal data class PendingResolvedRoomSummary(
     val room: MatrixRoomSummary,
     val remainingAbsentSnapshots: Int
@@ -162,6 +172,7 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         displayName = displayName,
         avatarUrl = avatarUrl,
         directUserId = directUserId ?: existingRoom?.directUserId,
+        isSpace = isSpace,
         lastMessageText = preview.text,
         lastMessageSenderName = preview.senderName,
         lastMessageAtMillis = preview.timestampMillis,
@@ -169,7 +180,26 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         unreadCount = unreadCount,
         unreadMentionCount = unreadMentionCount,
         isMarkedUnread = isMarkedUnread,
-        updatedAtMillis = updatedAtMillis
+        updatedAtMillis = updatedAtMillis,
+        detailsTopic = if (roomDetails != null) roomDetails.topic else existingRoom?.detailsTopic,
+        detailsJoinedMemberCount = roomDetails?.joinedMemberCount
+            ?: existingRoom?.detailsJoinedMemberCount,
+        detailsEncryption = roomDetails?.encryption?.name ?: existingRoom?.detailsEncryption,
+        detailsAccess = roomDetails?.access?.name ?: existingRoom?.detailsAccess,
+        detailsHistoryVisibility = roomDetails?.historyVisibility?.name
+            ?: existingRoom?.detailsHistoryVisibility,
+        detailsPinnedEventCount = roomDetails?.pinnedEventCount
+            ?: existingRoom?.detailsPinnedEventCount,
+        detailsCanonicalAlias = if (roomDetails != null) {
+            roomDetails.canonicalAlias
+        } else {
+            existingRoom?.detailsCanonicalAlias
+        },
+        detailsUpdatedAtMillis = if (roomDetails != null) {
+            updatedAtMillis
+        } else {
+            existingRoom?.detailsUpdatedAtMillis
+        }
     )
 }
 
@@ -190,6 +220,62 @@ class LocalCacheRepository(
         return roomDao.observeRooms(userId).map { rooms ->
             rooms.map { it.toRoomSummary() }
                 .sortedWith(RoomSummaryComparator)
+        }
+    }
+
+    fun observeRoomDetails(userId: String, roomId: String): Flow<MatrixRoomDetails?> {
+        return roomDao.observeRoom(userId, roomId)
+            .map { room -> room.toRoomDetailsOrNull() }
+            .distinctUntilChanged()
+    }
+
+    suspend fun cacheRoomDetails(userId: String, details: MatrixRoomDetails) {
+        val now = System.currentTimeMillis()
+        roomCacheWriteMutex.withLock {
+            database.withTransaction {
+                val updated = roomDao.updateRoomDetails(
+                    userId = userId,
+                    roomId = details.roomId,
+                    topic = details.topic,
+                    joinedMemberCount = details.joinedMemberCount,
+                    encryption = details.encryption.name,
+                    access = details.access.name,
+                    historyVisibility = details.historyVisibility.name,
+                    pinnedEventCount = details.pinnedEventCount,
+                    canonicalAlias = details.canonicalAlias,
+                    detailsUpdatedAtMillis = now
+                )
+                if (updated == 0) {
+                    roomDao.upsertRooms(
+                        listOf(
+                            CachedRoomEntity(
+                                userId = userId,
+                                id = details.roomId,
+                                displayName = details.displayName,
+                                avatarUrl = details.avatarUrl,
+                                directUserId = details.directUserId,
+                                isSpace = details.kind == MatrixRoomKind.SPACE,
+                                lastMessageText = null,
+                                lastMessageSenderName = null,
+                                lastMessageAtMillis = null,
+                                lastOwnMessageStatus = null,
+                                unreadCount = 0,
+                                unreadMentionCount = 0,
+                                isMarkedUnread = false,
+                                updatedAtMillis = now,
+                                detailsTopic = details.topic,
+                                detailsJoinedMemberCount = details.joinedMemberCount,
+                                detailsEncryption = details.encryption.name,
+                                detailsAccess = details.access.name,
+                                detailsHistoryVisibility = details.historyVisibility.name,
+                                detailsPinnedEventCount = details.pinnedEventCount,
+                                detailsCanonicalAlias = details.canonicalAlias,
+                                detailsUpdatedAtMillis = now
+                            )
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -2042,13 +2128,44 @@ class LocalCacheRepository(
             displayName = displayName,
             avatarUrl = avatarUrl,
             directUserId = directUserId,
+            isSpace = isSpace,
             lastMessageText = lastMessageText,
             lastMessageSenderName = lastMessageSenderName,
             lastMessageAtMillis = lastMessageAtMillis,
             lastOwnMessageStatus = lastOwnMessageStatus.toLastOwnMessageStatusOrNull(),
             unreadCount = unreadCount,
             unreadMentionCount = unreadMentionCount,
-            isMarkedUnread = isMarkedUnread
+            isMarkedUnread = isMarkedUnread,
+            roomDetails = toRoomDetailsOrNull()
+        )
+    }
+
+    private fun CachedRoomEntity?.toRoomDetailsOrNull(): MatrixRoomDetails? {
+        val room = this ?: return null
+        if (room.detailsUpdatedAtMillis == null) {
+            return null
+        }
+        return MatrixRoomDetails(
+            roomId = room.id,
+            displayName = room.displayName,
+            avatarUrl = room.avatarUrl,
+            directUserId = room.directUserId,
+            kind = when {
+                room.isSpace -> MatrixRoomKind.SPACE
+                !room.directUserId.isNullOrBlank() -> MatrixRoomKind.DIRECT
+                else -> MatrixRoomKind.GROUP
+            },
+            topic = room.detailsTopic,
+            joinedMemberCount = room.detailsJoinedMemberCount ?: 0,
+            encryption = room.detailsEncryption.toCachedEnumOrDefault(
+                MatrixRoomEncryption.UNKNOWN
+            ),
+            access = room.detailsAccess.toCachedEnumOrDefault(MatrixRoomAccess.UNKNOWN),
+            historyVisibility = room.detailsHistoryVisibility.toCachedEnumOrDefault(
+                MatrixRoomHistoryVisibility.CUSTOM
+            ),
+            pinnedEventCount = room.detailsPinnedEventCount ?: 0,
+            canonicalAlias = room.detailsCanonicalAlias
         )
     }
 

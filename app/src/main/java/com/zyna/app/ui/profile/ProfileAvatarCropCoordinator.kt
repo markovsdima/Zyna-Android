@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.annotation.MainThread
 import com.zyna.app.data.profile.ProfileAvatarCropSpec
 import com.zyna.app.data.profile.ProfileAvatarDraft
+import com.zyna.app.ui.avatar.AvatarCropTarget
 import java.io.File
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -15,7 +16,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 internal data class ProfileAvatarPickRequest(
-    val editSessionId: Long,
+    val target: AvatarCropTarget,
     val generation: Long
 )
 
@@ -42,9 +43,9 @@ internal data class ProfileAvatarCropState(
 internal class ProfileAvatarCropCoordinator(
     private val scope: CoroutineScope,
     private val driver: ProfileAvatarCropDriver,
-    private val canDeliver: (editSessionId: Long) -> Boolean,
-    private val onDraftReady: (ProfileAvatarDraft, editSessionId: Long) -> Unit,
-    private val onPreparationError: (editSessionId: Long) -> Unit,
+    private val canDeliver: (AvatarCropTarget) -> Boolean,
+    private val onDraftReady: (ProfileAvatarDraft, AvatarCropTarget) -> Unit,
+    private val onPreparationError: (AvatarCropTarget) -> Unit,
     private val onSessionWillClose: () -> Unit
 ) {
     private val _state = MutableStateFlow(ProfileAvatarCropState())
@@ -55,11 +56,11 @@ internal class ProfileAvatarCropCoordinator(
     private var sourceCleanupJob: Job? = null
 
     @MainThread
-    fun beginPick(editSessionId: Long): ProfileAvatarPickRequest {
+    fun beginPick(target: AvatarCropTarget): ProfileAvatarPickRequest {
         clearSession(cancelOperation = true)
         generation += 1
         return ProfileAvatarPickRequest(
-            editSessionId = editSessionId,
+            target = target,
             generation = generation
         )
     }
@@ -70,7 +71,7 @@ internal class ProfileAvatarCropCoordinator(
             uri == null ||
             request == null ||
             request.generation != generation ||
-            !canDeliver(request.editSessionId)
+            !canDeliver(request.target)
         ) {
             return
         }
@@ -83,7 +84,7 @@ internal class ProfileAvatarCropCoordinator(
                 val prepared = driver.prepareSource(uri)
                 sourceFile = prepared.sourceFile
                 previewBitmap = prepared.previewBitmap
-                if (!owns(request) || !canDeliver(request.editSessionId)) {
+                if (!owns(request) || !canDeliver(request.target)) {
                     return@launch
                 }
                 _state.value = ProfileAvatarCropState(
@@ -98,8 +99,8 @@ internal class ProfileAvatarCropCoordinator(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (owns(request) && canDeliver(request.editSessionId)) {
-                    onPreparationError(request.editSessionId)
+                if (owns(request) && canDeliver(request.target)) {
+                    onPreparationError(request.target)
                 }
             } finally {
                 previewBitmap?.let(driver.recyclePreview)
@@ -124,11 +125,11 @@ internal class ProfileAvatarCropCoordinator(
                 if (!owns(session)) {
                     return@launch
                 }
-                if (!canDeliver(session.request.editSessionId)) {
+                if (!canDeliver(session.request.target)) {
                     clearSession(cancelOperation = false)
                     return@launch
                 }
-                onDraftReady(draft, session.request.editSessionId)
+                onDraftReady(draft, session.request.target)
                 unclaimedDraft = null
                 clearSession(cancelOperation = false)
             } catch (error: CancellationException) {

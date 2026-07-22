@@ -23,6 +23,7 @@ data class ZynaRootActions(
     val calls: CallsFeatureActions,
     val rooms: RoomsFeatureActions,
     val roomDetails: RoomDetailsFeatureActions,
+    val roomProfileEditor: RoomProfileEditorActions,
     val roomMembers: RoomMembersFeatureActions,
     val inviteMembers: InviteMembersFeatureActions,
     val chat: ChatFeatureActions,
@@ -60,8 +61,18 @@ data class RoomsFeatureActions(
 
 data class RoomDetailsFeatureActions(
     val onRefresh: () -> Unit,
+    val onOpenProfileEditor: () -> Unit,
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit
+)
+
+data class RoomProfileEditorActions(
+    val onDisplayNameChanged: (String) -> Unit,
+    val onPickAvatar: (Long) -> Unit,
+    val onRemoveAvatar: () -> Unit,
+    val onSave: () -> Unit,
+    val onConfirmDiscard: () -> Unit,
+    val onCancelDiscard: () -> Unit
 )
 
 data class RoomMembersFeatureActions(

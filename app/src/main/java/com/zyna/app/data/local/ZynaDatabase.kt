@@ -19,7 +19,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         MatrixRtcCallEntity::class,
         MatrixRtcCallMembershipEntity::class
     ],
-    version = 23,
+    version = 24,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -75,7 +75,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_19_20,
                     MIGRATION_20_21,
                     MIGRATION_21_22,
-                    MIGRATION_22_23
+                    MIGRATION_22_23,
+                    MIGRATION_23_24
                 )
                 .build()
         }
@@ -502,6 +503,13 @@ abstract class ZynaDatabase : RoomDatabase() {
         private val MIGRATION_22_23 = object : Migration(22, 23) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanInviteMembers INTEGER")
+            }
+        }
+
+        private val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanChangeName INTEGER")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanChangeAvatar INTEGER")
             }
         }
     }

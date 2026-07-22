@@ -20,19 +20,39 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import com.zyna.app.ui.avatar.MatrixAvatarView
-import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
-internal data class EditProfileScreenViewState(
-    val profile: OwnProfileState,
+internal data class ProfileEditorScreenViewState(
+    val identityId: String,
+    val displayName: String,
+    val editDisplayName: String,
+    val avatarUrl: String?,
+    val editAvatarLocalPath: String?,
+    val hasAvatar: Boolean,
+    val editSessionId: Long,
+    val isSaving: Boolean,
+    val canSave: Boolean,
+    val canChangeName: Boolean,
+    val canChangeAvatar: Boolean,
+    val errorMessage: String?,
+    val backLabel: String,
+    val saveLabel: String,
+    val title: String,
+    val nameLabel: String,
+    val changePhotoLabel: String,
+    val removePhotoLabel: String,
+    val discardTitle: String,
+    val discardMessage: String,
+    val keepEditingLabel: String,
+    val discardLabel: String,
     val matrixMediaLoader: MatrixMediaLoader?,
     val bottomContentPaddingPx: Int,
     val isDiscardConfirmationVisible: Boolean
 )
 
-internal data class EditProfileScreenViewActions(
+internal data class ProfileEditorScreenViewActions(
     val onBack: () -> Unit,
     val onDisplayNameChanged: (String) -> Unit,
     val onPickAvatar: (Long) -> Unit,
@@ -42,7 +62,7 @@ internal data class EditProfileScreenViewActions(
     val onDiscardChangesCancelled: () -> Unit
 )
 
-internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
+internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) {
     private val density = resources.displayMetrics.density
     private var palette = SettingsPalette.from(context)
     private var statusTopInset = 0
@@ -268,7 +288,7 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         }
     }
 
-    private var actions: EditProfileScreenViewActions? = null
+    private var actions: ProfileEditorScreenViewActions? = null
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
@@ -288,77 +308,82 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
     }
 
     fun render(
-        state: EditProfileScreenViewState,
-        actions: EditProfileScreenViewActions
+        state: ProfileEditorScreenViewState,
+        actions: ProfileEditorScreenViewActions
     ) {
         this.actions = actions
         bottomContentPaddingPx = state.bottomContentPaddingPx
         updateContentPadding()
 
-        val profile = state.profile
+        backButton.text = state.backLabel
+        saveButton.text = state.saveLabel
+        titleText.text = state.title
+        nameLabel.text = state.nameLabel
+        changePhotoButton.text = state.changePhotoLabel
+        removePhotoButton.text = state.removePhotoLabel
         isRendering = true
-        if (nameEdit.text.toString() != profile.editDisplayName) {
-            nameEdit.setText(profile.editDisplayName)
+        if (nameEdit.text.toString() != state.editDisplayName) {
+            nameEdit.setText(state.editDisplayName)
             nameEdit.setSelection(nameEdit.text?.length ?: 0)
         }
         isRendering = false
 
-        val avatarUrl = profile.avatarUrl.takeUnless {
-            profile.editAvatarChange == OwnProfileAvatarChange.REMOVE
-        }
-        val localAvatarPath = profile.editAvatarLocalPath.takeIf {
-            profile.editAvatarChange == OwnProfileAvatarChange.REPLACE
-        }
         avatarView.render(
-            userId = profile.userId,
-            displayName = profile.editDisplayName.takeIf { it.isNotBlank() }
-                ?: profile.displayName,
-            avatarUrl = avatarUrl,
-            localAvatarPath = localAvatarPath,
+            userId = state.identityId,
+            displayName = state.editDisplayName.takeIf { it.isNotBlank() }
+                ?: state.displayName,
+            avatarUrl = state.avatarUrl,
+            localAvatarPath = state.editAvatarLocalPath,
             matrixMediaLoader = state.matrixMediaLoader,
             sizePx = dp(112)
         )
 
-        val isSaving = profile.isSaving
+        val isSaving = state.isSaving
         if (isSaving || !state.isDiscardConfirmationVisible) {
             discardChangesDialog?.dismiss()
         } else {
-            showDiscardChangesConfirmation(actions)
+            showDiscardChangesConfirmation(state, actions)
         }
         backButton.isEnabled = !isSaving
-        saveButton.isEnabled = !isSaving
-        changePhotoButton.isEnabled = !isSaving
-        removePhotoButton.isEnabled = !isSaving
+        saveButton.isEnabled = state.canSave
+        changePhotoButton.isEnabled = !isSaving && state.canChangeAvatar
+        removePhotoButton.isEnabled = !isSaving && state.canChangeAvatar
 
         backButton.setOnClickListener { if (!isSaving) actions.onBack() }
-        saveButton.setOnClickListener { if (!isSaving) actions.onSave() }
+        saveButton.setOnClickListener { if (state.canSave) actions.onSave() }
         changePhotoButton.setOnClickListener {
-            if (!isSaving) {
-                actions.onPickAvatar(profile.editSessionId)
+            if (!isSaving && state.canChangeAvatar) {
+                actions.onPickAvatar(state.editSessionId)
             }
         }
-        removePhotoButton.setOnClickListener { if (!isSaving) actions.onRemoveAvatar() }
+        removePhotoButton.setOnClickListener {
+            if (!isSaving && state.canChangeAvatar) actions.onRemoveAvatar()
+        }
 
-        removePhotoButton.visibility = if (profile.hasAvatar) VISIBLE else GONE
+        changePhotoButton.visibility = if (state.canChangeAvatar) VISIBLE else GONE
+        removePhotoButton.visibility = if (state.canChangeAvatar && state.hasAvatar) VISIBLE else GONE
         progress.visibility = if (isSaving) VISIBLE else GONE
-        errorText.text = profile.errorMessage.orEmpty()
-        errorText.visibility = if (profile.errorMessage.isNullOrBlank()) GONE else VISIBLE
-        applyEnabledState(isSaving)
+        errorText.text = state.errorMessage.orEmpty()
+        errorText.visibility = if (state.errorMessage.isNullOrBlank()) GONE else VISIBLE
+        applyEnabledState(state)
     }
 
-    private fun showDiscardChangesConfirmation(actions: EditProfileScreenViewActions) {
+    private fun showDiscardChangesConfirmation(
+        state: ProfileEditorScreenViewState,
+        actions: ProfileEditorScreenViewActions
+    ) {
         if (discardChangesDialog?.isShowing == true) {
             return
         }
         var handled = false
         discardChangesDialog = AlertDialog.Builder(context)
-            .setTitle(R.string.profile_edit_discard_title)
-            .setMessage(R.string.profile_edit_discard_message)
-            .setNegativeButton(R.string.profile_edit_keep_editing) { _, _ ->
+            .setTitle(state.discardTitle)
+            .setMessage(state.discardMessage)
+            .setNegativeButton(state.keepEditingLabel) { _, _ ->
                 handled = true
                 actions.onDiscardChangesCancelled()
             }
-            .setPositiveButton(R.string.profile_edit_discard) { _, _ ->
+            .setPositiveButton(state.discardLabel) { _, _ ->
                 handled = true
                 actions.onDiscardChangesConfirmed()
             }
@@ -399,13 +424,14 @@ internal class EditProfileScreenView(context: Context) : FrameLayout(context) {
         errorText.setTextColor(0xFFE5484D.toInt())
     }
 
-    private fun applyEnabledState(isSaving: Boolean) {
+    private fun applyEnabledState(state: ProfileEditorScreenViewState) {
         val disabledAlpha = 0.45f
-        backButton.alpha = if (isSaving) disabledAlpha else 1f
-        saveButton.alpha = if (isSaving) disabledAlpha else 1f
-        changePhotoButton.alpha = if (isSaving) disabledAlpha else 1f
-        removePhotoButton.alpha = if (isSaving) disabledAlpha else 1f
-        nameEdit.isEnabled = !isSaving
+        backButton.alpha = if (state.isSaving) disabledAlpha else 1f
+        saveButton.alpha = if (state.canSave) 1f else disabledAlpha
+        changePhotoButton.alpha = if (!state.isSaving && state.canChangeAvatar) 1f else disabledAlpha
+        removePhotoButton.alpha = if (!state.isSaving && state.canChangeAvatar) 1f else disabledAlpha
+        nameEdit.isEnabled = !state.isSaving && state.canChangeName
+        nameEdit.alpha = if (nameEdit.isEnabled) 1f else disabledAlpha
     }
 
     private fun updateTopBarHeight() {

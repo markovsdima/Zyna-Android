@@ -44,6 +44,7 @@ import com.zyna.app.ui.app.AppViewModel
 import com.zyna.app.ui.app.AppViewModelFactory
 import com.zyna.app.ui.app.ExternalRouteDeliveryTracker
 import com.zyna.app.ui.app.ExternalRouteIntents
+import com.zyna.app.ui.avatar.AvatarCropTarget
 import com.zyna.app.ui.calls.CallHistoryState
 import com.zyna.app.ui.calls.NativeMatrixRtcCallController
 import com.zyna.app.ui.calls.NativeMatrixRtcCallLaunchContext
@@ -67,6 +68,7 @@ import com.zyna.app.ui.navigation.ProfileFeatureActions
 import com.zyna.app.ui.navigation.RoomsFeatureActions
 import com.zyna.app.ui.navigation.RoomDetailsFeatureActions
 import com.zyna.app.ui.navigation.RoomMembersFeatureActions
+import com.zyna.app.ui.navigation.RoomProfileEditorActions
 import com.zyna.app.ui.navigation.SettingsFeatureActions
 import com.zyna.app.ui.navigation.UserProfileActions
 import com.zyna.app.ui.navigation.ZynaRenderDependencies
@@ -82,6 +84,7 @@ import com.zyna.app.ui.profile.ProfileAvatarPickRequest
 import com.zyna.app.ui.profile.createProfileAvatarCropDriver
 import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.roomdetails.RoomFeatureState
+import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
@@ -192,22 +195,41 @@ class MainActivity : AppCompatActivity() {
                 sourceDirectory = File(filesDir, PROFILE_AVATAR_SOURCE_DIRECTORY),
                 outputDirectory = File(filesDir, PROFILE_AVATAR_DIRECTORY)
             ),
-            canDeliver = { editSessionId ->
-                appViewModel.uiState.value.route == AppRoute.EditProfile &&
-                    appViewModel.ownProfileState.value.editSessionId == editSessionId
+            canDeliver = ::canDeliverAvatarCropTarget,
+            onDraftReady = { draft, target ->
+                when (target) {
+                    is AvatarCropTarget.OwnProfile -> appViewModel.setOwnProfileAvatarDraft(
+                        draft,
+                        target.editSessionId
+                    )
+                    is AvatarCropTarget.RoomProfile -> appViewModel.setRoomProfileAvatarDraft(
+                        draft = draft,
+                        target = target.toRoomProfileEditorTarget(),
+                        editSessionId = target.editSessionId
+                    )
+                }
             },
-            onDraftReady = appViewModel::setOwnProfileAvatarDraft,
-            onPreparationError = { editSessionId ->
-                appViewModel.setOwnProfileEditError(
-                    message = getString(R.string.profile_avatar_crop_error),
-                    editSessionId = editSessionId
-                )
+            onPreparationError = { target ->
+                when (target) {
+                    is AvatarCropTarget.OwnProfile -> appViewModel.setOwnProfileEditError(
+                        message = getString(R.string.profile_avatar_crop_error),
+                        editSessionId = target.editSessionId
+                    )
+                    is AvatarCropTarget.RoomProfile ->
+                        appViewModel.setRoomProfileAvatarPreparationError(
+                            target = target.toRoomProfileEditorTarget(),
+                            editSessionId = target.editSessionId
+                        )
+                }
             },
             onSessionWillClose = ::disposeProfileAvatarCropOverlay
         )
         handleExternalRouteIntent(intent)
         cleanupProfileAvatarTempFiles(
-            excludedPath = appViewModel.ownProfileState.value.editAvatarLocalPath
+            excludedPaths = setOfNotNull(
+                appViewModel.ownProfileState.value.editAvatarLocalPath,
+                appViewModel.roomProfileEditorState.value.editAvatarLocalPath
+            )
         )
         profileAvatarCropCoordinator.cleanupOrphanSources()
 
@@ -332,18 +354,24 @@ class MainActivity : AppCompatActivity() {
                         combine(
                             appViewModel.uiState,
                             appViewModel.roomListState,
-                            appViewModel.roomDetailsState,
-                            appViewModel.roomMembersState,
-                            appViewModel.inviteMembersState
-                        ) { state, roomList, roomDetails, roomMembers, inviteMembers ->
-                            AppFeatureInput(
-                                state = state,
-                                roomList = roomList,
-                                room = RoomFeatureState(
+                            combine(
+                                appViewModel.roomDetailsState,
+                                appViewModel.roomProfileEditorState,
+                                appViewModel.roomMembersState,
+                                appViewModel.inviteMembersState
+                            ) { roomDetails, roomProfileEditor, roomMembers, inviteMembers ->
+                                RoomFeatureState(
                                     details = roomDetails,
+                                    profileEditor = roomProfileEditor,
                                     members = roomMembers,
                                     inviteMembers = inviteMembers
                                 )
+                            }
+                        ) { state, roomList, room ->
+                            AppFeatureInput(
+                                state = state,
+                                roomList = roomList,
+                                room = room
                             )
                         },
                         combine(
@@ -473,8 +501,17 @@ class MainActivity : AppCompatActivity() {
             ),
             roomDetails = RoomDetailsFeatureActions(
                 onRefresh = appViewModel::refreshRoomDetails,
+                onOpenProfileEditor = appViewModel::openEditRoomProfile,
                 onOpenMembers = appViewModel::openRoomMembers,
                 onOpenInviteMembers = appViewModel::openInviteRoomMembers
+            ),
+            roomProfileEditor = RoomProfileEditorActions(
+                onDisplayNameChanged = appViewModel::setRoomProfileDisplayNameDraft,
+                onPickAvatar = ::launchRoomProfileAvatarPicker,
+                onRemoveAvatar = ::removeRoomProfileAvatarDraft,
+                onSave = appViewModel::saveRoomProfile,
+                onConfirmDiscard = appViewModel::confirmRoomProfileDiscard,
+                onCancelDiscard = appViewModel::cancelRoomProfileDiscard
             ),
             roomMembers = RoomMembersFeatureActions(
                 onRetry = appViewModel::retryRoomMembers,
@@ -599,7 +636,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun launchProfileAvatarPicker(editSessionId: Long) {
-        pendingProfileAvatarPickRequest = profileAvatarCropCoordinator.beginPick(editSessionId)
+        pendingProfileAvatarPickRequest = profileAvatarCropCoordinator.beginPick(
+            AvatarCropTarget.OwnProfile(editSessionId)
+        )
+        profileAvatarPickerLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    private fun launchRoomProfileAvatarPicker(editSessionId: Long) {
+        val editor = appViewModel.roomProfileEditorState.value
+        val target = editor.target ?: return
+        if (editor.editSessionId != editSessionId) return
+        pendingProfileAvatarPickRequest = profileAvatarCropCoordinator.beginPick(
+            AvatarCropTarget.RoomProfile(
+                userId = target.userId,
+                roomId = target.roomId,
+                editSessionId = editSessionId
+            )
+        )
         profileAvatarPickerLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
         )
@@ -608,6 +663,26 @@ class MainActivity : AppCompatActivity() {
     private fun removeOwnProfileAvatarDraft() {
         profileAvatarCropCoordinator.dismiss()
         appViewModel.removeOwnProfileAvatarDraft()
+    }
+
+    private fun removeRoomProfileAvatarDraft() {
+        profileAvatarCropCoordinator.dismiss()
+        appViewModel.removeRoomProfileAvatarDraft()
+    }
+
+    private fun canDeliverAvatarCropTarget(target: AvatarCropTarget): Boolean {
+        return when (target) {
+            is AvatarCropTarget.OwnProfile ->
+                appViewModel.uiState.value.route == AppRoute.EditProfile &&
+                    appViewModel.ownProfileState.value.editSessionId == target.editSessionId
+            is AvatarCropTarget.RoomProfile -> {
+                val editor = appViewModel.roomProfileEditorState.value
+                val route = appViewModel.uiState.value.route as? AppRoute.EditRoomProfile
+                route?.roomId == target.roomId &&
+                    editor.target == target.toRoomProfileEditorTarget() &&
+                    editor.editSessionId == target.editSessionId
+            }
+        }
     }
 
     private fun requestNotificationPermissionIfNeeded(state: AppUiState) {
@@ -1011,7 +1086,7 @@ class MainActivity : AppCompatActivity() {
             disposeProfileAvatarCropOverlay()
             return
         }
-        if (latestState.route != AppRoute.EditProfile) {
+        if (!canDeliverAvatarCropTarget(state.session.request.target)) {
             profileAvatarCropCoordinator.dismiss()
             return
         }
@@ -1055,13 +1130,13 @@ class MainActivity : AppCompatActivity() {
         profileAvatarCropView = null
     }
 
-    private fun cleanupProfileAvatarTempFiles(excludedPath: String?) {
+    private fun cleanupProfileAvatarTempFiles(excludedPaths: Set<String>) {
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 File(filesDir, PROFILE_AVATAR_DIRECTORY)
                     .listFiles()
                     ?.forEach { file ->
-                        if (file.absolutePath != excludedPath) {
+                        if (file.absolutePath !in excludedPaths) {
                             runCatching { file.delete() }
                         }
                     }
@@ -1306,6 +1381,7 @@ private fun AppRoute.perfName(): String {
         AppRoute.ForwardPicker -> "ForwardPicker"
         AppRoute.Login -> "Login"
         AppRoute.EditProfile -> "EditProfile"
+        is AppRoute.EditRoomProfile -> "EditRoomProfile(${roomId.takeLast(10)})"
         AppRoute.Profile -> "Profile"
         is AppRoute.RecoveryKey -> "RecoveryKey"
         is AppRoute.SessionSecurity -> "SessionSecurity"
@@ -1316,6 +1392,10 @@ private fun AppRoute.perfName(): String {
         AppRoute.Settings -> "Settings"
         is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"
     }
+}
+
+private fun AvatarCropTarget.RoomProfile.toRoomProfileEditorTarget(): RoomProfileEditorTarget {
+    return RoomProfileEditorTarget(userId = userId, roomId = roomId)
 }
 
 private fun OutgoingPhotoDraftItem.localFiles(): List<File> {

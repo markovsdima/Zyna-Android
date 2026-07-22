@@ -112,6 +112,7 @@ import org.matrix.rustcomponents.sdk.RtcNotificationType
 import org.matrix.rustcomponents.sdk.Session
 import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
+import org.matrix.rustcomponents.sdk.StateEventType
 import org.matrix.rustcomponents.sdk.SyncNotificationListener
 import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.TaskHandle
@@ -940,6 +941,55 @@ class MatrixClientService(
             room.getPowerLevels().use { powerLevels ->
                 powerLevels.canOwnUserInvite()
             }
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun loadRoomCapabilities(roomId: String): MatrixRoomCapabilities =
+        withContext(Dispatchers.IO) {
+            val activeClient = client ?: error("Matrix client is not ready")
+            activeClient.getRoom(roomId)?.use { room ->
+                room.getPowerLevels().use { powerLevels ->
+                    MatrixRoomCapabilities(
+                        canInviteMembers = powerLevels.canOwnUserInvite(),
+                        canChangeName = powerLevels.canOwnUserSendState(StateEventType.RoomName),
+                        canChangeAvatar = powerLevels.canOwnUserSendState(
+                            StateEventType.RoomAvatar
+                        )
+                    )
+                }
+            } ?: error("Matrix room is not available")
+        }
+
+    suspend fun setRoomName(roomId: String, name: String) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val normalizedName = name.trim()
+        require(normalizedName.isNotEmpty()) { "Room name is required" }
+        activeClient.getRoom(roomId)?.use { room ->
+            room.setName(normalizedName)
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun uploadRoomAvatar(
+        roomId: String,
+        localPath: String,
+        mimeType: String
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val avatarFile = File(localPath)
+        require(avatarFile.isFile) { "Avatar file is not available" }
+        activeClient.getRoom(roomId)?.use { room ->
+            room.uploadAvatar(
+                mimeType.ifBlank { "image/jpeg" },
+                avatarFile.readBytes(),
+                null
+            )
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun removeRoomAvatar(roomId: String) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            room.removeAvatar()
         } ?: error("Matrix room is not available")
     }
 
@@ -2370,6 +2420,16 @@ class MatrixClientService(
             capabilities = MatrixRoomCapabilities(
                 canInviteMembers = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
                     powerLevels?.canOwnUserInvite()
+                } else {
+                    null
+                },
+                canChangeName = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
+                    powerLevels?.canOwnUserSendState(StateEventType.RoomName)
+                } else {
+                    null
+                },
+                canChangeAvatar = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
+                    powerLevels?.canOwnUserSendState(StateEventType.RoomAvatar)
                 } else {
                     null
                 }

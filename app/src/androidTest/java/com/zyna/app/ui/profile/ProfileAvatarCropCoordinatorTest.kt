@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.zyna.app.data.profile.ProfileAvatarCropSpec
 import com.zyna.app.data.profile.ProfileAvatarDraft
+import com.zyna.app.ui.avatar.AvatarCropTarget
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -53,11 +54,11 @@ class ProfileAvatarCropCoordinatorTest {
             }
         )
 
-        val firstRequest = fixture.coordinator.beginPick(EDIT_SESSION_ID)
+        val firstRequest = fixture.coordinator.beginPick(EDIT_TARGET)
         fixture.coordinator.handlePickerResult(firstUri, firstRequest)
         firstStarted.await()
 
-        val secondRequest = fixture.coordinator.beginPick(EDIT_SESSION_ID)
+        val secondRequest = fixture.coordinator.beginPick(EDIT_TARGET)
         fixture.coordinator.handlePickerResult(secondUri, secondRequest)
         awaitCondition {
             fixture.coordinator.state.value.session?.request == secondRequest
@@ -85,7 +86,7 @@ class ProfileAvatarCropCoordinatorTest {
                 draft("late")
             }
         )
-        val request = fixture.coordinator.beginPick(EDIT_SESSION_ID)
+        val request = fixture.coordinator.beginPick(EDIT_TARGET)
         fixture.coordinator.handlePickerResult(TEST_URI, request)
         awaitCondition { fixture.coordinator.state.value.session != null }
 
@@ -114,7 +115,7 @@ class ProfileAvatarCropCoordinatorTest {
                 draft("closed-session")
             }
         )
-        val request = fixture.coordinator.beginPick(EDIT_SESSION_ID)
+        val request = fixture.coordinator.beginPick(EDIT_TARGET)
         fixture.coordinator.handlePickerResult(TEST_URI, request)
         awaitCondition { fixture.coordinator.state.value.session != null }
 
@@ -143,7 +144,7 @@ class ProfileAvatarCropCoordinatorTest {
                 draft("success")
             }
         )
-        val request = fixture.coordinator.beginPick(EDIT_SESSION_ID)
+        val request = fixture.coordinator.beginPick(EDIT_TARGET)
         fixture.coordinator.handlePickerResult(TEST_URI, request)
         awaitCondition { fixture.coordinator.state.value.session != null }
 
@@ -160,7 +161,7 @@ class ProfileAvatarCropCoordinatorTest {
 
     private fun fixture(
         scope: CoroutineScope,
-        canDeliver: (Long) -> Boolean = { true },
+        canDeliver: (AvatarCropTarget) -> Boolean = { true },
         prepareSource: suspend (Uri) -> PreparedProfileAvatarSource = {
             preparedSource("source")
         },
@@ -246,6 +247,7 @@ class ProfileAvatarCropCoordinatorTest {
 
     private companion object {
         const val EDIT_SESSION_ID = 41L
+        val EDIT_TARGET = AvatarCropTarget.OwnProfile(EDIT_SESSION_ID)
         val TEST_URI: Uri = Uri.parse("content://test/avatar")
     }
 }

@@ -45,10 +45,11 @@ import com.zyna.app.ui.invitemembers.InviteMembersScreenView
 import com.zyna.app.ui.invitemembers.InviteMembersScreenViewActions
 import com.zyna.app.ui.invitemembers.InviteMembersScreenViewState
 import com.zyna.app.ui.invitemembers.InviteMembersState
-import com.zyna.app.ui.profile.EditProfileScreenView
-import com.zyna.app.ui.profile.EditProfileScreenViewActions
-import com.zyna.app.ui.profile.EditProfileScreenViewState
+import com.zyna.app.ui.profile.ProfileEditorScreenView
+import com.zyna.app.ui.profile.ProfileEditorScreenViewActions
+import com.zyna.app.ui.profile.ProfileEditorScreenViewState
 import com.zyna.app.ui.profile.OwnProfileState
+import com.zyna.app.ui.profile.OwnProfileAvatarChange
 import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.profile.ProfileScreenView
 import com.zyna.app.ui.profile.ProfileScreenViewActions
@@ -67,6 +68,9 @@ import com.zyna.app.ui.roommembers.RoomMembersScreenView
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
 import com.zyna.app.ui.roommembers.RoomMembersState
+import com.zyna.app.ui.roomprofile.RoomProfileAvatarChange
+import com.zyna.app.ui.roomprofile.RoomProfileEditorError
+import com.zyna.app.ui.roomprofile.RoomProfileEditorState
 import com.zyna.app.ui.rooms.RoomsScreenView
 import com.zyna.app.ui.rooms.RoomsScreenViewActions
 import com.zyna.app.ui.rooms.RoomsScrollAnchor
@@ -87,6 +91,20 @@ import kotlin.math.max
 enum class ZynaOverlayPresentation(val coversTabBar: Boolean) {
     FULLSCREEN(coversTabBar = true),
     OVER_CONTENT(coversTabBar = false)
+}
+
+private fun RoomProfileEditorError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        RoomProfileEditorError.AVATAR_PREPARATION ->
+            com.zyna.app.R.string.room_profile_edit_avatar_error
+        RoomProfileEditorError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.room_profile_edit_permission_changed
+        RoomProfileEditorError.SAVE -> com.zyna.app.R.string.room_profile_edit_save_error
+        RoomProfileEditorError.PARTIAL_SAVE ->
+            com.zyna.app.R.string.room_profile_edit_partial_save_error
+    }
+    return context.getString(stringId)
 }
 
 class ZynaRootHostView(context: Context) : FrameLayout(context) {
@@ -551,6 +569,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 return false
             }
         }
+        if (state.route is AppRoute.EditRoomProfile) {
+            if (
+                latestRoom?.profileEditor?.isSaving == true ||
+                latestRoom?.profileEditor?.hasUnsavedChanges == true
+            ) {
+                return false
+            }
+        }
         if (
             state.route is AppRoute.InviteRoomMembers &&
             latestRoom?.inviteMembers?.isSending == true
@@ -803,6 +829,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions,
                     dependencies,
                     route
+                )
+                is AppRoute.EditRoomProfile -> editRoomProfileEntry(
+                    editor = room.profileEditor,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
                 )
                 is AppRoute.RoomMembers -> roomMembersEntry(
                     roomMembers = room.members,
@@ -1080,16 +1112,53 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "profile:edit",
-            createView = { context -> EditProfileScreenView(context) },
+            createView = { context -> ProfileEditorScreenView(context) },
             updateView = { view ->
-                (view as EditProfileScreenView).render(
-                    state = EditProfileScreenViewState(
-                        profile = ownProfile,
+                (view as ProfileEditorScreenView).render(
+                    state = ProfileEditorScreenViewState(
+                        identityId = ownProfile.userId,
+                        displayName = ownProfile.displayName.orEmpty(),
+                        editDisplayName = ownProfile.editDisplayName,
+                        avatarUrl = ownProfile.avatarUrl.takeUnless {
+                            ownProfile.editAvatarChange == OwnProfileAvatarChange.REMOVE
+                        },
+                        editAvatarLocalPath = ownProfile.editAvatarLocalPath.takeIf {
+                            ownProfile.editAvatarChange == OwnProfileAvatarChange.REPLACE
+                        },
+                        hasAvatar = ownProfile.hasAvatar,
+                        editSessionId = ownProfile.editSessionId,
+                        isSaving = ownProfile.isSaving,
+                        canSave = !ownProfile.isSaving && ownProfile.hasUnsavedChanges,
+                        canChangeName = true,
+                        canChangeAvatar = true,
+                        errorMessage = ownProfile.errorMessage,
+                        backLabel = context.getString(com.zyna.app.R.string.profile_edit_back),
+                        saveLabel = context.getString(com.zyna.app.R.string.profile_edit_save),
+                        title = context.getString(com.zyna.app.R.string.profile_edit_title),
+                        nameLabel = context.getString(com.zyna.app.R.string.profile_edit_name_label),
+                        changePhotoLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_change_photo
+                        ),
+                        removePhotoLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_remove_photo
+                        ),
+                        discardTitle = context.getString(
+                            com.zyna.app.R.string.profile_edit_discard_title
+                        ),
+                        discardMessage = context.getString(
+                            com.zyna.app.R.string.profile_edit_discard_message
+                        ),
+                        keepEditingLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_keep_editing
+                        ),
+                        discardLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_discard
+                        ),
                         matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = dp(ZynaTabBarView.BASE_HEIGHT_DP) + bottomInset,
                         isDiscardConfirmationVisible = isDiscardConfirmationVisible
                     ),
-                    actions = EditProfileScreenViewActions(
+                    actions = ProfileEditorScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onDisplayNameChanged = actions.profile.own.onDisplayNameChanged,
                         onPickAvatar = actions.profile.own.onPickAvatar,
@@ -1099,6 +1168,103 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             actions.profile.own.onConfirmEditExit,
                         onDiscardChangesCancelled =
                             actions.profile.own.onCancelEditExit
+                    )
+                )
+            }
+        )
+    }
+
+    private fun editRoomProfileEntry(
+        editor: RoomProfileEditorState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.EditRoomProfile
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "roomProfile:edit:${route.roomId}",
+            createView = { context -> ProfileEditorScreenView(context) },
+            updateView = { view ->
+                val routeState = editor.takeIf { it.target?.roomId == route.roomId }
+                    ?: RoomProfileEditorState()
+                val isSpace = routeState.kind == MatrixRoomKind.SPACE
+                (view as ProfileEditorScreenView).render(
+                    state = ProfileEditorScreenViewState(
+                        identityId = route.roomId,
+                        displayName = routeState.displayName,
+                        editDisplayName = routeState.editDisplayName,
+                        avatarUrl = routeState.avatarUrl.takeUnless {
+                            routeState.editAvatarChange == RoomProfileAvatarChange.REMOVE
+                        },
+                        editAvatarLocalPath = routeState.editAvatarLocalPath.takeIf {
+                            routeState.editAvatarChange == RoomProfileAvatarChange.REPLACE
+                        },
+                        hasAvatar = routeState.hasAvatar,
+                        editSessionId = routeState.editSessionId,
+                        isSaving = routeState.isSaving,
+                        canSave = routeState.canSave,
+                        canChangeName = routeState.canChangeName,
+                        canChangeAvatar = routeState.canChangeAvatar,
+                        errorMessage = routeState.error.localizedMessage(context)
+                            ?: if (
+                                routeState.hasNameChange &&
+                                routeState.editDisplayName.trim().isEmpty()
+                            ) {
+                                context.getString(
+                                    com.zyna.app.R.string.room_profile_edit_name_required
+                                )
+                            } else {
+                                null
+                            },
+                        backLabel = context.getString(com.zyna.app.R.string.profile_edit_back),
+                        saveLabel = context.getString(com.zyna.app.R.string.profile_edit_save),
+                        title = context.getString(
+                            if (isSpace) {
+                                com.zyna.app.R.string.room_profile_edit_space_title
+                            } else {
+                                com.zyna.app.R.string.room_profile_edit_group_title
+                            }
+                        ),
+                        nameLabel = context.getString(
+                            if (isSpace) {
+                                com.zyna.app.R.string.room_profile_edit_space_name
+                            } else {
+                                com.zyna.app.R.string.room_profile_edit_group_name
+                            }
+                        ),
+                        changePhotoLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_change_photo
+                        ),
+                        removePhotoLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_remove_photo
+                        ),
+                        discardTitle = context.getString(
+                            com.zyna.app.R.string.profile_edit_discard_title
+                        ),
+                        discardMessage = context.getString(
+                            com.zyna.app.R.string.room_profile_edit_discard_message
+                        ),
+                        keepEditingLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_keep_editing
+                        ),
+                        discardLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_discard
+                        ),
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
+                        bottomContentPaddingPx = bottomInset,
+                        isDiscardConfirmationVisible =
+                            routeState.isDiscardConfirmationVisible
+                    ),
+                    actions = ProfileEditorScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onDisplayNameChanged =
+                            actions.roomProfileEditor.onDisplayNameChanged,
+                        onPickAvatar = actions.roomProfileEditor.onPickAvatar,
+                        onRemoveAvatar = actions.roomProfileEditor.onRemoveAvatar,
+                        onSave = actions.roomProfileEditor.onSave,
+                        onDiscardChangesConfirmed =
+                            actions.roomProfileEditor.onConfirmDiscard,
+                        onDiscardChangesCancelled =
+                            actions.roomProfileEditor.onCancelDiscard
                     )
                 )
             }
@@ -1196,6 +1362,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         pinnedEventCount = details?.pinnedEventCount,
                         canonicalAlias = details?.canonicalAlias,
                         canInviteMembers = details?.capabilities?.canInviteMembers == true,
+                        canEditRoomProfile = details?.let {
+                            it.kind != MatrixRoomKind.DIRECT &&
+                                (it.capabilities.canChangeName == true ||
+                                    it.capabilities.canChangeAvatar == true)
+                        } == true,
                         unreadCount = seed?.unreadCount ?: 0,
                         isMarkedUnread = seed?.isMarkedUnread == true,
                         isLoading = routeState?.isLoading ?: (details == null),
@@ -1214,6 +1385,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             }
                         },
                         onOpenMembers = actions.roomDetails.onOpenMembers,
+                        onOpenProfileEditor = actions.roomDetails.onOpenProfileEditor,
                         onOpenInviteMembers = actions.roomDetails.onOpenInviteMembers,
                         onRetry = actions.roomDetails.onRefresh
                     )
@@ -1345,9 +1517,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             },
             updateView = { view ->
                 val updateStart = ZynaPerfLog.start()
+                val roomDisplayName = roomList.roomForId(route.roomId)
+                    ?.displayName
+                    ?.takeIf { it.isNotBlank() }
+                    ?: route.displayName
                 (view as ChatScreenView).render(
                     state = ChatScreenViewState(
-                        roomName = route.displayName,
+                        roomName = roomDisplayName,
                         roomId = route.roomId,
                         currentUserId = when (val matrixState = state.matrixState) {
                             is MatrixClientState.LoggedIn -> matrixState.userId
@@ -1388,7 +1564,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     ),
                     actions = ChatScreenViewActions(
                         onStartCall = {
-                            actions.calls.onStart(route.roomId, route.displayName)
+                            actions.calls.onStart(route.roomId, roomDisplayName)
                         },
                         onBack = actions.chat.navigation.onClose,
                         onOpenRoomDetails = actions.chat.navigation.onOpenRoomDetails,
@@ -1632,6 +1808,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             AppRoute.EditProfile -> "EditProfile"
+            is AppRoute.EditRoomProfile -> "EditRoomProfile(${roomId.takeLast(10)})"
             AppRoute.Profile -> "Profile"
             is AppRoute.RecoveryKey -> "RecoveryKey"
             is AppRoute.SessionSecurity -> "SessionSecurity"

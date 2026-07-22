@@ -198,6 +198,10 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         },
         detailsCanInviteMembers = roomDetails?.capabilities?.canInviteMembers
             ?: existingRoom?.detailsCanInviteMembers,
+        detailsCanChangeName = roomDetails?.capabilities?.canChangeName
+            ?: existingRoom?.detailsCanChangeName,
+        detailsCanChangeAvatar = roomDetails?.capabilities?.canChangeAvatar
+            ?: existingRoom?.detailsCanChangeAvatar,
         detailsUpdatedAtMillis = if (roomDetails != null) {
             updatedAtMillis
         } else {
@@ -247,6 +251,8 @@ class LocalCacheRepository(
                     pinnedEventCount = details.pinnedEventCount,
                     canonicalAlias = details.canonicalAlias,
                     canInviteMembers = details.capabilities.canInviteMembers,
+                    canChangeName = details.capabilities.canChangeName,
+                    canChangeAvatar = details.capabilities.canChangeAvatar,
                     detailsUpdatedAtMillis = now
                 )
                 if (updated == 0) {
@@ -275,6 +281,8 @@ class LocalCacheRepository(
                                 detailsPinnedEventCount = details.pinnedEventCount,
                                 detailsCanonicalAlias = details.canonicalAlias,
                                 detailsCanInviteMembers = details.capabilities.canInviteMembers,
+                                detailsCanChangeName = details.capabilities.canChangeName,
+                                detailsCanChangeAvatar = details.capabilities.canChangeAvatar,
                                 detailsUpdatedAtMillis = now
                             )
                         )
@@ -2172,7 +2180,9 @@ class LocalCacheRepository(
             pinnedEventCount = room.detailsPinnedEventCount ?: 0,
             canonicalAlias = room.detailsCanonicalAlias,
             capabilities = MatrixRoomCapabilities(
-                canInviteMembers = room.detailsCanInviteMembers
+                canInviteMembers = room.detailsCanInviteMembers,
+                canChangeName = room.detailsCanChangeName,
+                canChangeAvatar = room.detailsCanChangeAvatar
             )
         )
     }

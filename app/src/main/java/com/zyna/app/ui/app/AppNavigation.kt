@@ -61,6 +61,9 @@ sealed interface AppRoute {
     data class RoomDetails(
         val roomId: String
     ) : AppRoute
+    data class EditRoomProfile(
+        val roomId: String
+    ) : AppRoute
     data class RoomMembers(
         val roomId: String
     ) : AppRoute
@@ -106,6 +109,7 @@ data class AppNavState(
             }
             val roomId = when (val topRoute = chatsStack.lastOrNull()) {
                 is AppRoute.RoomDetails -> topRoute.roomId
+                is AppRoute.EditRoomProfile -> topRoute.roomId
                 is AppRoute.RoomMembers -> topRoute.roomId
                 is AppRoute.InviteRoomMembers -> topRoute.roomId
                 else -> return null
@@ -257,6 +261,14 @@ data class AppNavState(
         }
         val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
         return copy(chatsStack = chatsStack + AppRoute.RoomMembers(detailsRoute.roomId))
+    }
+
+    fun openEditRoomProfile(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+            return this
+        }
+        val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
+        return copy(chatsStack = chatsStack + AppRoute.EditRoomProfile(detailsRoute.roomId))
     }
 
     fun openInviteRoomMembers(): AppNavState {

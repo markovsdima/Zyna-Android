@@ -198,7 +198,11 @@ class RoomDetailsStoreTest {
         val cached = roomDetails(ROOM_A, "Cached room")
         fixture.cachedDetails(USER_ID, ROOM_A).value = cached
         fixture.capabilitiesBehavior = {
-            MatrixRoomCapabilities(canInviteMembers = true)
+            MatrixRoomCapabilities(
+                canInviteMembers = true,
+                canChangeName = false,
+                canChangeAvatar = true
+            )
         }
         try {
             fixture.store.activate(RoomDetailsTarget(USER_ID, ROOM_A), roomSummary(ROOM_A, "A"))
@@ -227,13 +231,58 @@ class RoomDetailsStoreTest {
             awaitRoomDetailsCondition { fixture.updates(ROOM_A).subscriptionCount.value > 0 }
 
             fixture.updates(ROOM_A).emit(
-                roomDetails(ROOM_A, "Live room", canInviteMembers = true)
+                roomDetails(
+                    ROOM_A,
+                    "Live room",
+                    canInviteMembers = true,
+                    canChangeName = false,
+                    canChangeAvatar = true
+                )
             )
             awaitRoomDetailsCondition {
                 fixture.store.state.value.details?.capabilities?.canInviteMembers == true
             }
 
             assertEquals(0, fixture.capabilitiesLoadCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun partialCachedAndLiveCapabilitiesMergeFieldByFieldBeforeFallback() = runBlocking {
+        val fixture = RoomDetailsStoreFixture(coroutineContext)
+        fixture.cachedDetails(USER_ID, ROOM_A).value = roomDetails(
+            ROOM_A,
+            "Cached room",
+            canChangeName = true
+        )
+        fixture.capabilitiesBehavior = {
+            MatrixRoomCapabilities(canChangeAvatar = false)
+        }
+        try {
+            fixture.store.activate(RoomDetailsTarget(USER_ID, ROOM_A), roomSummary(ROOM_A, "A"))
+            awaitRoomDetailsCondition { fixture.updates(ROOM_A).subscriptionCount.value > 0 }
+
+            fixture.updates(ROOM_A).emit(
+                roomDetails(ROOM_A, "Live room", canInviteMembers = true)
+            )
+            awaitRoomDetailsCondition {
+                val capabilities = fixture.store.state.value.details?.capabilities
+                capabilities?.canInviteMembers == true &&
+                    capabilities.canChangeName == true &&
+                    capabilities.canChangeAvatar == false
+            }
+
+            assertEquals(1, fixture.capabilitiesLoadCount)
+            assertEquals(
+                MatrixRoomCapabilities(
+                    canInviteMembers = true,
+                    canChangeName = true,
+                    canChangeAvatar = false
+                ),
+                fixture.store.state.value.details?.capabilities
+            )
         } finally {
             fixture.close()
         }
@@ -438,6 +487,8 @@ private fun roomDetails(
     roomId: String,
     displayName: String,
     canInviteMembers: Boolean? = null,
+    canChangeName: Boolean? = null,
+    canChangeAvatar: Boolean? = null,
     kind: MatrixRoomKind = MatrixRoomKind.GROUP
 ): MatrixRoomDetails {
     return MatrixRoomDetails(
@@ -453,7 +504,11 @@ private fun roomDetails(
         historyVisibility = MatrixRoomHistoryVisibility.INVITED,
         pinnedEventCount = 2,
         canonicalAlias = null,
-        capabilities = MatrixRoomCapabilities(canInviteMembers = canInviteMembers)
+        capabilities = MatrixRoomCapabilities(
+            canInviteMembers = canInviteMembers,
+            canChangeName = canChangeName,
+            canChangeAvatar = canChangeAvatar
+        )
     )
 }
 

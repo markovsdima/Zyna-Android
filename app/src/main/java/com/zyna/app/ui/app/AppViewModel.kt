@@ -67,6 +67,9 @@ import com.zyna.app.ui.roomdetails.createRoomDetailsStore
 import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.roommembers.RoomMembersTarget
 import com.zyna.app.ui.roommembers.createRoomMembersStore
+import com.zyna.app.ui.roomprofile.RoomProfileEditorState
+import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
+import com.zyna.app.ui.roomprofile.createRoomProfileEditorStore
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
 import com.zyna.app.util.ZynaPerfLog
@@ -226,6 +229,13 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomDetailsState: StateFlow<RoomDetailsState> = roomDetailsStore.state
+    private val roomProfileEditorStore = createRoomProfileEditorStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onEditFinished = ::handleRoomProfileEditFinished,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomProfileEditorState: StateFlow<RoomProfileEditorState> = roomProfileEditorStore.state
     private val roomMembersStore = createRoomMembersStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -303,6 +313,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeRoomProfileEditorOwner()
+        }
+
+        viewModelScope.launch {
             observeRoomMembersRouteInputs()
         }
 
@@ -346,6 +360,7 @@ class AppViewModel(
                 ) {
                     roomListStore.deactivate()
                     roomDetailsStore.deactivate()
+                    roomProfileEditorStore.deactivate()
                     roomMembersStore.clearSession()
                     inviteMembersStore.clearSession()
                 }
@@ -746,6 +761,10 @@ class AppViewModel(
         ) {
             return true
         }
+        if (route is AppRoute.EditRoomProfile) {
+            roomProfileEditorStore.requestExit()
+            return true
+        }
         val previousContactActionOwner = route.directRoomActionOwnerKey()
         val didNavigate = when (route) {
             is AppRoute.Chat -> {
@@ -867,6 +886,74 @@ class AppViewModel(
 
     fun refreshRoomDetails() {
         roomDetailsStore.refresh()
+    }
+
+    fun openEditRoomProfile() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomDetails ?: return
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val target = RoomDetailsTarget(userId, route.roomId)
+        val details = roomDetailsStore.state.value
+            .takeIf { it.target == target }
+            ?.details
+            ?: roomListStore.state.value.roomForId(route.roomId)?.roomDetails
+            ?: return
+        if (
+            details.kind == MatrixRoomKind.DIRECT ||
+            (details.capabilities.canChangeName != true &&
+                details.capabilities.canChangeAvatar != true)
+        ) {
+            return
+        }
+        roomProfileEditorStore.beginEdit(
+            target = RoomProfileEditorTarget(userId = userId, roomId = route.roomId),
+            details = details
+        )
+        _uiState.update { state ->
+            state.withNavigationState(state.navState.openEditRoomProfile())
+        }
+    }
+
+    fun setRoomProfileDisplayNameDraft(displayName: String) {
+        roomProfileEditorStore.setDisplayNameDraft(displayName)
+    }
+
+    fun setRoomProfileAvatarDraft(
+        draft: ProfileAvatarDraft,
+        target: RoomProfileEditorTarget,
+        editSessionId: Long
+    ) {
+        val route = _uiState.value.route as? AppRoute.EditRoomProfile
+        if (route?.roomId != target.roomId) {
+            roomProfileEditorStore.discardAvatarDraft(draft)
+            return
+        }
+        roomProfileEditorStore.setAvatarDraft(draft, target, editSessionId)
+    }
+
+    fun setRoomProfileAvatarPreparationError(
+        target: RoomProfileEditorTarget,
+        editSessionId: Long
+    ) {
+        val route = _uiState.value.route as? AppRoute.EditRoomProfile ?: return
+        if (route.roomId != target.roomId) return
+        roomProfileEditorStore.setAvatarPreparationError(target, editSessionId)
+    }
+
+    fun removeRoomProfileAvatarDraft() {
+        roomProfileEditorStore.removeAvatarDraft()
+    }
+
+    fun saveRoomProfile() {
+        roomProfileEditorStore.save()
+    }
+
+    fun confirmRoomProfileDiscard() {
+        roomProfileEditorStore.confirmDiscard()
+    }
+
+    fun cancelRoomProfileDiscard() {
+        roomProfileEditorStore.cancelDiscardConfirmation()
     }
 
     fun openRoomMembers() {
@@ -1649,6 +1736,42 @@ class AppViewModel(
         }
     }
 
+    private suspend fun observeRoomProfileEditorOwner() {
+        _uiState.collect { state ->
+            val editor = roomProfileEditorStore.state.value
+            val target = editor.target ?: return@collect
+            val route = state.route as? AppRoute.EditRoomProfile
+            if (
+                route?.roomId != target.roomId ||
+                state.matrixState.userIdOrNull() != target.userId
+            ) {
+                roomProfileEditorStore.deactivate()
+            }
+        }
+    }
+
+    private fun handleRoomProfileEditFinished(
+        target: RoomProfileEditorTarget,
+        didSave: Boolean
+    ) {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.EditRoomProfile ?: return
+        if (
+            route.roomId != target.roomId ||
+            current.matrixState.userIdOrNull() != target.userId
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.navState.popActiveStack()
+                ?.let(state::withNavigationState)
+                ?: state
+        }
+        if (didSave) {
+            roomDetailsStore.refresh()
+        }
+    }
+
     private suspend fun observeInviteMembersRouteInputs() {
         combine(
             _uiState,
@@ -1819,6 +1942,7 @@ class AppViewModel(
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             AppRoute.EditProfile -> "EditProfile"
+            is AppRoute.EditRoomProfile -> "EditRoomProfile(${roomId.shortLogId()})"
             AppRoute.Profile -> "Profile"
             is AppRoute.RecoveryKey -> "RecoveryKey"
             is AppRoute.SessionSecurity -> "SessionSecurity"

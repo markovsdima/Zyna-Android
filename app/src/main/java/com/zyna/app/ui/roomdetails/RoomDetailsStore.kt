@@ -42,7 +42,9 @@ internal class RoomDetailsDriver(
  * The target includes the session user so a late callback from an old session cannot update
  * a room with the same id after account replacement. In-memory room-list details seed the first
  * frame, the Room flow restores persisted details, and live values are written through to cache.
- * Invite permission is resolved only for an active non-direct room when live data leaves it unknown.
+ * Room capabilities are resolved only for an active non-direct room when live data leaves any
+ * field unknown. Each capability is merged independently because cached projections may know a
+ * different subset than the in-memory or live projection.
  */
 internal class RoomDetailsStore(
     private val scope: CoroutineScope,
@@ -160,8 +162,10 @@ internal class RoomDetailsStore(
                         return@collect
                     }
                     val cachedCapabilities = cachedDetails?.capabilities.knownOrNull()
-                    if (resolvedCapabilities == null && cachedCapabilities != null) {
-                        resolvedCapabilities = cachedCapabilities
+                    if (cachedCapabilities != null) {
+                        resolvedCapabilities = cachedCapabilities.withFallback(
+                            resolvedCapabilities
+                        )
                     }
                     if (livePublishedGeneration == requestGeneration) {
                         publishResolvedCapabilities(target, requestGeneration)
@@ -197,8 +201,10 @@ internal class RoomDetailsStore(
                     }
                     val liveCapabilities = details.capabilities.knownOrNull()
                     liveCapabilities?.let {
-                        liveCapabilityRevision += 1
-                        resolvedCapabilities = it
+                        if (it.isFullyKnown()) {
+                            liveCapabilityRevision += 1
+                        }
+                        resolvedCapabilities = it.withFallback(resolvedCapabilities)
                     }
                     val resolvedDetails = details.withCapabilitiesFallback(resolvedCapabilities)
                     livePublishedGeneration = requestGeneration
@@ -207,7 +213,7 @@ internal class RoomDetailsStore(
                         isLoading = false,
                         errorMessage = null
                     )
-                    if (liveCapabilities == null) {
+                    if (!resolvedDetails.capabilities.isFullyKnown()) {
                         startCapabilitiesLoad(target, requestGeneration, resolvedDetails)
                     }
                     try {
@@ -268,9 +274,9 @@ internal class RoomDetailsStore(
                 ) {
                     return@launch
                 }
-                resolvedCapabilities = capabilities
+                resolvedCapabilities = capabilities.withFallback(resolvedCapabilities)
                 val details = _state.value.details ?: return@launch
-                val resolvedDetails = details.copy(capabilities = capabilities)
+                val resolvedDetails = details.withCapabilitiesFallback(resolvedCapabilities)
                 if (resolvedDetails == details) {
                     return@launch
                 }
@@ -305,12 +311,13 @@ internal class RoomDetailsStore(
         target: RoomDetailsTarget,
         requestGeneration: Long
     ) {
-        val capabilities = resolvedCapabilities ?: return
+        val resolved = resolvedCapabilities ?: return
         if (!isCurrent(target, requestGeneration)) {
             return
         }
         val details = _state.value.details ?: return
-        if (details.capabilities.knownOrNull() != null) {
+        val capabilities = details.capabilities.withFallback(resolved)
+        if (capabilities == details.capabilities) {
             return
         }
         _state.value = _state.value.copy(details = details.copy(capabilities = capabilities))
@@ -319,14 +326,33 @@ internal class RoomDetailsStore(
     private fun MatrixRoomDetails.withCapabilitiesFallback(
         fallback: MatrixRoomCapabilities?
     ): MatrixRoomDetails {
-        if (capabilities.knownOrNull() != null || fallback == null) {
+        if (fallback == null) {
             return this
         }
-        return copy(capabilities = fallback)
+        val merged = capabilities.withFallback(fallback)
+        return if (merged == capabilities) this else copy(capabilities = merged)
     }
 
     private fun MatrixRoomCapabilities?.knownOrNull(): MatrixRoomCapabilities? {
-        return this?.takeIf { it.canInviteMembers != null }
+        return this?.takeIf {
+            it.canInviteMembers != null ||
+                it.canChangeName != null ||
+                it.canChangeAvatar != null
+        }
+    }
+
+    private fun MatrixRoomCapabilities.withFallback(
+        fallback: MatrixRoomCapabilities?
+    ): MatrixRoomCapabilities {
+        return MatrixRoomCapabilities(
+            canInviteMembers = canInviteMembers ?: fallback?.canInviteMembers,
+            canChangeName = canChangeName ?: fallback?.canChangeName,
+            canChangeAvatar = canChangeAvatar ?: fallback?.canChangeAvatar
+        )
+    }
+
+    private fun MatrixRoomCapabilities.isFullyKnown(): Boolean {
+        return canInviteMembers != null && canChangeName != null && canChangeAvatar != null
     }
 
     private fun isCurrent(target: RoomDetailsTarget, requestGeneration: Long): Boolean {
@@ -354,11 +380,7 @@ internal fun createRoomDetailsStore(
         driver = RoomDetailsDriver(
             observeCachedDetails = localCacheRepository::observeRoomDetails,
             observeLiveDetails = matrixClientService::roomDetailsUpdates,
-            loadCapabilities = { roomId ->
-                MatrixRoomCapabilities(
-                    canInviteMembers = matrixClientService.canInviteRoomMembers(roomId)
-                )
-            },
+            loadCapabilities = matrixClientService::loadRoomCapabilities,
             cacheDetails = localCacheRepository::cacheRoomDetails
         ),
         onWarning = onWarning

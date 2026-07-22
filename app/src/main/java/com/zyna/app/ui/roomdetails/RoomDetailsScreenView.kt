@@ -39,6 +39,7 @@ internal data class RoomDetailsScreenViewState(
     val pinnedEventCount: Int?,
     val canonicalAlias: String?,
     val canInviteMembers: Boolean,
+    val canEditRoomProfile: Boolean,
     val unreadCount: Long,
     val isMarkedUnread: Boolean,
     val isLoading: Boolean,
@@ -49,6 +50,7 @@ internal data class RoomDetailsScreenViewState(
 internal data class RoomDetailsScreenViewActions(
     val onBack: () -> Unit,
     val onOpenDirectUserProfile: () -> Unit,
+    val onOpenProfileEditor: () -> Unit,
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
     val onRetry: () -> Unit
@@ -85,7 +87,15 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }
-    private val topBarSpacer = View(context)
+    private val editButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = context.getString(R.string.room_profile_edit_action)
+        textSize = 16f
+        typeface = Typeface.DEFAULT_BOLD
+        includeFontPadding = false
+        isClickable = true
+        isFocusable = true
+    }
     private val scrollView = ScrollView(context).apply {
         isFillViewport = true
         clipToPadding = false
@@ -215,7 +225,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         topBar.addView(
-            topBarSpacer,
+            editButton,
             LinearLayout.LayoutParams(
                 dp(88),
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -342,6 +352,12 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
 
     fun render(state: RoomDetailsScreenViewState, actions: RoomDetailsScreenViewActions) {
         backButton.setOnClickListener { actions.onBack() }
+        val showsEdit = state.kind != MatrixRoomKind.DIRECT && state.canEditRoomProfile
+        editButton.visibility = if (showsEdit) VISIBLE else INVISIBLE
+        editButton.isEnabled = showsEdit
+        editButton.setOnClickListener(
+            if (showsEdit) View.OnClickListener { actions.onOpenProfileEditor() } else null
+        )
         retryButton.setOnClickListener { actions.onRetry() }
         val showsMembers = state.kind != MatrixRoomKind.DIRECT
         val showsInvite = showsMembers && state.canInviteMembers
@@ -412,6 +428,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.actionText)
+        editButton.setTextColor(palette.actionText)
         titleText.setTextColor(palette.titleText)
         scrollView.setBackgroundColor(palette.background)
         content.setBackgroundColor(palette.background)

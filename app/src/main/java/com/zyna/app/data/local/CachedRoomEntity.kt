@@ -29,5 +29,7 @@ data class CachedRoomEntity(
     val detailsPinnedEventCount: Int? = null,
     val detailsCanonicalAlias: String? = null,
     val detailsCanInviteMembers: Boolean? = null,
+    val detailsCanChangeName: Boolean? = null,
+    val detailsCanChangeAvatar: Boolean? = null,
     val detailsUpdatedAtMillis: Long? = null
 )

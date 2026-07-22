@@ -130,7 +130,11 @@ class RoomDetailsCacheTest {
             historyVisibility = MatrixRoomHistoryVisibility.INVITED,
             pinnedEventCount = 2,
             canonicalAlias = "#cached:example.org",
-            capabilities = MatrixRoomCapabilities(canInviteMembers = true)
+            capabilities = MatrixRoomCapabilities(
+                canInviteMembers = true,
+                canChangeName = false,
+                canChangeAvatar = true
+            )
         )
     }
 

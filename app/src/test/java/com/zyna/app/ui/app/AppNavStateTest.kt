@@ -277,6 +277,32 @@ class AppNavStateTest {
     }
 
     @Test
+    fun editRoomProfilePushesOverDetailsAndKeepsDetailsOwnerActive() {
+        val roomId = "!room:example.org"
+        val detailsState = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+            .openRoomDetails()
+
+        val editState = detailsState.openEditRoomProfile()
+
+        assertEquals(AppRoute.EditRoomProfile(roomId), editState.top)
+        assertEquals(AppRoute.RoomDetails(roomId), editState.activeRoomDetailsRoute)
+        assertEquals(AppRoute.RoomDetails(roomId), editState.popActiveStack()?.top)
+        assertFalse(editState.showsTabs)
+    }
+
+    @Test
+    fun openEditRoomProfileIsIgnoredWithoutTopRoomDetailsRoute() {
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = "!room:example.org", displayName = "Room")
+
+        assertEquals(chatState, chatState.openEditRoomProfile())
+        assertEquals(AppNavState(), AppNavState().openEditRoomProfile())
+    }
+
+    @Test
     fun inviteMembersPushesFromDetailsAndMembersAndPopsToItsOwner() {
         val roomId = "!room:example.org"
         val detailsState = AppNavState()

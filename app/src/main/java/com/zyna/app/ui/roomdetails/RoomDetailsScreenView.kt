@@ -53,6 +53,7 @@ internal data class RoomDetailsScreenViewActions(
     val onOpenProfileEditor: () -> Unit,
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
+    val onOpenPermissions: () -> Unit,
     val onRetry: () -> Unit
 )
 
@@ -188,6 +189,12 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         isClickable = true
         isFocusable = true
     }
+    private val permissionsRow = RoomDetailsRowView(context).apply {
+        title = context.getString(R.string.room_permissions_title)
+        showsAccessory = true
+        isClickable = true
+        isFocusable = true
+    }
     private val pinnedRow = disabledRow("Pinned Messages")
     private val mediaRow = disabledRow("Shared Media")
     private val securityRow = disabledRow("Security & Privacy")
@@ -317,6 +324,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         content.addView(unreadRow, rowLayoutParams())
         content.addView(sectionsHeader)
         content.addView(membersRow, rowLayoutParams())
+        content.addView(permissionsRow, rowLayoutParams())
         content.addView(pinnedRow, rowLayoutParams())
         content.addView(mediaRow, rowLayoutParams())
         content.addView(securityRow, rowLayoutParams())
@@ -368,10 +376,14 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         if (showsMembers) {
             membersAction.setOnClickListener { actions.onOpenMembers() }
             membersRow.setOnClickListener { actions.onOpenMembers() }
+            permissionsRow.setOnClickListener { actions.onOpenPermissions() }
         } else {
             membersAction.setOnClickListener(null)
             membersRow.setOnClickListener(null)
+            permissionsRow.setOnClickListener(null)
         }
+        permissionsRow.visibility = if (showsMembers) VISIBLE else GONE
+        permissionsRow.isFocusable = showsMembers
         inviteAction.visibility = if (showsInvite) VISIBLE else GONE
         inviteAction.isFocusable = showsInvite
         inviteAction.setOnClickListener(
@@ -461,6 +473,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             addressRow,
             unreadRow,
             membersRow,
+            permissionsRow,
             pinnedRow,
             mediaRow,
             securityRow,

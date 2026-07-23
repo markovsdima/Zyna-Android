@@ -1044,6 +1044,124 @@ class MatrixClientService(
             } ?: error("Matrix room is not available")
         }
 
+    suspend fun loadRoomPermissions(roomId: String): MatrixRoomPermissions =
+        withContext(Dispatchers.IO) {
+            val activeClient = client ?: error("Matrix client is not ready")
+            val ownUserId = activeClient.userId()
+            activeClient.getRoom(roomId)?.use { room ->
+                val roomInfo = room.roomInfo()
+                try {
+                    val powerLevels = roomInfo.powerLevels
+                    if (powerLevels != null) {
+                        powerLevels.toMatrixRoomPermissions(
+                            roomId = roomId,
+                            ownUserId = ownUserId,
+                            privilegedCreatorsRole = roomInfo.privilegedCreatorsRole,
+                            creators = roomInfo.creators
+                        )
+                    } else {
+                        room.getPowerLevels().use { loadedPowerLevels ->
+                            loadedPowerLevels.toMatrixRoomPermissions(
+                                roomId = roomId,
+                                ownUserId = ownUserId,
+                                privilegedCreatorsRole = roomInfo.privilegedCreatorsRole,
+                                creators = roomInfo.creators
+                            )
+                        }
+                    }
+                } finally {
+                    roomInfo.destroy()
+                }
+            } ?: error("Matrix room is not available")
+        }
+
+    fun roomPermissionsUpdates(roomId: String): Flow<MatrixRoomPermissions> = callbackFlow {
+        val activeClient = client
+        if (activeClient == null) {
+            close(IllegalStateException("Matrix client is not ready"))
+            return@callbackFlow
+        }
+        val ownUserId = activeClient.userId()
+        val room = activeClient.getRoom(roomId)
+        if (room == null) {
+            close(IllegalStateException("Matrix room is not available"))
+            return@callbackFlow
+        }
+
+        var listenerHandle: TaskHandle? = null
+        val hasCleanedUp = AtomicBoolean(false)
+
+        fun emit(roomInfo: RoomInfo): Boolean {
+            val permissions = try {
+                roomInfo.powerLevels?.toMatrixRoomPermissions(
+                    roomId = roomId,
+                    ownUserId = ownUserId,
+                    privilegedCreatorsRole = roomInfo.privilegedCreatorsRole,
+                    creators = roomInfo.creators
+                )
+            } finally {
+                roomInfo.destroy()
+            }
+            if (permissions != null) {
+                trySendBlocking(permissions)
+                return true
+            }
+            return false
+        }
+
+        fun cleanup() {
+            if (hasCleanedUp.compareAndSet(false, true)) {
+                listenerHandle?.cancelAndDestroy()
+                room.destroy()
+            }
+        }
+
+        try {
+            val initialRoomInfo = room.roomInfo()
+            val initialPrivilegedCreatorsRole = initialRoomInfo.privilegedCreatorsRole
+            val initialCreators = initialRoomInfo.creators
+            val didEmitInitial = emit(initialRoomInfo)
+            listenerHandle = room.subscribeToRoomInfoUpdates(
+                object : RoomInfoListener {
+                    override fun call(roomInfo: RoomInfo) {
+                        emit(roomInfo)
+                    }
+                }
+            )
+            if (!didEmitInitial) {
+                room.getPowerLevels().use { powerLevels ->
+                    trySendBlocking(
+                        powerLevels.toMatrixRoomPermissions(
+                            roomId = roomId,
+                            ownUserId = ownUserId,
+                            privilegedCreatorsRole = initialPrivilegedCreatorsRole,
+                            creators = initialCreators
+                        )
+                    )
+                }
+            }
+        } catch (error: Throwable) {
+            cleanup()
+            close(error)
+            return@callbackFlow
+        }
+
+        awaitClose(::cleanup)
+    }.buffer(Channel.CONFLATED)
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.IO)
+
+    suspend fun updateRoomPermission(
+        roomId: String,
+        permission: MatrixRoomPermission,
+        level: Long
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            room.applyPowerLevelChanges(permission.toPowerLevelChanges(level))
+        } ?: error("Matrix room is not available")
+    }
+
     suspend fun setRoomName(roomId: String, name: String) = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         val normalizedName = name.trim()

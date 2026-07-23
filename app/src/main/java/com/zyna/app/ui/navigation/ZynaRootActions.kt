@@ -5,6 +5,7 @@ import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
+import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.media.AudioPlaybackController
@@ -16,6 +17,7 @@ import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 import com.zyna.app.ui.createroom.CreateRoomAccess
 import com.zyna.app.ui.createroom.CreateRoomPostingPermission
+import com.zyna.app.ui.roompermissions.RoomPermissionAudience
 import com.zyna.app.ui.theme.AppThemeMode
 
 data class ZynaRootActions(
@@ -26,6 +28,7 @@ data class ZynaRootActions(
     val rooms: RoomsFeatureActions,
     val createRoom: CreateRoomActions,
     val roomDetails: RoomDetailsFeatureActions,
+    val roomPermissions: RoomPermissionsFeatureActions,
     val roomProfileEditor: RoomProfileEditorActions,
     val roomMembers: RoomMembersFeatureActions,
     val inviteMembers: InviteMembersFeatureActions,
@@ -81,7 +84,14 @@ data class RoomDetailsFeatureActions(
     val onRefresh: () -> Unit,
     val onOpenProfileEditor: () -> Unit,
     val onOpenMembers: () -> Unit,
-    val onOpenInviteMembers: () -> Unit
+    val onOpenInviteMembers: () -> Unit,
+    val onOpenPermissions: () -> Unit
+)
+
+data class RoomPermissionsFeatureActions(
+    val onRetry: () -> Unit,
+    val onOpenMembers: () -> Unit,
+    val onSetPermission: (MatrixRoomPermission, RoomPermissionAudience) -> Unit
 )
 
 data class RoomProfileEditorActions(

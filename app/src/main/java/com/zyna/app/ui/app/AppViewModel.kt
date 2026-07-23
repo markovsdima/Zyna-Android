@@ -19,6 +19,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomKind
+import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.outgoing.OutgoingOutboxService
@@ -73,6 +74,10 @@ import com.zyna.app.ui.roomdetails.createRoomDetailsStore
 import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.roommembers.RoomMembersTarget
 import com.zyna.app.ui.roommembers.createRoomMembersStore
+import com.zyna.app.ui.roompermissions.RoomPermissionAudience
+import com.zyna.app.ui.roompermissions.RoomPermissionsState
+import com.zyna.app.ui.roompermissions.RoomPermissionsTarget
+import com.zyna.app.ui.roompermissions.createRoomPermissionsStore
 import com.zyna.app.ui.roomprofile.RoomProfileEditorState
 import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
 import com.zyna.app.ui.roomprofile.createRoomProfileEditorStore
@@ -258,6 +263,12 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomMembersState: StateFlow<RoomMembersState> = roomMembersStore.state
+    private val roomPermissionsStore = createRoomPermissionsStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomPermissionsState: StateFlow<RoomPermissionsState> = roomPermissionsStore.state
     private val inviteMembersStore = createInviteMembersStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -341,6 +352,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeRoomPermissionsRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeInviteMembersRouteInputs()
         }
 
@@ -383,6 +398,7 @@ class AppViewModel(
                     roomProfileEditorStore.deactivate()
                     createRoomStore.deactivate()
                     roomMembersStore.clearSession()
+                    roomPermissionsStore.clearSession()
                     inviteMembersStore.clearSession()
                 }
                 if (
@@ -773,6 +789,9 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
+        if (route is AppRoute.RoomPermissions && roomPermissionsStore.state.value.isSaving) {
+            return true
+        }
         if (
             (route is AppRoute.InviteRoomMembers ||
                 route is AppRoute.InviteCreatedRoomMembers) &&
@@ -1068,19 +1087,29 @@ class AppViewModel(
 
     fun openRoomMembers() {
         val current = _uiState.value
-        val route = current.route as? AppRoute.RoomDetails ?: return
+        if (
+            current.route is AppRoute.RoomPermissions &&
+            roomPermissionsStore.state.value.isSaving
+        ) {
+            return
+        }
+        val routeRoomId = when (val route = current.route) {
+            is AppRoute.RoomDetails -> route.roomId
+            is AppRoute.RoomPermissions -> route.roomId
+            else -> return
+        }
         val sessionUserId = current.matrixState.userIdOrNull() ?: return
         val detailsKind = roomDetailsStore.state.value
             .takeIf { state ->
                 state.target == RoomDetailsTarget(
                     userId = sessionUserId,
-                    roomId = route.roomId
+                    roomId = routeRoomId
                 )
             }
             ?.details
             ?.kind
         val roomKind = detailsKind
-            ?: roomListStore.state.value.roomForId(route.roomId)?.kind
+            ?: roomListStore.state.value.roomForId(routeRoomId)?.kind
             ?: return
         if (roomKind == MatrixRoomKind.DIRECT) {
             return
@@ -1088,6 +1117,35 @@ class AppViewModel(
         _uiState.update { current ->
             current.withNavigationState(current.navState.openRoomMembers())
         }
+    }
+
+    fun openRoomPermissions() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomDetails ?: return
+        val sessionUserId = current.matrixState.userIdOrNull() ?: return
+        val kind = roomDetailsStore.state.value
+            .takeIf {
+                it.target == RoomDetailsTarget(sessionUserId, route.roomId)
+            }
+            ?.details
+            ?.kind
+            ?: roomListStore.state.value.roomForId(route.roomId)?.kind
+            ?: return
+        if (kind == MatrixRoomKind.DIRECT) return
+        _uiState.update { state ->
+            state.withNavigationState(state.navState.openRoomPermissions())
+        }
+    }
+
+    fun retryRoomPermissions() {
+        roomPermissionsStore.retry()
+    }
+
+    fun setRoomPermission(
+        permission: MatrixRoomPermission,
+        audience: RoomPermissionAudience
+    ) {
+        roomPermissionsStore.setPermission(permission, audience)
     }
 
     fun retryRoomMembers() {
@@ -2042,6 +2100,20 @@ class AppViewModel(
         }
     }
 
+    private suspend fun observeRoomPermissionsRouteInputs() {
+        _uiState.collect { state ->
+            val route = state.navState.activeRoomPermissionsRoute
+            val userId = state.matrixState.userIdOrNull()
+            if (route == null || userId == null) {
+                roomPermissionsStore.deactivate()
+            } else {
+                roomPermissionsStore.activate(
+                    RoomPermissionsTarget(userId = userId, roomId = route.roomId)
+                )
+            }
+        }
+    }
+
     private suspend fun observeRoomMembersPrefetchInputs() {
         combine(
             _uiState,
@@ -2141,6 +2213,7 @@ class AppViewModel(
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.shortLogId()})"
+            is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.shortLogId()})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.shortLogId()})"
             is AppRoute.InviteCreatedRoomMembers ->
                 "InviteCreatedRoomMembers(${roomId.shortLogId()})"

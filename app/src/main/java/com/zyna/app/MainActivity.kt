@@ -70,6 +70,7 @@ import com.zyna.app.ui.navigation.ProfileFeatureActions
 import com.zyna.app.ui.navigation.RoomsFeatureActions
 import com.zyna.app.ui.navigation.RoomDetailsFeatureActions
 import com.zyna.app.ui.navigation.RoomMembersFeatureActions
+import com.zyna.app.ui.navigation.RoomPermissionsFeatureActions
 import com.zyna.app.ui.navigation.RoomProfileEditorActions
 import com.zyna.app.ui.navigation.SettingsFeatureActions
 import com.zyna.app.ui.navigation.UserProfileActions
@@ -368,19 +369,30 @@ class MainActivity : AppCompatActivity() {
                             appViewModel.uiState,
                             appViewModel.roomListState,
                             combine(
-                                appViewModel.roomDetailsState,
-                                appViewModel.roomProfileEditorState,
-                                appViewModel.createRoomState,
-                                appViewModel.roomMembersState,
-                                appViewModel.inviteMembersState
-                            ) { roomDetails, roomProfileEditor, createRoom, roomMembers, inviteMembers ->
-                                RoomFeatureState(
-                                    details = roomDetails,
-                                    profileEditor = roomProfileEditor,
-                                    createRoom = createRoom,
-                                    members = roomMembers,
-                                    inviteMembers = inviteMembers
-                                )
+                                combine(
+                                    appViewModel.roomDetailsState,
+                                    appViewModel.roomProfileEditorState,
+                                    appViewModel.createRoomState,
+                                    appViewModel.roomMembersState,
+                                    appViewModel.inviteMembersState
+                                ) {
+                                        roomDetails,
+                                        roomProfileEditor,
+                                        createRoom,
+                                        roomMembers,
+                                        inviteMembers
+                                    ->
+                                    RoomFeatureState(
+                                        details = roomDetails,
+                                        profileEditor = roomProfileEditor,
+                                        createRoom = createRoom,
+                                        members = roomMembers,
+                                        inviteMembers = inviteMembers
+                                    )
+                                },
+                                appViewModel.roomPermissionsState
+                            ) { room, permissions ->
+                                room.copy(permissions = permissions)
                             }
                         ) { state, roomList, room ->
                             AppFeatureInput(
@@ -532,7 +544,13 @@ class MainActivity : AppCompatActivity() {
                 onRefresh = appViewModel::refreshRoomDetails,
                 onOpenProfileEditor = appViewModel::openEditRoomProfile,
                 onOpenMembers = appViewModel::openRoomMembers,
-                onOpenInviteMembers = appViewModel::openInviteRoomMembers
+                onOpenInviteMembers = appViewModel::openInviteRoomMembers,
+                onOpenPermissions = appViewModel::openRoomPermissions
+            ),
+            roomPermissions = RoomPermissionsFeatureActions(
+                onRetry = appViewModel::retryRoomPermissions,
+                onOpenMembers = appViewModel::openRoomMembers,
+                onSetPermission = appViewModel::setRoomPermission
             ),
             roomProfileEditor = RoomProfileEditorActions(
                 onDisplayNameChanged = appViewModel::setRoomProfileDisplayNameDraft,
@@ -1442,6 +1460,7 @@ private fun AppRoute.perfName(): String {
         is AppRoute.SessionSecurity -> "SessionSecurity"
         is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
         is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
+        is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
         is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
         is AppRoute.InviteCreatedRoomMembers ->
             "InviteCreatedRoomMembers(${roomId.takeLast(10)})"

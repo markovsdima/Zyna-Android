@@ -334,6 +334,43 @@ class AppNavStateTest {
     }
 
     @Test
+    fun roomPermissionsOwnsDetailsAndCanOpenMembers() {
+        val roomId = "!room:example.org"
+        val detailsRoute = AppRoute.RoomDetails(roomId)
+        val permissionsRoute = AppRoute.RoomPermissions(roomId)
+        val membersRoute = AppRoute.RoomMembers(roomId)
+        val permissionsState = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+            .openRoomDetails()
+            .openRoomPermissions()
+
+        assertEquals(permissionsRoute, permissionsState.top)
+        assertEquals(detailsRoute, permissionsState.activeRoomDetailsRoute)
+        assertFalse(permissionsState.showsTabs)
+
+        val membersState = permissionsState.openRoomMembers()
+
+        assertEquals(membersRoute, membersState.top)
+        assertEquals(detailsRoute, membersState.activeRoomDetailsRoute)
+        assertEquals(permissionsRoute, membersState.activeRoomPermissionsRoute)
+        assertEquals(permissionsRoute, membersState.popActiveStack()?.top)
+    }
+
+    @Test
+    fun openRoomPermissionsRequiresTheOwnedTopDetailsRoute() {
+        val roomId = "!room:example.org"
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+        val membersState = chatState.openRoomDetails().openRoomMembers()
+
+        assertEquals(chatState, chatState.openRoomPermissions())
+        assertEquals(membersState, membersState.openRoomPermissions())
+        assertEquals(AppNavState(), AppNavState().openRoomPermissions())
+    }
+
+    @Test
     fun editRoomProfilePushesOverDetailsAndKeepsDetailsOwnerActive() {
         val roomId = "!room:example.org"
         val detailsState = AppNavState()

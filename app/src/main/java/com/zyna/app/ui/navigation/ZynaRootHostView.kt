@@ -73,6 +73,11 @@ import com.zyna.app.ui.roommembers.RoomMembersScreenView
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
 import com.zyna.app.ui.roommembers.RoomMembersState
+import com.zyna.app.ui.roompermissions.RoomPermissionsError
+import com.zyna.app.ui.roompermissions.RoomPermissionsScreenView
+import com.zyna.app.ui.roompermissions.RoomPermissionsScreenViewActions
+import com.zyna.app.ui.roompermissions.RoomPermissionsScreenViewState
+import com.zyna.app.ui.roompermissions.RoomPermissionsState
 import com.zyna.app.ui.roomprofile.RoomProfileAvatarChange
 import com.zyna.app.ui.roomprofile.RoomProfileEditorError
 import com.zyna.app.ui.roomprofile.RoomProfileEditorState
@@ -120,6 +125,17 @@ private fun CreateRoomError?.localizedMessage(context: Context): String? {
         CreateRoomError.ADDRESS_CHECK ->
             com.zyna.app.R.string.create_group_address_check_create_error
         CreateRoomError.CREATE -> com.zyna.app.R.string.create_group_error
+    }
+    return context.getString(stringId)
+}
+
+private fun RoomPermissionsError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        RoomPermissionsError.LOAD -> com.zyna.app.R.string.room_permissions_load_error
+        RoomPermissionsError.SAVE -> com.zyna.app.R.string.room_permissions_save_error
+        RoomPermissionsError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.room_permissions_permission_changed
     }
     return context.getString(stringId)
 }
@@ -606,6 +622,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             return false
         }
         if (
+            state.route is AppRoute.RoomPermissions &&
+            latestRoom?.permissions?.isSaving == true
+        ) {
+            return false
+        }
+        if (
             (state.route is AppRoute.InviteRoomMembers ||
                 state.route is AppRoute.InviteCreatedRoomMembers) &&
             latestRoom?.inviteMembers?.isSending == true
@@ -875,6 +897,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     roomDetails = room.details,
                     actions = actions,
                     dependencies = dependencies,
+                    route = route
+                )
+                is AppRoute.RoomPermissions -> roomPermissionsEntry(
+                    permissions = room.permissions,
+                    roomDetails = room.details,
+                    roomList = roomList,
+                    actions = actions,
                     route = route
                 )
                 is AppRoute.InviteRoomMembers -> inviteMembersEntry(
@@ -1467,6 +1496,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenMembers = actions.roomDetails.onOpenMembers,
                         onOpenProfileEditor = actions.roomDetails.onOpenProfileEditor,
                         onOpenInviteMembers = actions.roomDetails.onOpenInviteMembers,
+                        onOpenPermissions = actions.roomDetails.onOpenPermissions,
                         onRetry = actions.roomDetails.onRefresh
                     )
                 )
@@ -1512,6 +1542,41 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                                 member.avatarUrl
                             )
                         }
+                    )
+                )
+            }
+        )
+    }
+
+    private fun roomPermissionsEntry(
+        permissions: RoomPermissionsState,
+        roomDetails: RoomDetailsState,
+        roomList: RoomListState,
+        actions: ZynaRootActions,
+        route: AppRoute.RoomPermissions
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "roomPermissions:${route.roomId}",
+            createView = { context -> RoomPermissionsScreenView(context) },
+            updateView = { view ->
+                val routeState = permissions.takeIf { it.target?.roomId == route.roomId }
+                    ?: RoomPermissionsState()
+                val detailsKind = roomDetails
+                    .takeIf { it.target?.roomId == route.roomId }
+                    ?.details
+                    ?.kind
+                    ?: roomList.roomForId(route.roomId)?.kind
+                (view as RoomPermissionsScreenView).render(
+                    state = RoomPermissionsScreenViewState(
+                        permissions = routeState,
+                        isSpace = detailsKind == MatrixRoomKind.SPACE,
+                        errorMessage = routeState.error.localizedMessage(context)
+                    ),
+                    actions = RoomPermissionsScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onOpenMembers = actions.roomPermissions.onOpenMembers,
+                        onRetry = actions.roomPermissions.onRetry,
+                        onSetPermission = actions.roomPermissions.onSetPermission
                     )
                 )
             }
@@ -1897,6 +1962,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
+            is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
             is AppRoute.InviteCreatedRoomMembers ->
                 "InviteCreatedRoomMembers(${roomId.takeLast(10)})"

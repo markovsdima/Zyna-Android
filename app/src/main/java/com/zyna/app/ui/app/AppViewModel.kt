@@ -54,6 +54,8 @@ import com.zyna.app.ui.contacts.DirectRoomActionState
 import com.zyna.app.ui.contacts.ResolvedDirectRoomAction
 import com.zyna.app.ui.contacts.createContactsStore
 import com.zyna.app.ui.contacts.createDirectRoomActionCoordinator
+import com.zyna.app.ui.createroom.CreateRoomAccess
+import com.zyna.app.ui.createroom.CreateRoomPostingPermission
 import com.zyna.app.ui.createroom.CreateRoomState
 import com.zyna.app.ui.createroom.CreateRoomTarget
 import com.zyna.app.ui.createroom.createCreateRoomStore
@@ -926,6 +928,26 @@ class AppViewModel(
 
     fun setCreateRoomName(name: String) {
         createRoomStore.setName(name)
+    }
+
+    fun setCreateRoomTopic(topic: String) {
+        createRoomStore.setTopic(topic)
+    }
+
+    fun setCreateRoomAccess(access: CreateRoomAccess) {
+        createRoomStore.setAccess(access)
+    }
+
+    fun setCreateRoomPostingPermission(permission: CreateRoomPostingPermission) {
+        createRoomStore.setPostingPermission(permission)
+    }
+
+    fun setCreateRoomAlias(alias: String) {
+        createRoomStore.setAliasLocalPart(alias)
+    }
+
+    fun retryCreateRoomAliasCheck() {
+        createRoomStore.retryAliasCheck()
     }
 
     fun setCreateRoomAvatarDraft(

@@ -40,6 +40,9 @@ import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
 import com.zyna.app.ui.createroom.CreateRoomError
+import com.zyna.app.ui.createroom.CreateRoomScreenView
+import com.zyna.app.ui.createroom.CreateRoomScreenViewActions
+import com.zyna.app.ui.createroom.CreateRoomScreenViewState
 import com.zyna.app.ui.createroom.CreateRoomState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
@@ -114,6 +117,8 @@ private fun CreateRoomError?.localizedMessage(context: Context): String? {
         null -> return null
         CreateRoomError.AVATAR_PREPARATION -> com.zyna.app.R.string.create_group_avatar_error
         CreateRoomError.AVATAR_UPLOAD -> com.zyna.app.R.string.create_group_avatar_upload_error
+        CreateRoomError.ADDRESS_CHECK ->
+            com.zyna.app.R.string.create_group_address_check_create_error
         CreateRoomError.CREATE -> com.zyna.app.R.string.create_group_error
     }
     return context.getString(stringId)
@@ -1317,55 +1322,27 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
             key = "room:create",
-            createView = { context -> ProfileEditorScreenView(context) },
+            createView = { context -> CreateRoomScreenView(context) },
             updateView = { view ->
-                (view as ProfileEditorScreenView).render(
-                    state = ProfileEditorScreenViewState(
-                        identityId = creation.target?.userId.orEmpty(),
-                        displayName = "",
-                        editDisplayName = creation.name,
-                        avatarUrl = null,
-                        editAvatarLocalPath = creation.avatarLocalPath,
-                        hasAvatar = creation.hasAvatar,
-                        editSessionId = creation.editSessionId,
-                        isSaving = creation.isCreating,
-                        canSave = creation.canCreate,
-                        canChangeName = true,
-                        canChangeAvatar = true,
+                (view as CreateRoomScreenView).render(
+                    state = CreateRoomScreenViewState(
+                        creation = creation,
                         errorMessage = creation.error.localizedMessage(context),
-                        backLabel = context.getString(com.zyna.app.R.string.common_cancel),
-                        saveLabel = context.getString(com.zyna.app.R.string.create_group_create),
-                        title = context.getString(com.zyna.app.R.string.create_group_title),
-                        nameLabel = context.getString(com.zyna.app.R.string.create_group_name),
-                        changePhotoLabel = context.getString(
-                            com.zyna.app.R.string.profile_edit_change_photo
-                        ),
-                        removePhotoLabel = context.getString(
-                            com.zyna.app.R.string.profile_edit_remove_photo
-                        ),
-                        discardTitle = context.getString(
-                            com.zyna.app.R.string.create_group_discard_title
-                        ),
-                        discardMessage = context.getString(
-                            com.zyna.app.R.string.create_group_discard_message
-                        ),
-                        keepEditingLabel = context.getString(
-                            com.zyna.app.R.string.profile_edit_keep_editing
-                        ),
-                        discardLabel = context.getString(
-                            com.zyna.app.R.string.profile_edit_discard
-                        ),
                         matrixMediaLoader = dependencies.matrixMediaLoader,
-                        bottomContentPaddingPx = bottomInset,
-                        isDiscardConfirmationVisible =
-                            creation.isDiscardConfirmationVisible
+                        bottomContentPaddingPx = bottomInset
                     ),
-                    actions = ProfileEditorScreenViewActions(
+                    actions = CreateRoomScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
-                        onDisplayNameChanged = actions.createRoom.onNameChanged,
+                        onNameChanged = actions.createRoom.onNameChanged,
+                        onTopicChanged = actions.createRoom.onTopicChanged,
+                        onAccessChanged = actions.createRoom.onAccessChanged,
+                        onPostingPermissionChanged =
+                            actions.createRoom.onPostingPermissionChanged,
+                        onAliasChanged = actions.createRoom.onAliasChanged,
+                        onRetryAliasCheck = actions.createRoom.onRetryAliasCheck,
                         onPickAvatar = actions.createRoom.onPickAvatar,
                         onRemoveAvatar = actions.createRoom.onRemoveAvatar,
-                        onSave = actions.createRoom.onCreate,
+                        onCreate = actions.createRoom.onCreate,
                         onDiscardChangesConfirmed = actions.createRoom.onConfirmDiscard,
                         onDiscardChangesCancelled = actions.createRoom.onCancelDiscard
                     )

@@ -517,6 +517,11 @@ class MainActivity : AppCompatActivity() {
             ),
             createRoom = CreateRoomActions(
                 onNameChanged = appViewModel::setCreateRoomName,
+                onTopicChanged = appViewModel::setCreateRoomTopic,
+                onAccessChanged = appViewModel::setCreateRoomAccess,
+                onPostingPermissionChanged = appViewModel::setCreateRoomPostingPermission,
+                onAliasChanged = appViewModel::setCreateRoomAlias,
+                onRetryAliasCheck = appViewModel::retryCreateRoomAliasCheck,
                 onPickAvatar = ::launchCreateRoomAvatarPicker,
                 onRemoveAvatar = ::removeCreateRoomAvatar,
                 onCreate = appViewModel::createRoom,

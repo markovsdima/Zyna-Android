@@ -1,5 +1,8 @@
 package com.zyna.app.ui.createroom
 
+import com.zyna.app.data.matrix.MatrixGroupAccess
+import com.zyna.app.data.matrix.MatrixGroupCreationRequest
+import com.zyna.app.data.matrix.MatrixGroupPostingPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.profile.ProfileAvatarDraft
 import kotlin.coroutines.CoroutineContext
@@ -23,18 +26,240 @@ private const val ROOM_ID = "!created:example.org"
 
 class CreateRoomStoreTest {
     @Test
-    fun createWithoutAvatarNormalizesNameCachesAndFinishes() = runBlocking {
+    fun privateCreateNormalizesFieldsCachesAndFinishes() = runBlocking {
         val fixture = CreateRoomFixture(coroutineContext)
         try {
             fixture.store.begin(target())
             fixture.store.setName("  Friends  ")
+            fixture.store.setTopic("  Weekend plans  ")
+            fixture.store.setPostingPermission(CreateRoomPostingPermission.MODERATORS_ONLY)
 
             fixture.store.create()
             awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
 
-            assertEquals(listOf("create:Friends:null", "cache:$ROOM_ID"), fixture.calls)
-            assertEquals("Friends", fixture.createdRooms.single().second.displayName)
+            val request = fixture.creationRequests.single()
+            assertEquals("Friends", request.name)
+            assertEquals("Weekend plans", request.topic)
+            assertEquals(MatrixGroupAccess.PRIVATE, request.access)
+            assertEquals(MatrixGroupPostingPermission.MODERATORS_ONLY, request.postingPermission)
+            assertNull(request.aliasLocalPart)
+            assertEquals(listOf("cache:$ROOM_ID"), fixture.calls)
             assertEquals(CreateRoomState(), fixture.store.state.value)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun publicCreateAutoFillsChecksAndRechecksAddress() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Public Friends")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability ==
+                    CreateRoomAliasAvailability.AVAILABLE
+            }
+
+            assertEquals("public-friends", fixture.store.state.value.aliasLocalPart)
+            assertEquals("#public-friends:example.org", fixture.store.state.value.fullAlias)
+            assertTrue(fixture.store.state.value.canCreate)
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(
+                listOf(
+                    "available:#public-friends:example.org",
+                    "available:#public-friends:example.org",
+                    "cache:$ROOM_ID"
+                ),
+                fixture.calls
+            )
+            assertEquals(MatrixGroupAccess.PUBLIC, fixture.creationRequests.single().access)
+            assertEquals("public-friends", fixture.creationRequests.single().aliasLocalPart)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun publicAddressMustBeAvailableBeforeCreate() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        fixture.aliasAvailableBehavior = { false }
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Friends")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability == CreateRoomAliasAvailability.TAKEN
+            }
+
+            assertFalse(fixture.store.state.value.canCreate)
+            fixture.store.create()
+            yield()
+            assertTrue(fixture.creationRequests.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun automaticAddressFollowsNameAfterPrivateRoundTrip() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Old name")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition { fixture.store.state.value.canCreate }
+
+            fixture.store.setAccess(CreateRoomAccess.PRIVATE)
+            fixture.store.setName("New name")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition { fixture.store.state.value.canCreate }
+
+            assertEquals("new-name", fixture.store.state.value.aliasLocalPart)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun createRecheckStopsBeforeUploadWhenAddressWasTaken() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        var checks = 0
+        fixture.aliasAvailableBehavior = {
+            checks += 1
+            checks == 1
+        }
+        try {
+            fixture.beginWithAvatar()
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition { fixture.store.state.value.canCreate }
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability == CreateRoomAliasAvailability.TAKEN
+            }
+
+            assertFalse(fixture.store.state.value.isCreating)
+            assertTrue(fixture.calls.none { it.startsWith("upload:") })
+            assertTrue(fixture.creationRequests.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun failedAddressCheckCanBeRetried() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        var attempts = 0
+        fixture.aliasAvailableBehavior = {
+            attempts += 1
+            if (attempts == 1) error("offline")
+            true
+        }
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Friends")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability == CreateRoomAliasAvailability.ERROR
+            }
+
+            fixture.store.retryAliasCheck()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability ==
+                    CreateRoomAliasAvailability.AVAILABLE
+            }
+
+            assertTrue(fixture.store.state.value.canCreate)
+            assertEquals(2, attempts)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun invalidAddressDoesNotHitAvailabilityApi() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Friends")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition { fixture.store.state.value.canCreate }
+            fixture.calls.clear()
+
+            fixture.store.setAliasLocalPart("bad address")
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability ==
+                    CreateRoomAliasAvailability.INVALID
+            }
+
+            assertTrue(fixture.calls.isEmpty())
+            assertFalse(fixture.store.state.value.canCreate)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun createTimeAddressCheckFailureIsRetryableWithoutUploading() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        var checks = 0
+        fixture.aliasAvailableBehavior = {
+            checks += 1
+            if (checks == 1) true else error("offline")
+        }
+        try {
+            fixture.beginWithAvatar()
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            awaitCreateRoomCondition { fixture.store.state.value.canCreate }
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.error == CreateRoomError.ADDRESS_CHECK
+            }
+
+            assertEquals(CreateRoomAliasAvailability.ERROR, fixture.store.state.value.aliasAvailability)
+            assertTrue(fixture.calls.none { it.startsWith("upload:") })
+            assertTrue(fixture.creationRequests.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun lateAddressResultCannotValidateNewerAddress() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        val oldCheckStarted = CompletableDeferred<Unit>()
+        val releaseOldCheck = CompletableDeferred<Unit>()
+        fixture.aliasAvailableBehavior = { alias ->
+            if (alias.contains("old")) {
+                oldCheckStarted.complete(Unit)
+                withContext(NonCancellable) { releaseOldCheck.await() }
+                false
+            } else {
+                true
+            }
+        }
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Old")
+            fixture.store.setAccess(CreateRoomAccess.PUBLIC)
+            oldCheckStarted.await()
+
+            fixture.store.setAliasLocalPart("new")
+            awaitCreateRoomCondition {
+                fixture.store.state.value.aliasAvailability ==
+                    CreateRoomAliasAvailability.AVAILABLE
+            }
+            releaseOldCheck.complete(Unit)
+            yield()
+
+            assertEquals("new", fixture.store.state.value.aliasLocalPart)
+            assertEquals(CreateRoomAliasAvailability.AVAILABLE, fixture.store.state.value.aliasAvailability)
         } finally {
             fixture.close()
         }
@@ -44,18 +269,16 @@ class CreateRoomStoreTest {
     fun retryAfterCreateFailureReusesUploadedAvatar() = runBlocking {
         val fixture = CreateRoomFixture(coroutineContext)
         var createAttempts = 0
-        fixture.createBehavior = { name, avatarUrl ->
+        fixture.createBehavior = { request ->
             createAttempts += 1
             if (createAttempts == 1) error("create failed")
-            room(name, avatarUrl)
+            room(request.name, request.avatarUrl)
         }
         try {
             fixture.beginWithAvatar()
 
             fixture.store.create()
-            awaitCreateRoomCondition {
-                fixture.store.state.value.error == CreateRoomError.CREATE
-            }
+            awaitCreateRoomCondition { fixture.store.state.value.error == CreateRoomError.CREATE }
 
             val failed = fixture.store.state.value
             assertEquals("mxc://example/avatar", failed.uploadedAvatarUrl)
@@ -84,7 +307,7 @@ class CreateRoomStoreTest {
                 fixture.store.state.value.error == CreateRoomError.AVATAR_UPLOAD
             }
 
-            assertTrue(fixture.calls.none { it.startsWith("create:") })
+            assertTrue(fixture.creationRequests.isEmpty())
             assertTrue(fixture.store.state.value.canCreate)
             assertTrue(fixture.createdRooms.isEmpty())
         } finally {
@@ -152,10 +375,10 @@ class CreateRoomStoreTest {
         val fixture = CreateRoomFixture(coroutineContext)
         val createStarted = CompletableDeferred<Unit>()
         val releaseCreate = CompletableDeferred<Unit>()
-        fixture.createBehavior = { name, avatarUrl ->
+        fixture.createBehavior = { request ->
             createStarted.complete(Unit)
             withContext(NonCancellable) { releaseCreate.await() }
-            room(name, avatarUrl)
+            room(request.name, request.avatarUrl)
         }
         try {
             fixture.store.begin(target())
@@ -206,15 +429,15 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
 
     val calls = mutableListOf<String>()
     val deletedDrafts = mutableListOf<String>()
+    val creationRequests = mutableListOf<MatrixGroupCreationRequest>()
     val createdRooms = mutableListOf<Pair<CreateRoomTarget, MatrixRoomSummary>>()
     val cancelledTargets = mutableListOf<CreateRoomTarget>()
     val warnings = mutableListOf<Throwable>()
 
-    var uploadBehavior: suspend (String, String) -> String = { _, _ ->
-        "mxc://example/avatar"
-    }
-    var createBehavior: suspend (String, String?) -> MatrixRoomSummary = { name, avatarUrl ->
-        room(name, avatarUrl)
+    var uploadBehavior: suspend (String, String) -> String = { _, _ -> "mxc://example/avatar" }
+    var aliasAvailableBehavior: suspend (String) -> Boolean = { true }
+    var createBehavior: suspend (MatrixGroupCreationRequest) -> MatrixRoomSummary = { request ->
+        room(request.name, request.avatarUrl)
     }
     var cacheBehavior: suspend (String, MatrixRoomSummary) -> Unit = { _, _ -> }
 
@@ -225,9 +448,17 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
                 calls += "upload:$path:$mimeType"
                 uploadBehavior(path, mimeType)
             },
-            createPrivateGroup = { name, avatarUrl ->
-                calls += "create:$name:$avatarUrl"
-                createBehavior(name, avatarUrl)
+            suggestAliasLocalPart = { name ->
+                name.trim().lowercase().replace(' ', '-')
+            },
+            isAliasValid = { alias -> alias.startsWith('#') && !alias.contains(' ') },
+            isAliasAvailable = { alias ->
+                calls += "available:$alias"
+                aliasAvailableBehavior(alias)
+            },
+            createGroup = { request ->
+                creationRequests += request
+                createBehavior(request)
             },
             cacheCreatedRoom = { userId, createdRoom ->
                 calls += "cache:${createdRoom.id}"
@@ -237,7 +468,8 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
         ),
         onCreated = { target, createdRoom -> createdRooms += target to createdRoom },
         onCancelled = cancelledTargets::add,
-        onWarning = { _, error -> warnings += error }
+        onWarning = { _, error -> warnings += error },
+        aliasCheckDebounceMillis = 0
     )
 
     fun beginWithAvatar() {
@@ -258,11 +490,7 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
 private fun target(): CreateRoomTarget = CreateRoomTarget(USER_ID)
 
 private fun room(name: String, avatarUrl: String?): MatrixRoomSummary {
-    return MatrixRoomSummary(
-        id = ROOM_ID,
-        displayName = name,
-        avatarUrl = avatarUrl
-    )
+    return MatrixRoomSummary(id = ROOM_ID, displayName = name, avatarUrl = avatarUrl)
 }
 
 private fun avatarDraft(path: String): ProfileAvatarDraft {
@@ -277,8 +505,6 @@ private fun avatarDraft(path: String): ProfileAvatarDraft {
 
 private suspend fun awaitCreateRoomCondition(condition: () -> Boolean) {
     withTimeout(2_000) {
-        while (!condition()) {
-            yield()
-        }
+        while (!condition()) yield()
     }
 }

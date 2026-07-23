@@ -118,6 +118,8 @@ import org.matrix.rustcomponents.sdk.SyncService
 import org.matrix.rustcomponents.sdk.TaskHandle
 import org.matrix.rustcomponents.sdk.Timeline
 import org.matrix.rustcomponents.sdk.TimelineConfiguration
+import org.matrix.rustcomponents.sdk.isRoomAliasFormatValid
+import org.matrix.rustcomponents.sdk.roomAliasNameFromRoomDisplayName
 import org.matrix.rustcomponents.sdk.TimelineDiff
 import org.matrix.rustcomponents.sdk.TimelineEventContent
 import org.matrix.rustcomponents.sdk.TimelineFilter
@@ -697,36 +699,71 @@ class MatrixClientService(
         )
     }
 
-    suspend fun createPrivateGroup(
-        name: String,
-        avatarUrl: String?
+    fun suggestRoomAliasLocalPart(name: String): String {
+        return roomAliasNameFromRoomDisplayName(name)
+    }
+
+    fun isRoomAliasValid(alias: String): Boolean {
+        return isRoomAliasFormatValid(alias)
+    }
+
+    suspend fun isRoomAliasAvailable(alias: String): Boolean = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.isRoomAliasAvailable(alias)
+    }
+
+    suspend fun createGroup(
+        request: MatrixGroupCreationRequest
     ): MatrixRoomSummary = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
-        val normalizedName = name.trim()
-        require(normalizedName.isNotEmpty()) { "Room name is required" }
+        val parameters = request.toCreateRoomParameters()
+        val normalizedName = requireNotNull(parameters.name)
+        val normalizedAvatarUrl = parameters.avatar?.takeIf { it.isNotBlank() }
+        val isPrivate = request.access == MatrixGroupAccess.PRIVATE
+        val canonicalAlias = parameters.canonicalAlias?.let { localPart ->
+            activeClient.userId()
+                .substringAfter(':', missingDelimiterValue = "")
+                .takeIf { it.isNotBlank() }
+                ?.let { serverName -> "#$localPart:$serverName" }
+        }
 
+        // Resolve every fallible input before createRoom: after it returns, the remote mutation is
+        // irreversible and must always be reported as success to the feature coordinator.
         val roomId = activeClient.createRoom(
-            request = CreateRoomParameters(
-                name = normalizedName,
-                topic = null,
-                isEncrypted = true,
-                isDirect = false,
-                visibility = RoomVisibility.Private,
-                preset = RoomPreset.PRIVATE_CHAT,
-                invite = null,
-                avatar = avatarUrl?.takeIf { it.isNotBlank() },
-                powerLevelContentOverride = null,
-                joinRuleOverride = null,
-                historyVisibilityOverride = RoomHistoryVisibility.Invited,
-                canonicalAlias = null,
-                isSpace = false
-            )
+            request = parameters
         )
 
         MatrixRoomSummary(
             id = roomId,
             displayName = normalizedName,
-            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() }
+            avatarUrl = normalizedAvatarUrl,
+            roomDetails = MatrixRoomDetails(
+                roomId = roomId,
+                displayName = normalizedName,
+                avatarUrl = normalizedAvatarUrl,
+                directUserId = null,
+                kind = MatrixRoomKind.GROUP,
+                topic = parameters.topic,
+                joinedMemberCount = 1,
+                encryption = if (isPrivate) {
+                    MatrixRoomEncryption.ENCRYPTED
+                } else {
+                    MatrixRoomEncryption.NOT_ENCRYPTED
+                },
+                access = if (isPrivate) MatrixRoomAccess.PRIVATE else MatrixRoomAccess.PUBLIC,
+                historyVisibility = if (isPrivate) {
+                    MatrixRoomHistoryVisibility.INVITED
+                } else {
+                    MatrixRoomHistoryVisibility.SHARED
+                },
+                pinnedEventCount = 0,
+                canonicalAlias = canonicalAlias,
+                capabilities = MatrixRoomCapabilities(
+                    canInviteMembers = true,
+                    canChangeName = true,
+                    canChangeAvatar = true
+                )
+            )
         )
     }
 

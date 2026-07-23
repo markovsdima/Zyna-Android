@@ -14,6 +14,8 @@ import com.zyna.app.data.presence.PresenceProviderMode
 import com.zyna.app.data.security.MatrixSessionSecurityAction
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
+import com.zyna.app.ui.createroom.CreateRoomAccess
+import com.zyna.app.ui.createroom.CreateRoomPostingPermission
 import com.zyna.app.ui.theme.AppThemeMode
 
 data class ZynaRootActions(
@@ -63,6 +65,11 @@ data class RoomsFeatureActions(
 
 data class CreateRoomActions(
     val onNameChanged: (String) -> Unit,
+    val onTopicChanged: (String) -> Unit,
+    val onAccessChanged: (CreateRoomAccess) -> Unit,
+    val onPostingPermissionChanged: (CreateRoomPostingPermission) -> Unit,
+    val onAliasChanged: (String) -> Unit,
+    val onRetryAliasCheck: () -> Unit,
     val onPickAvatar: (Long) -> Unit,
     val onRemoveAvatar: () -> Unit,
     val onCreate: () -> Unit,

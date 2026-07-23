@@ -46,6 +46,7 @@ internal data class InviteMembersScreenViewState(
     val sendErrorMessage: String?,
     val failedInviteCount: Int,
     val permissionDenied: Boolean,
+    val canSkip: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?
 )
 
@@ -262,6 +263,9 @@ internal class InviteMembersScreenView(context: Context) : FrameLayout(context) 
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.palette = palette
 
+        backButton.text = context.getString(
+            if (state.canSkip) R.string.common_skip else R.string.common_cancel
+        )
         backButton.isEnabled = !state.isSending
         backButton.alpha = if (state.isSending) DISABLED_ALPHA else 1f
         backButton.setOnClickListener(

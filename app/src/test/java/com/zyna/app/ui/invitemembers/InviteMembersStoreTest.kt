@@ -310,6 +310,48 @@ class InviteMembersStoreTest {
             fixture.close()
         }
     }
+
+    @Test
+    fun newlyCreatedRoomUsesKnownMembershipWithoutLoadingFrame() = runBlocking {
+        val fixture = InviteMembersStoreFixture(coroutineContext)
+        fixture.searchBehavior = {
+            listOf(
+                profile(SESSION_USER, "Me"),
+                profile(ALICE, "Alice")
+            )
+        }
+        try {
+            fixture.store.activate(
+                target = target(),
+                seedCanInviteMembers = true,
+                mode = InviteMembersActivationMode.NEWLY_CREATED_ROOM
+            )
+
+            assertFalse(fixture.store.state.value.isPreparing)
+            assertTrue(fixture.memberSources.isEmpty())
+            assertEquals(0, fixture.permissionChecks)
+
+            fixture.store.setSearchQuery("people")
+            awaitCondition { fixture.store.state.value.searchResults.size == 2 }
+            val ownCandidate = fixture.store.state.value.searchResults.first {
+                it.profile.userId == SESSION_USER
+            }
+            val aliceCandidate = fixture.store.state.value.searchResults.first {
+                it.profile.userId == ALICE
+            }
+            assertEquals(MatrixRoomMemberMembership.JOINED, ownCandidate.membership)
+            fixture.store.toggleSelection(ownCandidate.profile)
+            fixture.store.toggleSelection(aliceCandidate.profile)
+
+            fixture.store.sendInvites()
+            awaitCondition { fixture.completions.isNotEmpty() }
+
+            assertEquals(1, fixture.permissionChecks)
+            assertEquals(listOf(ALICE), fixture.invitedUserIds)
+        } finally {
+            fixture.close()
+        }
+    }
 }
 
 private class InviteMembersStoreFixture(parentContext: CoroutineContext) {

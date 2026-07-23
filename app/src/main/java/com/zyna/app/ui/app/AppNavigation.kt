@@ -52,6 +52,7 @@ sealed interface AppRoute {
     ) : AppRoute
     data object Calls : AppRoute
     data object Rooms : AppRoute
+    data object CreateRoom : AppRoute
     data object ForwardPicker : AppRoute
     data object Profile : AppRoute
     data object EditProfile : AppRoute
@@ -69,6 +70,11 @@ sealed interface AppRoute {
     ) : AppRoute
     data class InviteRoomMembers(
         val roomId: String
+    ) : AppRoute
+    data class InviteCreatedRoomMembers(
+        val roomId: String,
+        val displayName: String,
+        val avatarUrl: String?
     ) : AppRoute
     data class Chat(
         val roomId: String,
@@ -186,6 +192,39 @@ data class AppNavState(
             mode = AppNavMode.Main,
             selectedTab = AppTab.CHATS,
             chatsStack = listOf(AppRoute.Rooms)
+        )
+    }
+
+    fun openCreateRoom(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+            return this
+        }
+        val rootedStack = ensureChatsRoot(chatsStack)
+        if (rootedStack.lastOrNull() != AppRoute.Rooms) {
+            return this
+        }
+        return copy(chatsStack = rootedStack + AppRoute.CreateRoom)
+    }
+
+    fun openCreatedRoomInvites(
+        roomId: String,
+        displayName: String,
+        avatarUrl: String?
+    ): AppNavState {
+        if (
+            mode != AppNavMode.Main ||
+            selectedTab != AppTab.CHATS ||
+            chatsStack.lastOrNull() != AppRoute.CreateRoom ||
+            roomId.isBlank()
+        ) {
+            return this
+        }
+        return copy(
+            chatsStack = chatsStack.dropLast(1) + AppRoute.InviteCreatedRoomMembers(
+                roomId = roomId,
+                displayName = displayName,
+                avatarUrl = avatarUrl
+            )
         )
     }
 

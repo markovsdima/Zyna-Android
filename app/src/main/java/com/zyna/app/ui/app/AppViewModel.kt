@@ -54,7 +54,11 @@ import com.zyna.app.ui.contacts.DirectRoomActionState
 import com.zyna.app.ui.contacts.ResolvedDirectRoomAction
 import com.zyna.app.ui.contacts.createContactsStore
 import com.zyna.app.ui.contacts.createDirectRoomActionCoordinator
+import com.zyna.app.ui.createroom.CreateRoomState
+import com.zyna.app.ui.createroom.CreateRoomTarget
+import com.zyna.app.ui.createroom.createCreateRoomStore
 import com.zyna.app.ui.invitemembers.InviteMembersState
+import com.zyna.app.ui.invitemembers.InviteMembersActivationMode
 import com.zyna.app.ui.invitemembers.InviteMembersTarget
 import com.zyna.app.ui.invitemembers.createInviteMembersStore
 import com.zyna.app.ui.profile.OwnProfileState
@@ -111,7 +115,8 @@ private data class RoomMembersRouteInput(
 
 private data class InviteMembersRouteInput(
     val target: InviteMembersTarget,
-    val seedCanInviteMembers: Boolean
+    val seedCanInviteMembers: Boolean,
+    val mode: InviteMembersActivationMode
 )
 
 data class AppUiState(
@@ -222,6 +227,15 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomListState: StateFlow<RoomListState> = roomListStore.state
+    private val createRoomStore = createCreateRoomStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        onCreated = ::handleRoomCreated,
+        onCancelled = ::handleCreateRoomCancelled,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val createRoomState: StateFlow<CreateRoomState> = createRoomStore.state
     private val roomDetailsStore = createRoomDetailsStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -317,6 +331,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeCreateRoomOwner()
+        }
+
+        viewModelScope.launch {
             observeRoomMembersRouteInputs()
         }
 
@@ -361,6 +379,7 @@ class AppViewModel(
                     roomListStore.deactivate()
                     roomDetailsStore.deactivate()
                     roomProfileEditorStore.deactivate()
+                    createRoomStore.deactivate()
                     roomMembersStore.clearSession()
                     inviteMembersStore.clearSession()
                 }
@@ -752,7 +771,15 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
-        if (route is AppRoute.InviteRoomMembers && inviteMembersStore.state.value.isSending) {
+        if (
+            (route is AppRoute.InviteRoomMembers ||
+                route is AppRoute.InviteCreatedRoomMembers) &&
+            inviteMembersStore.state.value.isSending
+        ) {
+            return true
+        }
+        if (route is AppRoute.InviteCreatedRoomMembers) {
+            finishCreatedRoomInvites(route)
             return true
         }
         if (
@@ -763,6 +790,10 @@ class AppViewModel(
         }
         if (route is AppRoute.EditRoomProfile) {
             roomProfileEditorStore.requestExit()
+            return true
+        }
+        if (route == AppRoute.CreateRoom) {
+            createRoomStore.requestExit()
             return true
         }
         val previousContactActionOwner = route.directRoomActionOwnerKey()
@@ -882,6 +913,63 @@ class AppViewModel(
         _uiState.update { current ->
             current.withNavigationState(current.navState.openRoomDetails())
         }
+    }
+
+    fun openCreateRoom() {
+        val current = _uiState.value
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val nextNavigation = current.navState.openCreateRoom()
+        if (nextNavigation == current.navState) return
+        createRoomStore.begin(CreateRoomTarget(userId))
+        _uiState.update { state -> state.withNavigationState(nextNavigation) }
+    }
+
+    fun setCreateRoomName(name: String) {
+        createRoomStore.setName(name)
+    }
+
+    fun setCreateRoomAvatarDraft(
+        draft: ProfileAvatarDraft,
+        target: CreateRoomTarget,
+        editSessionId: Long
+    ) {
+        val current = _uiState.value
+        if (
+            current.route != AppRoute.CreateRoom ||
+            current.matrixState.userIdOrNull() != target.userId
+        ) {
+            createRoomStore.discardAvatarDraft(draft)
+            return
+        }
+        createRoomStore.setAvatarDraft(draft, target, editSessionId)
+    }
+
+    fun setCreateRoomAvatarPreparationError(
+        target: CreateRoomTarget,
+        editSessionId: Long
+    ) {
+        val current = _uiState.value
+        if (
+            current.route != AppRoute.CreateRoom ||
+            current.matrixState.userIdOrNull() != target.userId
+        ) return
+        createRoomStore.setAvatarPreparationError(target, editSessionId)
+    }
+
+    fun removeCreateRoomAvatar() {
+        createRoomStore.removeAvatar()
+    }
+
+    fun createRoom() {
+        createRoomStore.create()
+    }
+
+    fun confirmCreateRoomDiscard() {
+        createRoomStore.confirmDiscard()
+    }
+
+    fun cancelCreateRoomDiscard() {
+        createRoomStore.cancelDiscardConfirmation()
     }
 
     fun refreshRoomDetails() {
@@ -1750,6 +1838,52 @@ class AppViewModel(
         }
     }
 
+    private suspend fun observeCreateRoomOwner() {
+        _uiState.collect { state ->
+            val target = createRoomStore.state.value.target ?: return@collect
+            if (
+                state.route != AppRoute.CreateRoom ||
+                state.matrixState.userIdOrNull() != target.userId
+            ) {
+                createRoomStore.deactivate()
+            }
+        }
+    }
+
+    private fun handleRoomCreated(target: CreateRoomTarget, room: MatrixRoomSummary) {
+        val current = _uiState.value
+        if (
+            current.route != AppRoute.CreateRoom ||
+            current.matrixState.userIdOrNull() != target.userId
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.withNavigationState(
+                state.navState.openCreatedRoomInvites(
+                    roomId = room.id,
+                    displayName = room.displayName,
+                    avatarUrl = room.avatarUrl
+                )
+            )
+        }
+    }
+
+    private fun handleCreateRoomCancelled(target: CreateRoomTarget) {
+        val current = _uiState.value
+        if (
+            current.route != AppRoute.CreateRoom ||
+            current.matrixState.userIdOrNull() != target.userId
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.navState.popActiveStack()
+                ?.let(state::withNavigationState)
+                ?: state
+        }
+    }
+
     private fun handleRoomProfileEditFinished(
         target: RoomProfileEditorTarget,
         didSave: Boolean
@@ -1778,23 +1912,34 @@ class AppViewModel(
             roomListStore.state,
             roomDetailsStore.state
         ) { state, roomList, roomDetails ->
-            val route = state.route as? AppRoute.InviteRoomMembers
             val userId = state.matrixState.userIdOrNull()
-            if (route == null || userId == null) {
+            if (userId == null) {
                 return@combine null
             }
-            val target = RoomDetailsTarget(userId, route.roomId)
-            val details = roomDetails
-                .takeIf { it.target == target }
-                ?.details
-                ?: roomList.roomForId(route.roomId)?.roomDetails
-            if (details == null || details.kind == MatrixRoomKind.DIRECT) {
-                null
-            } else {
-                InviteMembersRouteInput(
+            when (val route = state.route) {
+                is AppRoute.InviteCreatedRoomMembers -> InviteMembersRouteInput(
                     target = InviteMembersTarget(userId, route.roomId),
-                    seedCanInviteMembers = details.capabilities.canInviteMembers == true
+                    seedCanInviteMembers = true,
+                    mode = InviteMembersActivationMode.NEWLY_CREATED_ROOM
                 )
+                is AppRoute.InviteRoomMembers -> {
+                    val target = RoomDetailsTarget(userId, route.roomId)
+                    val details = roomDetails
+                        .takeIf { it.target == target }
+                        ?.details
+                        ?: roomList.roomForId(route.roomId)?.roomDetails
+                    if (details == null || details.kind == MatrixRoomKind.DIRECT) {
+                        null
+                    } else {
+                        InviteMembersRouteInput(
+                            target = InviteMembersTarget(userId, route.roomId),
+                            seedCanInviteMembers =
+                                details.capabilities.canInviteMembers == true,
+                            mode = InviteMembersActivationMode.EXISTING_ROOM
+                        )
+                    }
+                }
+                else -> null
             }
         }.distinctUntilChanged().collect { input ->
             if (input == null) {
@@ -1802,7 +1947,8 @@ class AppViewModel(
             } else {
                 inviteMembersStore.activate(
                     target = input.target,
-                    seedCanInviteMembers = input.seedCanInviteMembers
+                    seedCanInviteMembers = input.seedCanInviteMembers,
+                    mode = input.mode
                 )
             }
         }
@@ -1810,18 +1956,42 @@ class AppViewModel(
 
     private fun handleAllInvitesSent(target: InviteMembersTarget) {
         val current = _uiState.value
-        val route = current.route as? AppRoute.InviteRoomMembers ?: return
-        if (
-            route.roomId != target.roomId ||
-            current.matrixState.userIdOrNull() != target.userId
-        ) {
-            return
+        when (val route = current.route) {
+            is AppRoute.InviteCreatedRoomMembers -> {
+                if (
+                    route.roomId == target.roomId &&
+                    current.matrixState.userIdOrNull() == target.userId
+                ) {
+                    finishCreatedRoomInvites(route)
+                }
+            }
+            is AppRoute.InviteRoomMembers -> {
+                if (
+                    route.roomId != target.roomId ||
+                    current.matrixState.userIdOrNull() != target.userId
+                ) {
+                    return
+                }
+                _uiState.update { state ->
+                    state.navState.popActiveStack()
+                        ?.let(state::withNavigationState)
+                        ?: state
+                }
+            }
+            else -> Unit
         }
-        _uiState.update { state ->
-            state.navState.popActiveStack()
-                ?.let(state::withNavigationState)
-                ?: state
-        }
+    }
+
+    private fun finishCreatedRoomInvites(route: AppRoute.InviteCreatedRoomMembers) {
+        val current = _uiState.value
+        if (current.route != route) return
+        openRoom(
+            MatrixRoomSummary(
+                id = route.roomId,
+                displayName = route.displayName,
+                avatarUrl = route.avatarUrl
+            )
+        )
     }
 
     private suspend fun observeRoomMembersRouteInputs() {
@@ -1939,6 +2109,7 @@ class AppViewModel(
             AppRoute.ChatThemeSettings -> "ChatThemeSettings"
             is AppRoute.UserProfile -> "UserProfile(${userId.shortLogId()})"
             AppRoute.Contacts -> "Contacts"
+            AppRoute.CreateRoom -> "CreateRoom"
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             AppRoute.EditProfile -> "EditProfile"
@@ -1949,6 +2120,8 @@ class AppViewModel(
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.shortLogId()})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.shortLogId()})"
+            is AppRoute.InviteCreatedRoomMembers ->
+                "InviteCreatedRoomMembers(${roomId.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

@@ -114,6 +114,16 @@
     <string name="system_event_you_removed_room_topic">Вы удалили тему комнаты</string>
     <string name="system_event_sender_removed_room_topic">%1$s удалил(а) тему комнаты</string>
     <string name="common_cancel">Отмена</string>
+    <string name="common_skip">Пропустить</string>
+    <string name="rooms_create_group">Новая</string>
+    <string name="create_group_title">Новая группа</string>
+    <string name="create_group_create">Создать</string>
+    <string name="create_group_name">Название группы</string>
+    <string name="create_group_discard_title">Отменить создание группы?</string>
+    <string name="create_group_discard_message">Группа не будет создана.</string>
+    <string name="create_group_avatar_error">Не удалось подготовить выбранное фото.</string>
+    <string name="create_group_avatar_upload_error">Не удалось загрузить фото группы. Попробуйте снова.</string>
+    <string name="create_group_error">Не удалось создать группу. Попробуйте снова.</string>
     <string name="invite_members_action">Пригласить</string>
     <string name="room_members_invite">Пригласить</string>
     <string name="invite_members_title">Пригласить людей</string>

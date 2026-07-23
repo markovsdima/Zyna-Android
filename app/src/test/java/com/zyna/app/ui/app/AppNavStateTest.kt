@@ -1,5 +1,4 @@
 package com.zyna.app.ui.app
-
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -7,6 +6,64 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppNavStateTest {
+    @Test
+    fun createRoomFlowReplacesEditorWithInvitesAndKeepsTabsHidden() {
+        val roomId = "!created:example.org"
+        val displayName = "Friends"
+        val avatarUrl = "mxc://example/avatar"
+
+        val creationState = AppNavState()
+            .enterMain()
+            .openCreateRoom()
+        val inviteState = creationState.openCreatedRoomInvites(
+            roomId = roomId,
+            displayName = displayName,
+            avatarUrl = avatarUrl
+        )
+
+        assertEquals(
+            listOf(
+                AppRoute.Rooms,
+                AppRoute.InviteCreatedRoomMembers(
+                    roomId = roomId,
+                    displayName = displayName,
+                    avatarUrl = avatarUrl
+                )
+            ),
+            inviteState.chatsStack
+        )
+        assertFalse(inviteState.showsTabs)
+        assertFalse(inviteState.chatsStack.contains(AppRoute.CreateRoom))
+    }
+
+    @Test
+    fun openCreateRoomIsOnlyAllowedFromChatsRoot() {
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = "!room:example.org", displayName = "Room")
+        val contactsState = AppNavState()
+            .enterMain()
+            .selectTab(AppTab.CONTACTS)
+
+        assertEquals(chatState, chatState.openCreateRoom())
+        assertEquals(contactsState, contactsState.openCreateRoom())
+        assertEquals(AppNavState(), AppNavState().openCreateRoom())
+    }
+
+    @Test
+    fun createdRoomInvitesCannotBeOpenedWithoutOwningCreationRoute() {
+        val mainState = AppNavState().enterMain()
+
+        assertEquals(
+            mainState,
+            mainState.openCreatedRoomInvites(
+                roomId = "!created:example.org",
+                displayName = "Friends",
+                avatarUrl = null
+            )
+        )
+    }
+
     @Test
     fun defaultState_showsLoginRoute() {
         val state = AppNavState()

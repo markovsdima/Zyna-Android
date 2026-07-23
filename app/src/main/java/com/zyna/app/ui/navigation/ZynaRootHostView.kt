@@ -39,6 +39,8 @@ import com.zyna.app.ui.contacts.ContactsFeatureState
 import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
+import com.zyna.app.ui.createroom.CreateRoomError
+import com.zyna.app.ui.createroom.CreateRoomState
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
 import com.zyna.app.ui.invitemembers.InviteMembersScreenView
@@ -103,6 +105,16 @@ private fun RoomProfileEditorError?.localizedMessage(context: Context): String? 
         RoomProfileEditorError.SAVE -> com.zyna.app.R.string.room_profile_edit_save_error
         RoomProfileEditorError.PARTIAL_SAVE ->
             com.zyna.app.R.string.room_profile_edit_partial_save_error
+    }
+    return context.getString(stringId)
+}
+
+private fun CreateRoomError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        CreateRoomError.AVATAR_PREPARATION -> com.zyna.app.R.string.create_group_avatar_error
+        CreateRoomError.AVATAR_UPLOAD -> com.zyna.app.R.string.create_group_avatar_upload_error
+        CreateRoomError.CREATE -> com.zyna.app.R.string.create_group_error
     }
     return context.getString(stringId)
 }
@@ -577,8 +589,20 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 return false
             }
         }
+        if (state.route == AppRoute.CreateRoom) {
+            if (
+                latestRoom?.createRoom?.isCreating == true ||
+                latestRoom?.createRoom?.hasUnsavedChanges == true
+            ) {
+                return false
+            }
+        }
+        if (state.route is AppRoute.InviteCreatedRoomMembers) {
+            return false
+        }
         if (
-            state.route is AppRoute.InviteRoomMembers &&
+            (state.route is AppRoute.InviteRoomMembers ||
+                state.route is AppRoute.InviteCreatedRoomMembers) &&
             latestRoom?.inviteMembers?.isSending == true
         ) {
             return false
@@ -802,6 +826,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     onBack = null,
                     withBottomPadding = isTop && state.navState.showsTabs
                 )
+                AppRoute.CreateRoom -> createRoomEntry(
+                    creation = room.createRoom,
+                    actions = actions,
+                    dependencies = dependencies
+                )
                 AppRoute.ForwardPicker -> roomsEntry(
                     state = state,
                     roomList = roomList,
@@ -847,7 +876,15 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     inviteMembers = room.inviteMembers,
                     actions = actions,
                     dependencies = dependencies,
-                    route = route
+                    roomId = route.roomId,
+                    canSkip = false
+                )
+                is AppRoute.InviteCreatedRoomMembers -> inviteMembersEntry(
+                    inviteMembers = room.inviteMembers,
+                    actions = actions,
+                    dependencies = dependencies,
+                    roomId = route.roomId,
+                    canSkip = true
                 )
                 is AppRoute.Chat -> chatEntry(
                     state,
@@ -1037,6 +1074,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isSynchronizing = roomList.isSynchronizing,
                         title = title,
                         showBack = onBack != null,
+                        showCreateRoom = onBack == null,
                         matrixMediaLoader = dependencies.matrixMediaLoader,
                         presenceByUserId = state.presenceByUserId,
                         initialScrollAnchor = roomsScrollAnchors[entryKey],
@@ -1052,6 +1090,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         } else {
                             actions.rooms.onOpenRoom
                         },
+                        onCreateRoom = actions.rooms.onCreateRoom.takeIf { onBack == null },
                         onBack = onBack
                     )
                 )
@@ -1271,6 +1310,70 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
     }
 
+    private fun createRoomEntry(
+        creation: CreateRoomState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "room:create",
+            createView = { context -> ProfileEditorScreenView(context) },
+            updateView = { view ->
+                (view as ProfileEditorScreenView).render(
+                    state = ProfileEditorScreenViewState(
+                        identityId = creation.target?.userId.orEmpty(),
+                        displayName = "",
+                        editDisplayName = creation.name,
+                        avatarUrl = null,
+                        editAvatarLocalPath = creation.avatarLocalPath,
+                        hasAvatar = creation.hasAvatar,
+                        editSessionId = creation.editSessionId,
+                        isSaving = creation.isCreating,
+                        canSave = creation.canCreate,
+                        canChangeName = true,
+                        canChangeAvatar = true,
+                        errorMessage = creation.error.localizedMessage(context),
+                        backLabel = context.getString(com.zyna.app.R.string.common_cancel),
+                        saveLabel = context.getString(com.zyna.app.R.string.create_group_create),
+                        title = context.getString(com.zyna.app.R.string.create_group_title),
+                        nameLabel = context.getString(com.zyna.app.R.string.create_group_name),
+                        changePhotoLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_change_photo
+                        ),
+                        removePhotoLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_remove_photo
+                        ),
+                        discardTitle = context.getString(
+                            com.zyna.app.R.string.create_group_discard_title
+                        ),
+                        discardMessage = context.getString(
+                            com.zyna.app.R.string.create_group_discard_message
+                        ),
+                        keepEditingLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_keep_editing
+                        ),
+                        discardLabel = context.getString(
+                            com.zyna.app.R.string.profile_edit_discard
+                        ),
+                        matrixMediaLoader = dependencies.matrixMediaLoader,
+                        bottomContentPaddingPx = bottomInset,
+                        isDiscardConfirmationVisible =
+                            creation.isDiscardConfirmationVisible
+                    ),
+                    actions = ProfileEditorScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onDisplayNameChanged = actions.createRoom.onNameChanged,
+                        onPickAvatar = actions.createRoom.onPickAvatar,
+                        onRemoveAvatar = actions.createRoom.onRemoveAvatar,
+                        onSave = actions.createRoom.onCreate,
+                        onDiscardChangesConfirmed = actions.createRoom.onConfirmDiscard,
+                        onDiscardChangesCancelled = actions.createRoom.onCancelDiscard
+                    )
+                )
+            }
+        )
+    }
+
     private fun settingsEntry(
         state: AppUiState,
         actions: ZynaRootActions,
@@ -1442,16 +1545,17 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         inviteMembers: InviteMembersState,
         actions: ZynaRootActions,
         dependencies: ZynaRenderDependencies,
-        route: AppRoute.InviteRoomMembers
+        roomId: String,
+        canSkip: Boolean
     ): ZynaScreenEntry {
         return ZynaScreenEntry(
-            key = "inviteMembers:${route.roomId}",
+            key = "inviteMembers:$roomId:$canSkip",
             createView = { context -> InviteMembersScreenView(context) },
             updateView = { view ->
-                val routeState = inviteMembers.takeIf { it.target?.roomId == route.roomId }
+                val routeState = inviteMembers.takeIf { it.target?.roomId == roomId }
                     ?: InviteMembersState(
                         canInviteMembers = true,
-                        isPreparing = true
+                        isPreparing = !canSkip
                     )
                 (view as InviteMembersScreenView).render(
                     state = InviteMembersScreenViewState(
@@ -1469,6 +1573,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         sendErrorMessage = routeState.sendErrorMessage,
                         failedInviteCount = routeState.failedInviteCount,
                         permissionDenied = routeState.permissionDenied,
+                        canSkip = canSkip,
                         matrixMediaLoader = dependencies.matrixMediaLoader
                     ),
                     actions = InviteMembersScreenViewActions(
@@ -1805,6 +1910,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             AppRoute.ChatThemeSettings -> "ChatThemeSettings"
             is AppRoute.UserProfile -> "UserProfile(${userId.takeLast(10)})"
             AppRoute.Contacts -> "Contacts"
+            AppRoute.CreateRoom -> "CreateRoom"
             AppRoute.ForwardPicker -> "ForwardPicker"
             AppRoute.Login -> "Login"
             AppRoute.EditProfile -> "EditProfile"
@@ -1815,6 +1921,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
+            is AppRoute.InviteCreatedRoomMembers ->
+                "InviteCreatedRoomMembers(${roomId.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

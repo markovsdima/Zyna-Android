@@ -13,4 +13,9 @@ internal sealed interface AvatarCropTarget {
         val roomId: String,
         override val editSessionId: Long
     ) : AvatarCropTarget
+
+    data class CreateRoom(
+        val userId: String,
+        override val editSessionId: Long
+    ) : AvatarCropTarget
 }

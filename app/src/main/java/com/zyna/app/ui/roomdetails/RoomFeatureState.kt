@@ -1,5 +1,6 @@
 package com.zyna.app.ui.roomdetails
 
+import com.zyna.app.ui.createroom.CreateRoomState
 import com.zyna.app.ui.invitemembers.InviteMembersState
 import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.roomprofile.RoomProfileEditorState
@@ -10,6 +11,7 @@ import com.zyna.app.ui.roomprofile.RoomProfileEditorState
 data class RoomFeatureState(
     val details: RoomDetailsState,
     val profileEditor: RoomProfileEditorState,
+    val createRoom: CreateRoomState,
     val members: RoomMembersState,
     val inviteMembers: InviteMembersState
 )

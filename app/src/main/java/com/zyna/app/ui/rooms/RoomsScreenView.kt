@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.SimpleItemAnimator
+import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
@@ -49,6 +50,7 @@ data class RoomsScreenViewState(
     val isSynchronizing: Boolean,
     val title: String,
     val showBack: Boolean,
+    val showCreateRoom: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?,
     val presenceByUserId: Map<String, UserPresenceStatus>,
     val initialScrollAnchor: RoomsScrollAnchor?,
@@ -62,6 +64,7 @@ data class RoomsScrollAnchor(
 
 data class RoomsScreenViewActions(
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
+    val onCreateRoom: (() -> Unit)?,
     val onBack: (() -> Unit)?
 )
 
@@ -96,6 +99,14 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         textSize = 22f
         typeface = Typeface.DEFAULT_BOLD
         updatePadding(left = dp(12), right = dp(8))
+    }
+    private val createRoomButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = context.getString(R.string.rooms_create_group)
+        textSize = 16f
+        typeface = Typeface.DEFAULT_BOLD
+        isClickable = true
+        isFocusable = true
     }
     private val contentFrame = FrameLayout(context)
     private val recyclerView = RecyclerView(context).apply {
@@ -144,6 +155,13 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
                 0,
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 1f
+            )
+        )
+        topBar.addView(
+            createRoomButton,
+            LinearLayout.LayoutParams(
+                dp(72),
+                ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
         root.addView(
@@ -210,6 +228,8 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         titleText.text = state.title
         backButton.visibility = if (state.showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { actions.onBack?.invoke() }
+        createRoomButton.visibility = if (state.showCreateRoom) View.VISIBLE else View.GONE
+        createRoomButton.setOnClickListener { actions.onCreateRoom?.invoke() }
         recyclerView.setPadding(
             recyclerView.paddingLeft,
             recyclerView.paddingTop,
@@ -275,6 +295,7 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.actionText)
+        createRoomButton.setTextColor(palette.actionText)
         titleText.setTextColor(palette.titleText)
         emptyView.setTextColor(palette.secondaryText)
         adapter.setPalette(palette)

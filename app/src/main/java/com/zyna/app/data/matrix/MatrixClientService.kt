@@ -683,6 +683,53 @@ class MatrixClientService(
         )
     }
 
+    suspend fun uploadMedia(
+        localPath: String,
+        mimeType: String
+    ): String = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val mediaFile = File(localPath)
+        require(mediaFile.isFile) { "Media file is not available" }
+        activeClient.uploadMedia(
+            mimeType = mimeType.ifBlank { "application/octet-stream" },
+            data = mediaFile.readBytes(),
+            progressWatcher = null
+        )
+    }
+
+    suspend fun createPrivateGroup(
+        name: String,
+        avatarUrl: String?
+    ): MatrixRoomSummary = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val normalizedName = name.trim()
+        require(normalizedName.isNotEmpty()) { "Room name is required" }
+
+        val roomId = activeClient.createRoom(
+            request = CreateRoomParameters(
+                name = normalizedName,
+                topic = null,
+                isEncrypted = true,
+                isDirect = false,
+                visibility = RoomVisibility.Private,
+                preset = RoomPreset.PRIVATE_CHAT,
+                invite = null,
+                avatar = avatarUrl?.takeIf { it.isNotBlank() },
+                powerLevelContentOverride = null,
+                joinRuleOverride = null,
+                historyVisibilityOverride = RoomHistoryVisibility.Invited,
+                canonicalAlias = null,
+                isSpace = false
+            )
+        )
+
+        MatrixRoomSummary(
+            id = roomId,
+            displayName = normalizedName,
+            avatarUrl = avatarUrl?.takeIf { it.isNotBlank() }
+        )
+    }
+
     suspend fun setOwnDisplayName(displayName: String) = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         activeClient.setDisplayName(displayName)

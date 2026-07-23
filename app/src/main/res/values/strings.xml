@@ -153,6 +153,16 @@
     <string name="user_profile_opening_chat">Opening chat...</string>
     <string name="user_profile_retry">Retry</string>
     <string name="common_cancel">Cancel</string>
+    <string name="common_skip">Skip</string>
+    <string name="rooms_create_group">New</string>
+    <string name="create_group_title">New Group</string>
+    <string name="create_group_create">Create</string>
+    <string name="create_group_name">Group Name</string>
+    <string name="create_group_discard_title">Discard new group?</string>
+    <string name="create_group_discard_message">The group will not be created.</string>
+    <string name="create_group_avatar_error">Could not prepare the selected photo.</string>
+    <string name="create_group_avatar_upload_error">Could not upload the group photo. Try again.</string>
+    <string name="create_group_error">Could not create the group. Try again.</string>
     <string name="invite_members_action">Invite</string>
     <string name="room_members_invite">Invite</string>
     <string name="invite_members_title">Invite People</string>

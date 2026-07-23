@@ -57,6 +57,11 @@ internal enum class InviteMembersSource {
     SERVER
 }
 
+internal enum class InviteMembersActivationMode {
+    EXISTING_ROOM,
+    NEWLY_CREATED_ROOM
+}
+
 internal class InviteMembersDriver(
     val canInviteMembers: suspend (roomId: String) -> Boolean,
     val loadMembers: suspend (
@@ -74,7 +79,9 @@ internal class InviteMembersDriver(
  * Room membership is loaded before sending so joined and already-invited users cannot be
  * selected. Search and send operations use independent generations: dependencies that swallow
  * cancellation still cannot publish into a replacement route or session. Permission is seeded
- * for a stable first frame, refreshed on activation, and checked again immediately before send.
+ * for a stable first frame and checked again immediately before send. Existing rooms refresh
+ * permission and membership on activation; a room just created by this client starts from the
+ * complete known snapshot containing only its creator, avoiding a redundant loading frame.
  */
 internal class InviteMembersStore(
     private val scope: CoroutineScope,
@@ -95,17 +102,22 @@ internal class InviteMembersStore(
     private var searchJob: Job? = null
     private var sendJob: Job? = null
     private var hasMemberSnapshot = false
+    private var activationMode = InviteMembersActivationMode.EXISTING_ROOM
     private var membershipByUserId = emptyMap<String, MatrixRoomMemberMembership>()
     private var rawSearchResults = emptyList<MatrixUserProfile>()
     private val selectedByUserId = LinkedHashMap<String, MatrixUserProfile>()
 
     @MainThread
-    fun activate(target: InviteMembersTarget, seedCanInviteMembers: Boolean) {
+    fun activate(
+        target: InviteMembersTarget,
+        seedCanInviteMembers: Boolean,
+        mode: InviteMembersActivationMode = InviteMembersActivationMode.EXISTING_ROOM
+    ) {
         val normalizedTarget = target.normalizedOrNull() ?: run {
             deactivate()
             return
         }
-        if (_state.value.target == normalizedTarget) {
+        if (_state.value.target == normalizedTarget && activationMode == mode) {
             if (_state.value.canInviteMembers != seedCanInviteMembers) {
                 _state.value = _state.value.copy(
                     canInviteMembers = seedCanInviteMembers,
@@ -119,17 +131,28 @@ internal class InviteMembersStore(
         deactivate()
         routeGeneration += 1
         val requestGeneration = routeGeneration
+        activationMode = mode
+        val isNewlyCreatedRoom = mode == InviteMembersActivationMode.NEWLY_CREATED_ROOM
+        if (isNewlyCreatedRoom) {
+            hasMemberSnapshot = true
+            membershipByUserId = mapOf(
+                normalizedTarget.userId to MatrixRoomMemberMembership.JOINED
+            )
+        }
         _state.value = InviteMembersState(
             target = normalizedTarget,
             canInviteMembers = seedCanInviteMembers,
-            isPreparing = true
+            isPreparing = !isNewlyCreatedRoom
         )
-        startPermissionRefresh(normalizedTarget, requestGeneration)
-        startMembersLoad(normalizedTarget, requestGeneration)
+        if (!isNewlyCreatedRoom) {
+            startPermissionRefresh(normalizedTarget, requestGeneration)
+            startMembersLoad(normalizedTarget, requestGeneration)
+        }
     }
 
     @MainThread
     fun retryPreparation() {
+        if (activationMode == InviteMembersActivationMode.NEWLY_CREATED_ROOM) return
         val target = _state.value.target ?: return
         val requestGeneration = routeGeneration
         _state.value = _state.value.copy(
@@ -361,6 +384,7 @@ internal class InviteMembersStore(
         sendJob?.cancel()
         sendJob = null
         hasMemberSnapshot = false
+        activationMode = InviteMembersActivationMode.EXISTING_ROOM
         membershipByUserId = emptyMap()
         rawSearchResults = emptyList()
         selectedByUserId.clear()

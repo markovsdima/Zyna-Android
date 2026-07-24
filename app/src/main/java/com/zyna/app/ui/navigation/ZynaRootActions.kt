@@ -6,6 +6,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomPermission
+import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.media.AudioPlaybackController
@@ -18,6 +19,7 @@ import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 import com.zyna.app.ui.createroom.CreateRoomAccess
 import com.zyna.app.ui.createroom.CreateRoomPostingPermission
 import com.zyna.app.ui.roompermissions.RoomPermissionAudience
+import com.zyna.app.ui.roomroles.RoomAssignableRole
 import com.zyna.app.ui.theme.AppThemeMode
 
 data class ZynaRootActions(
@@ -29,6 +31,7 @@ data class ZynaRootActions(
     val createRoom: CreateRoomActions,
     val roomDetails: RoomDetailsFeatureActions,
     val roomPermissions: RoomPermissionsFeatureActions,
+    val roomRoles: RoomRolesFeatureActions,
     val roomProfileEditor: RoomProfileEditorActions,
     val roomMembers: RoomMembersFeatureActions,
     val inviteMembers: InviteMembersFeatureActions,
@@ -90,8 +93,16 @@ data class RoomDetailsFeatureActions(
 
 data class RoomPermissionsFeatureActions(
     val onRetry: () -> Unit,
-    val onOpenMembers: () -> Unit,
+    val onOpenRoleManagement: () -> Unit,
     val onSetPermission: (MatrixRoomPermission, RoomPermissionAudience) -> Unit
+)
+
+data class RoomRolesFeatureActions(
+    val onRetryMembers: () -> Unit,
+    val onSearchQueryChanged: (String) -> Unit,
+    val onSetRole: (MatrixRoomMember, RoomAssignableRole) -> Unit,
+    val onConfirmRoleChange: () -> Unit,
+    val onCancelRoleChange: () -> Unit
 )
 
 data class RoomProfileEditorActions(

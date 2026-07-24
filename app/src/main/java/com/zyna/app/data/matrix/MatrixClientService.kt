@@ -128,6 +128,7 @@ import org.matrix.rustcomponents.sdk.TimelineItem
 import org.matrix.rustcomponents.sdk.TimelineItemContent
 import org.matrix.rustcomponents.sdk.TimelineListener
 import org.matrix.rustcomponents.sdk.UserProfile
+import org.matrix.rustcomponents.sdk.UserPowerLevelUpdate
 import org.matrix.rustcomponents.sdk.genTransactionId
 import org.matrix.rustcomponents.sdk.use
 import org.matrix.rustcomponents.sdk.RoomMember as RustRoomMember
@@ -1016,6 +1017,59 @@ class MatrixClientService(
                     }
                 }
             }
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun loadRoomRoleChangeContext(
+        roomId: String,
+        targetUserId: String
+    ): MatrixRoomRoleChangeContext = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val ownUserId = activeClient.userId()
+        activeClient.getRoom(roomId)?.use { room ->
+            val roomInfo = room.roomInfo()
+            try {
+                val ownMember = room.member(ownUserId)
+                val member = room.member(targetUserId)
+                val powerLevels = roomInfo.powerLevels
+                if (powerLevels != null) {
+                    powerLevels.toMatrixRoomRoleChangeContext(
+                        roomId = roomId,
+                        ownUserId = ownUserId,
+                        ownMember = ownMember,
+                        targetMember = member,
+                    )
+                } else {
+                    room.getPowerLevels().use { loadedPowerLevels ->
+                        loadedPowerLevels.toMatrixRoomRoleChangeContext(
+                            roomId = roomId,
+                            ownUserId = ownUserId,
+                            ownMember = ownMember,
+                            targetMember = member,
+                        )
+                    }
+                }
+            } finally {
+                roomInfo.destroy()
+            }
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun updateRoomMemberPowerLevel(
+        roomId: String,
+        userId: String,
+        powerLevel: Long
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            room.updatePowerLevelsForUsers(
+                listOf(
+                    UserPowerLevelUpdate(
+                        userId = userId,
+                        powerLevel = powerLevel
+                    )
+                )
+            )
         } ?: error("Matrix room is not available")
     }
 
@@ -2672,6 +2726,29 @@ class MatrixClientService(
             role = mappedRole,
             powerLevel = mappedPowerLevel,
             isNameAmbiguous = isNameAmbiguous
+        )
+    }
+
+    private fun org.matrix.rustcomponents.sdk.RoomPowerLevels
+        .toMatrixRoomRoleChangeContext(
+            roomId: String,
+            ownUserId: String,
+            ownMember: RustRoomMember,
+            targetMember: RustRoomMember
+        ): MatrixRoomRoleChangeContext {
+        val mappedOwnMember = ownMember.toMatrixRoomMemberOrNull()
+            ?: error("The current user is not an active room member")
+        val mappedTarget = targetMember.toMatrixRoomMemberOrNull()
+            ?: error("The selected user is not an active room member")
+        return MatrixRoomRoleChangeContext(
+            roomId = roomId,
+            ownUserId = ownUserId,
+            ownPowerLevel = mappedOwnMember.powerLevel,
+            canEditPowerLevels = canOwnUserSendState(StateEventType.RoomPowerLevels),
+            targetUserId = mappedTarget.userId,
+            targetPowerLevel = mappedTarget.powerLevel,
+            targetMembership = mappedTarget.membership,
+            targetRole = mappedTarget.role
         )
     }
 

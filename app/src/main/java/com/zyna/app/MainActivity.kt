@@ -71,6 +71,7 @@ import com.zyna.app.ui.navigation.RoomsFeatureActions
 import com.zyna.app.ui.navigation.RoomDetailsFeatureActions
 import com.zyna.app.ui.navigation.RoomMembersFeatureActions
 import com.zyna.app.ui.navigation.RoomPermissionsFeatureActions
+import com.zyna.app.ui.navigation.RoomRolesFeatureActions
 import com.zyna.app.ui.navigation.RoomProfileEditorActions
 import com.zyna.app.ui.navigation.SettingsFeatureActions
 import com.zyna.app.ui.navigation.UserProfileActions
@@ -390,9 +391,10 @@ class MainActivity : AppCompatActivity() {
                                         inviteMembers = inviteMembers
                                     )
                                 },
-                                appViewModel.roomPermissionsState
-                            ) { room, permissions ->
-                                room.copy(permissions = permissions)
+                                appViewModel.roomPermissionsState,
+                                appViewModel.roomRoleManagementState
+                            ) { room, permissions, roles ->
+                                room.copy(permissions = permissions, roles = roles)
                             }
                         ) { state, roomList, room ->
                             AppFeatureInput(
@@ -549,8 +551,15 @@ class MainActivity : AppCompatActivity() {
             ),
             roomPermissions = RoomPermissionsFeatureActions(
                 onRetry = appViewModel::retryRoomPermissions,
-                onOpenMembers = appViewModel::openRoomMembers,
+                onOpenRoleManagement = appViewModel::openRoomRoleManagement,
                 onSetPermission = appViewModel::setRoomPermission
+            ),
+            roomRoles = RoomRolesFeatureActions(
+                onRetryMembers = appViewModel::retryRoomMembers,
+                onSearchQueryChanged = appViewModel::setRoomMembersSearchQuery,
+                onSetRole = appViewModel::setRoomMemberRole,
+                onConfirmRoleChange = appViewModel::confirmRoomMemberRoleChange,
+                onCancelRoleChange = appViewModel::cancelRoomMemberRoleChange
             ),
             roomProfileEditor = RoomProfileEditorActions(
                 onDisplayNameChanged = appViewModel::setRoomProfileDisplayNameDraft,
@@ -1461,6 +1470,7 @@ private fun AppRoute.perfName(): String {
         is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
         is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
         is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
+        is AppRoute.RoomRoleManagement -> "RoomRoleManagement(${roomId.takeLast(10)})"
         is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
         is AppRoute.InviteCreatedRoomMembers ->
             "InviteCreatedRoomMembers(${roomId.takeLast(10)})"

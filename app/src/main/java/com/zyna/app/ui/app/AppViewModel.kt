@@ -19,6 +19,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomKind
+import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixUserProfile
@@ -78,6 +79,11 @@ import com.zyna.app.ui.roompermissions.RoomPermissionAudience
 import com.zyna.app.ui.roompermissions.RoomPermissionsState
 import com.zyna.app.ui.roompermissions.RoomPermissionsTarget
 import com.zyna.app.ui.roompermissions.createRoomPermissionsStore
+import com.zyna.app.ui.roomroles.RoomAssignableRole
+import com.zyna.app.ui.roomroles.RoomRoleCapabilities
+import com.zyna.app.ui.roomroles.RoomRoleManagementState
+import com.zyna.app.ui.roomroles.RoomRoleManagementTarget
+import com.zyna.app.ui.roomroles.createRoomRoleManagementStore
 import com.zyna.app.ui.roomprofile.RoomProfileEditorState
 import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
 import com.zyna.app.ui.roomprofile.createRoomProfileEditorStore
@@ -269,6 +275,16 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomPermissionsState: StateFlow<RoomPermissionsState> = roomPermissionsStore.state
+    private val roomRoleManagementStore = createRoomRoleManagementStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onMembersRefreshRequested = {
+            roomMembersStore.retry()
+        },
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomRoleManagementState: StateFlow<RoomRoleManagementState> =
+        roomRoleManagementStore.state
     private val inviteMembersStore = createInviteMembersStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -356,6 +372,16 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeRoomRoleManagementRouteInputs()
+        }
+
+        viewModelScope.launch {
+            roomMembersStore.state.collect { members ->
+                roomRoleManagementStore.reconcileMembers(members.joinedMembers)
+            }
+        }
+
+        viewModelScope.launch {
             observeInviteMembersRouteInputs()
         }
 
@@ -399,6 +425,7 @@ class AppViewModel(
                     createRoomStore.deactivate()
                     roomMembersStore.clearSession()
                     roomPermissionsStore.clearSession()
+                    roomRoleManagementStore.clearSession()
                     inviteMembersStore.clearSession()
                 }
                 if (
@@ -793,6 +820,12 @@ class AppViewModel(
             return true
         }
         if (
+            route is AppRoute.RoomRoleManagement &&
+            roomRoleManagementStore.state.value.isSaving
+        ) {
+            return true
+        }
+        if (
             (route is AppRoute.InviteRoomMembers ||
                 route is AppRoute.InviteCreatedRoomMembers) &&
             inviteMembersStore.state.value.isSending
@@ -1087,15 +1120,8 @@ class AppViewModel(
 
     fun openRoomMembers() {
         val current = _uiState.value
-        if (
-            current.route is AppRoute.RoomPermissions &&
-            roomPermissionsStore.state.value.isSaving
-        ) {
-            return
-        }
         val routeRoomId = when (val route = current.route) {
             is AppRoute.RoomDetails -> route.roomId
-            is AppRoute.RoomPermissions -> route.roomId
             else -> return
         }
         val sessionUserId = current.matrixState.userIdOrNull() ?: return
@@ -1146,6 +1172,31 @@ class AppViewModel(
         audience: RoomPermissionAudience
     ) {
         roomPermissionsStore.setPermission(permission, audience)
+    }
+
+    fun openRoomRoleManagement() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomPermissions ?: return
+        if (roomPermissionsStore.state.value.isSaving) return
+        current.matrixState.userIdOrNull() ?: return
+        _uiState.update { state ->
+            state.withNavigationState(state.navState.openRoomRoleManagement())
+        }
+    }
+
+    fun setRoomMemberRole(
+        member: MatrixRoomMember,
+        role: RoomAssignableRole
+    ) {
+        roomRoleManagementStore.requestRoleChange(member, role)
+    }
+
+    fun confirmRoomMemberRoleChange() {
+        roomRoleManagementStore.confirmPendingChange()
+    }
+
+    fun cancelRoomMemberRoleChange() {
+        roomRoleManagementStore.cancelPendingChange()
     }
 
     fun retryRoomMembers() {
@@ -2076,14 +2127,18 @@ class AppViewModel(
 
     private suspend fun observeRoomMembersRouteInputs() {
         combine(_uiState, roomListStore.state) { state, roomList ->
-            val route = state.route as? AppRoute.RoomMembers
+            val roomId = when (val route = state.route) {
+                is AppRoute.RoomMembers -> route.roomId
+                is AppRoute.RoomRoleManagement -> route.roomId
+                else -> null
+            }
             val userId = state.matrixState.userIdOrNull()
-            if (route == null || userId == null) {
+            if (roomId == null || userId == null) {
                 null
             } else {
                 RoomMembersRouteInput(
-                    target = RoomMembersTarget(userId = userId, roomId = route.roomId),
-                    expectedJoinedCount = roomList.roomForId(route.roomId)
+                    target = RoomMembersTarget(userId = userId, roomId = roomId),
+                    expectedJoinedCount = roomList.roomForId(roomId)
                         ?.roomDetails
                         ?.joinedMemberCount
                 )
@@ -2109,6 +2164,37 @@ class AppViewModel(
             } else {
                 roomPermissionsStore.activate(
                     RoomPermissionsTarget(userId = userId, roomId = route.roomId)
+                )
+            }
+        }
+    }
+
+    private suspend fun observeRoomRoleManagementRouteInputs() {
+        combine(_uiState, roomPermissionsStore.state) { state, permissions ->
+            val route = state.route as? AppRoute.RoomRoleManagement
+            val userId = state.matrixState.userIdOrNull()
+            if (route == null || userId == null) {
+                null
+            } else {
+                Pair(
+                    RoomRoleManagementTarget(userId = userId, roomId = route.roomId),
+                    permissions.permissions
+                        ?.takeIf { snapshot -> snapshot.roomId == route.roomId }
+                        ?.let { snapshot ->
+                            RoomRoleCapabilities(
+                                canEdit = snapshot.canEdit,
+                                ownPowerLevel = snapshot.ownPowerLevel
+                            )
+                        }
+                )
+            }
+        }.collect { input ->
+            if (input == null) {
+                roomRoleManagementStore.deactivate()
+            } else {
+                roomRoleManagementStore.activate(
+                    target = input.first,
+                    capabilities = input.second
                 )
             }
         }
@@ -2214,6 +2300,8 @@ class AppViewModel(
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.shortLogId()})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.shortLogId()})"
             is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.shortLogId()})"
+            is AppRoute.RoomRoleManagement ->
+                "RoomRoleManagement(${roomId.shortLogId()})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.shortLogId()})"
             is AppRoute.InviteCreatedRoomMembers ->
                 "InviteCreatedRoomMembers(${roomId.shortLogId()})"

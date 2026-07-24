@@ -231,6 +231,15 @@
     <string name="room_permissions_load_error">Не удалось загрузить разрешения комнаты. Попробуйте снова.</string>
     <string name="room_permissions_save_error">Не удалось сохранить разрешение. Попробуйте снова.</string>
     <string name="room_permissions_permission_changed">У вас больше нет права изменять роли и разрешения.</string>
+    <string name="room_roles_title">Управление ролями</string>
+    <string name="room_roles_member">Участник</string>
+    <string name="room_roles_saving">Сохраняем роль…</string>
+    <string name="room_roles_saving_short">Сохранение…</string>
+    <string name="room_roles_confirm_title">Подтвердите изменение роли</string>
+    <string name="room_roles_confirm_message">Назначить пользователю %1$s роль «%2$s»? Администраторы могут управлять настройками комнаты и другими участниками.</string>
+    <string name="room_roles_confirm_action">Изменить роль</string>
+    <string name="room_roles_save_error">Не удалось сохранить роль. Попробуйте снова.</string>
+    <string name="room_roles_permission_changed">Роль или ваши права изменились. Проверьте актуальные роли и попробуйте снова.</string>
     <string name="settings_presence">Статус онлайн</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
     <string name="presence_provider_matrix_standard">Matrix Standard</string>

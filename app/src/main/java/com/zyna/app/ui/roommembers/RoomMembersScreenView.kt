@@ -16,6 +16,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
@@ -30,6 +31,10 @@ import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberMembership
 import com.zyna.app.data.matrix.MatrixRoomMemberRole
 import com.zyna.app.ui.avatar.MatrixAvatarView
+import com.zyna.app.ui.roomroles.RoomAssignableRole
+import com.zyna.app.ui.roomroles.RoomRoleCapabilities
+import com.zyna.app.ui.roomroles.RoomRoleManagementState
+import com.zyna.app.ui.roomroles.RoomRoleManagementTarget
 import com.zyna.app.ui.settings.SettingsPalette
 import kotlin.math.roundToInt
 
@@ -40,6 +45,8 @@ internal data class RoomMembersScreenViewState(
     val canInviteMembers: Boolean,
     val isLoading: Boolean,
     val errorMessage: String?,
+    val canRetry: Boolean = true,
+    val roleManagement: RoomRoleManagementState? = null,
     val matrixMediaLoader: MatrixMediaLoader?
 )
 
@@ -48,7 +55,10 @@ internal data class RoomMembersScreenViewActions(
     val onRetry: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
     val onSearchQueryChanged: (String) -> Unit,
-    val onOpenProfile: (MatrixRoomMember) -> Unit
+    val onOpenProfile: (MatrixRoomMember) -> Unit,
+    val onSetRole: (MatrixRoomMember, RoomAssignableRole) -> Unit = { _, _ -> },
+    val onConfirmRoleChange: () -> Unit = {},
+    val onCancelRoleChange: () -> Unit = {}
 )
 
 internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
@@ -58,6 +68,9 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
     private var bottomInset = 0
     private var isApplyingSearchState = false
     private var actions: RoomMembersScreenViewActions? = null
+    private var rolePickerDialog: AlertDialog? = null
+    private var roleConfirmationDialog: AlertDialog? = null
+    private var presentedConfirmationUserId: String? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -245,6 +258,15 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         ViewCompat.requestApplyInsets(this)
     }
 
+    override fun onDetachedFromWindow() {
+        rolePickerDialog?.dismiss()
+        rolePickerDialog = null
+        roleConfirmationDialog?.dismiss()
+        roleConfirmationDialog = null
+        presentedConfirmationUserId = null
+        super.onDetachedFromWindow()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration?) {
         super.onConfigurationChanged(newConfig)
         palette = SettingsPalette.from(context)
@@ -255,15 +277,31 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
 
     fun render(state: RoomMembersScreenViewState, actions: RoomMembersScreenViewActions) {
         this.actions = actions
-        adapter.actions = actions
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.palette = palette
+        adapter.roleManagement = state.roleManagement
+        adapter.onMemberClick = { member ->
+            val roleManagement = state.roleManagement
+            if (roleManagement == null) {
+                actions.onOpenProfile(member)
+            } else {
+                showRolePicker(member, roleManagement, actions)
+            }
+        }
 
         backButton.setOnClickListener { actions.onBack() }
-        inviteButton.visibility = if (state.canInviteMembers) VISIBLE else INVISIBLE
-        inviteButton.isEnabled = state.canInviteMembers
+        titleText.text = context.getString(
+            if (state.roleManagement == null) {
+                R.string.room_members_title
+            } else {
+                R.string.room_roles_title
+            }
+        )
+        val canInvite = state.canInviteMembers && state.roleManagement == null
+        inviteButton.visibility = if (canInvite) VISIBLE else INVISIBLE
+        inviteButton.isEnabled = canInvite
         inviteButton.setOnClickListener(
-            if (state.canInviteMembers) {
+            if (canInvite) {
                 View.OnClickListener { actions.onOpenInviteMembers() }
             } else {
                 null
@@ -281,6 +319,8 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
         val visibleCount = state.invitedMembers.size + state.joinedMembers.size
         statusText.text = when {
             state.errorMessage != null -> state.errorMessage
+            state.roleManagement?.isSaving == true ->
+                context.getString(R.string.room_roles_saving)
             state.isLoading -> context.getString(R.string.room_members_loading)
             visibleCount == 0 && state.searchQuery.isNotBlank() -> {
                 context.getString(R.string.room_members_no_results)
@@ -288,11 +328,104 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
             visibleCount == 0 -> context.getString(R.string.room_members_empty)
             else -> ""
         }
-        retryButton.visibility = if (state.errorMessage != null) VISIBLE else INVISIBLE
+        retryButton.visibility =
+            if (state.errorMessage != null && state.canRetry) VISIBLE else INVISIBLE
 
         adapter.submitMembers(
             invited = state.invitedMembers,
             joined = state.joinedMembers
+        )
+        renderRoleConfirmation(state.roleManagement, actions)
+    }
+
+    private fun showRolePicker(
+        rawMember: MatrixRoomMember,
+        roleManagement: RoomRoleManagementState,
+        actions: RoomMembersScreenViewActions
+    ) {
+        val member = roleManagement.effectiveMember(rawMember)
+        val roles = roleManagement.assignableRoles(member)
+        if (roles.isEmpty()) return
+        val currentRole = RoomAssignableRole.fromMemberRole(member.role) ?: return
+        val labels = roles.map(::roleLabel).toTypedArray()
+        val selectedIndex = roles.indexOf(currentRole)
+
+        rolePickerDialog?.dismiss()
+        rolePickerDialog = AlertDialog.Builder(context)
+            .setTitle(member.displayNameOrUserId)
+            .setSingleChoiceItems(labels, selectedIndex) { dialog, which ->
+                val selectedRole = roles[which]
+                dialog.dismiss()
+                if (selectedRole != currentRole) {
+                    actions.onSetRole(member, selectedRole)
+                }
+            }
+            .setNegativeButton(R.string.common_cancel, null)
+            .create()
+            .also { dialog ->
+                dialog.setOnDismissListener {
+                    if (rolePickerDialog === dialog) rolePickerDialog = null
+                }
+                dialog.show()
+            }
+    }
+
+    private fun renderRoleConfirmation(
+        roleManagement: RoomRoleManagementState?,
+        actions: RoomMembersScreenViewActions
+    ) {
+        val pending = roleManagement?.pendingConfirmation
+        if (pending == null) {
+            roleConfirmationDialog?.dismiss()
+            roleConfirmationDialog = null
+            presentedConfirmationUserId = null
+            return
+        }
+        val presentationKey = "${pending.userId}:${pending.requestedRole}"
+        if (
+            roleConfirmationDialog?.isShowing == true &&
+            presentedConfirmationUserId == presentationKey
+        ) {
+            return
+        }
+
+        roleConfirmationDialog?.dismiss()
+        presentedConfirmationUserId = presentationKey
+        roleConfirmationDialog = AlertDialog.Builder(context)
+            .setTitle(R.string.room_roles_confirm_title)
+            .setMessage(
+                context.getString(
+                    R.string.room_roles_confirm_message,
+                    pending.displayName,
+                    roleLabel(pending.requestedRole)
+                )
+            )
+            .setPositiveButton(R.string.room_roles_confirm_action) { _, _ ->
+                actions.onConfirmRoleChange()
+            }
+            .setNegativeButton(R.string.common_cancel) { _, _ ->
+                actions.onCancelRoleChange()
+            }
+            .setOnCancelListener { actions.onCancelRoleChange() }
+            .create()
+            .also { dialog ->
+                dialog.setOnDismissListener {
+                    if (roleConfirmationDialog === dialog) {
+                        roleConfirmationDialog = null
+                        presentedConfirmationUserId = null
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun roleLabel(role: RoomAssignableRole): String {
+        return context.getString(
+            when (role) {
+                RoomAssignableRole.MEMBER -> R.string.room_roles_member
+                RoomAssignableRole.MODERATOR -> R.string.room_permissions_moderators
+                RoomAssignableRole.ADMINISTRATOR -> R.string.room_permissions_administrators
+            }
         )
     }
 
@@ -359,11 +492,24 @@ private class RoomMembersAdapter(
         joinedMembers
     )
 
-    var actions: RoomMembersScreenViewActions? = null
+    var onMemberClick: ((MatrixRoomMember) -> Unit)? = null
         set(value) {
             field = value
-            invitedMembers.actions = value
-            joinedMembers.actions = value
+            invitedMembers.onMemberClick = value
+            joinedMembers.onMemberClick = value
+        }
+
+    var roleManagement: RoomRoleManagementState? = null
+        set(value) {
+            if (field == value) return
+            val previousPresentation = field.toListPresentation()
+            field = value
+            invitedMembers.roleManagement = value
+            joinedMembers.roleManagement = value
+            if (previousPresentation != value.toListPresentation()) {
+                invitedMembers.notifyRolePresentationChanged()
+                joinedMembers.notifyRolePresentationChanged()
+            }
         }
 
     var matrixMediaLoader: MatrixMediaLoader? = null
@@ -420,6 +566,23 @@ private class RoomMembersAdapter(
     }
 }
 
+private data class RoomRoleListPresentation(
+    val target: RoomRoleManagementTarget?,
+    val capabilities: RoomRoleCapabilities?,
+    val confirmedPowerLevels: Map<String, Long>,
+    val savingUserId: String?
+)
+
+private fun RoomRoleManagementState?.toListPresentation(): RoomRoleListPresentation? {
+    val state = this ?: return null
+    return RoomRoleListPresentation(
+        target = state.target,
+        capabilities = state.capabilities,
+        confirmedPowerLevels = state.confirmedPowerLevels,
+        savingUserId = state.savingUserId
+    )
+}
+
 private class RoomMemberHeaderAdapter(
     private val title: String
 ) : RecyclerView.Adapter<RoomMemberHeaderViewHolder>() {
@@ -463,7 +626,8 @@ private class RoomMemberHeaderAdapter(
 
 private class RoomMemberListAdapter :
     ListAdapter<MatrixRoomMember, RoomMemberViewHolder>(RoomMemberDiffCallback) {
-    var actions: RoomMembersScreenViewActions? = null
+    var onMemberClick: ((MatrixRoomMember) -> Unit)? = null
+    var roleManagement: RoomRoleManagementState? = null
     var matrixMediaLoader: MatrixMediaLoader? = null
     var palette: SettingsPalette? = null
 
@@ -476,8 +640,15 @@ private class RoomMemberListAdapter :
             member = getItem(position),
             matrixMediaLoader = matrixMediaLoader,
             palette = palette ?: SettingsPalette.from(holder.itemView.context),
-            actions = actions
+            roleManagement = roleManagement,
+            onMemberClick = onMemberClick
         )
+    }
+
+    fun notifyRolePresentationChanged() {
+        if (itemCount > 0) {
+            notifyItemRangeChanged(0, itemCount)
+        }
     }
 }
 
@@ -585,36 +756,59 @@ private class RoomMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
         member: MatrixRoomMember,
         matrixMediaLoader: MatrixMediaLoader?,
         palette: SettingsPalette,
-        actions: RoomMembersScreenViewActions?
+        roleManagement: RoomRoleManagementState?,
+        onMemberClick: ((MatrixRoomMember) -> Unit)?
     ) {
+        val effectiveMember = roleManagement?.effectiveMember(member) ?: member
         root.setBackgroundColor(palette.background)
         row.setBackgroundColor(palette.background)
         avatar.setPaletteBackground(palette.background)
         avatar.render(
-            userId = member.userId,
-            displayName = member.displayNameOrUserId,
-            avatarUrl = member.avatarUrl,
+            userId = effectiveMember.userId,
+            displayName = effectiveMember.displayNameOrUserId,
+            avatarUrl = effectiveMember.avatarUrl,
             localAvatarPath = null,
             matrixMediaLoader = matrixMediaLoader,
             sizePx = dp(44)
         )
-        nameText.text = member.displayNameOrUserId
-        userIdText.text = member.userId
+        nameText.text = effectiveMember.displayNameOrUserId
+        userIdText.text = effectiveMember.userId
         nameText.setTextColor(palette.titleText)
         userIdText.setTextColor(palette.secondaryText)
         separator.setBackgroundColor(palette.separator)
 
-        val roleLabel = member.roleLabel(itemView.context)
-        roleText.text = roleLabel.orEmpty()
-        roleText.visibility = if (roleLabel == null) View.GONE else View.VISIBLE
+        val roleLabel = effectiveMember.roleLabel(itemView.context)
+            ?: if (
+                roleManagement != null &&
+                effectiveMember.membership == MatrixRoomMemberMembership.JOINED
+            ) {
+                itemView.context.getString(R.string.room_roles_member)
+            } else {
+                null
+            }
+        val isSavingRole = roleManagement?.savingUserId == effectiveMember.userId
+        roleText.text = if (isSavingRole) {
+            itemView.context.getString(R.string.room_roles_saving_short)
+        } else {
+            roleLabel.orEmpty()
+        }
+        roleText.visibility = if (roleLabel == null && !isSavingRole) View.GONE else View.VISIBLE
         roleText.setTextColor(palette.actionText)
         roleText.background = roundedDrawable(palette.selectedFill, dp(12))
 
-        row.setOnClickListener { actions?.onOpenProfile(member) }
+        val isEnabled = roleManagement?.canChange(effectiveMember) ?: true
+        row.isEnabled = isEnabled
+        row.setOnClickListener(
+            if (isEnabled) {
+                View.OnClickListener { onMemberClick?.invoke(effectiveMember) }
+            } else {
+                null
+            }
+        )
         itemView.contentDescription = buildString {
-            append(member.displayNameOrUserId)
+            append(effectiveMember.displayNameOrUserId)
             append(". ")
-            append(member.userId)
+            append(effectiveMember.userId)
             roleLabel?.let {
                 append(". ")
                 append(it)

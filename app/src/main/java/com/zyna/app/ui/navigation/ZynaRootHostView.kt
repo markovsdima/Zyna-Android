@@ -78,6 +78,8 @@ import com.zyna.app.ui.roompermissions.RoomPermissionsScreenView
 import com.zyna.app.ui.roompermissions.RoomPermissionsScreenViewActions
 import com.zyna.app.ui.roompermissions.RoomPermissionsScreenViewState
 import com.zyna.app.ui.roompermissions.RoomPermissionsState
+import com.zyna.app.ui.roomroles.RoomRoleManagementError
+import com.zyna.app.ui.roomroles.RoomRoleManagementState
 import com.zyna.app.ui.roomprofile.RoomProfileAvatarChange
 import com.zyna.app.ui.roomprofile.RoomProfileEditorError
 import com.zyna.app.ui.roomprofile.RoomProfileEditorState
@@ -136,6 +138,16 @@ private fun RoomPermissionsError?.localizedMessage(context: Context): String? {
         RoomPermissionsError.SAVE -> com.zyna.app.R.string.room_permissions_save_error
         RoomPermissionsError.PERMISSION_CHANGED ->
             com.zyna.app.R.string.room_permissions_permission_changed
+    }
+    return context.getString(stringId)
+}
+
+private fun RoomRoleManagementError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        RoomRoleManagementError.SAVE -> com.zyna.app.R.string.room_roles_save_error
+        RoomRoleManagementError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.room_roles_permission_changed
     }
     return context.getString(stringId)
 }
@@ -628,6 +640,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             return false
         }
         if (
+            state.route is AppRoute.RoomRoleManagement &&
+            latestRoom?.roles?.isSaving == true
+        ) {
+            return false
+        }
+        if (
             (state.route is AppRoute.InviteRoomMembers ||
                 state.route is AppRoute.InviteCreatedRoomMembers) &&
             latestRoom?.inviteMembers?.isSending == true
@@ -904,6 +922,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     roomDetails = room.details,
                     roomList = roomList,
                     actions = actions,
+                    route = route
+                )
+                is AppRoute.RoomRoleManagement -> roomRoleManagementEntry(
+                    roomMembers = room.members,
+                    roles = room.roles,
+                    actions = actions,
+                    dependencies = dependencies,
                     route = route
                 )
                 is AppRoute.InviteRoomMembers -> inviteMembersEntry(
@@ -1528,6 +1553,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             ?.canInviteMembers == true,
                         isLoading = routeState?.isLoading ?: true,
                         errorMessage = routeState?.errorMessage,
+                        canRetry = routeState?.errorMessage != null,
                         matrixMediaLoader = dependencies.matrixMediaLoader
                     ),
                     actions = RoomMembersScreenViewActions(
@@ -1574,9 +1600,51 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     ),
                     actions = RoomPermissionsScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
-                        onOpenMembers = actions.roomPermissions.onOpenMembers,
+                        onOpenMembers = actions.roomPermissions.onOpenRoleManagement,
                         onRetry = actions.roomPermissions.onRetry,
                         onSetPermission = actions.roomPermissions.onSetPermission
+                    )
+                )
+            }
+        )
+    }
+
+    private fun roomRoleManagementEntry(
+        roomMembers: RoomMembersState,
+        roles: RoomRoleManagementState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.RoomRoleManagement
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "roomRoleManagement:${route.roomId}",
+            createView = { context -> RoomMembersScreenView(context) },
+            updateView = { view ->
+                val memberState = roomMembers.takeIf { it.target?.roomId == route.roomId }
+                val roleState = roles.takeIf { it.target?.roomId == route.roomId }
+                    ?: RoomRoleManagementState()
+                val roleError = roleState.error.localizedMessage(view.context)
+                (view as RoomMembersScreenView).render(
+                    state = RoomMembersScreenViewState(
+                        searchQuery = memberState?.searchQuery.orEmpty(),
+                        invitedMembers = emptyList(),
+                        joinedMembers = memberState?.joinedMembers.orEmpty(),
+                        canInviteMembers = false,
+                        isLoading = memberState?.isLoading ?: true,
+                        errorMessage = roleError ?: memberState?.errorMessage,
+                        canRetry = roleError == null && memberState?.errorMessage != null,
+                        roleManagement = roleState,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = RoomMembersScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetry = actions.roomRoles.onRetryMembers,
+                        onOpenInviteMembers = {},
+                        onSearchQueryChanged = actions.roomRoles.onSearchQueryChanged,
+                        onOpenProfile = {},
+                        onSetRole = actions.roomRoles.onSetRole,
+                        onConfirmRoleChange = actions.roomRoles.onConfirmRoleChange,
+                        onCancelRoleChange = actions.roomRoles.onCancelRoleChange
                     )
                 )
             }
@@ -1963,6 +2031,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
             is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
+            is AppRoute.RoomRoleManagement ->
+                "RoomRoleManagement(${roomId.takeLast(10)})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
             is AppRoute.InviteCreatedRoomMembers ->
                 "InviteCreatedRoomMembers(${roomId.takeLast(10)})"

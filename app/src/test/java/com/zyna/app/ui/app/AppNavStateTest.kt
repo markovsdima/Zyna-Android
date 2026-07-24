@@ -334,11 +334,11 @@ class AppNavStateTest {
     }
 
     @Test
-    fun roomPermissionsOwnsDetailsAndCanOpenMembers() {
+    fun roomPermissionsOwnsDetailsAndCanOpenRoleManagement() {
         val roomId = "!room:example.org"
         val detailsRoute = AppRoute.RoomDetails(roomId)
         val permissionsRoute = AppRoute.RoomPermissions(roomId)
-        val membersRoute = AppRoute.RoomMembers(roomId)
+        val rolesRoute = AppRoute.RoomRoleManagement(roomId)
         val permissionsState = AppNavState()
             .enterMain()
             .openChat(roomId = roomId, displayName = "Room")
@@ -349,12 +349,13 @@ class AppNavStateTest {
         assertEquals(detailsRoute, permissionsState.activeRoomDetailsRoute)
         assertFalse(permissionsState.showsTabs)
 
-        val membersState = permissionsState.openRoomMembers()
+        val rolesState = permissionsState.openRoomRoleManagement()
 
-        assertEquals(membersRoute, membersState.top)
-        assertEquals(detailsRoute, membersState.activeRoomDetailsRoute)
-        assertEquals(permissionsRoute, membersState.activeRoomPermissionsRoute)
-        assertEquals(permissionsRoute, membersState.popActiveStack()?.top)
+        assertEquals(rolesRoute, rolesState.top)
+        assertEquals(detailsRoute, rolesState.activeRoomDetailsRoute)
+        assertEquals(permissionsRoute, rolesState.activeRoomPermissionsRoute)
+        assertEquals(permissionsRoute, rolesState.popActiveStack()?.top)
+        assertEquals(permissionsState, permissionsState.openRoomMembers())
     }
 
     @Test
@@ -368,6 +369,23 @@ class AppNavStateTest {
         assertEquals(chatState, chatState.openRoomPermissions())
         assertEquals(membersState, membersState.openRoomPermissions())
         assertEquals(AppNavState(), AppNavState().openRoomPermissions())
+    }
+
+    @Test
+    fun openRoomRoleManagementRequiresOwnedTopPermissionsRoute() {
+        val roomId = "!room:example.org"
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+        val detailsState = chatState.openRoomDetails()
+        val permissionsState = detailsState.openRoomPermissions()
+
+        assertEquals(chatState, chatState.openRoomRoleManagement())
+        assertEquals(detailsState, detailsState.openRoomRoleManagement())
+        assertEquals(
+            AppRoute.RoomRoleManagement(roomId),
+            permissionsState.openRoomRoleManagement().top
+        )
     }
 
     @Test

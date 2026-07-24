@@ -268,6 +268,15 @@
     <string name="room_permissions_load_error">Could not load room permissions. Try again.</string>
     <string name="room_permissions_save_error">Could not save this permission. Try again.</string>
     <string name="room_permissions_permission_changed">You no longer have permission to change roles and permissions.</string>
+    <string name="room_roles_title">Manage roles</string>
+    <string name="room_roles_member">Member</string>
+    <string name="room_roles_saving">Saving role…</string>
+    <string name="room_roles_saving_short">Saving…</string>
+    <string name="room_roles_confirm_title">Confirm role change</string>
+    <string name="room_roles_confirm_message">Change %1$s’s role to %2$s? Administrators can manage room settings and other members.</string>
+    <string name="room_roles_confirm_action">Change role</string>
+    <string name="room_roles_save_error">Could not save this role. Try again.</string>
+    <string name="room_roles_permission_changed">The role or your permissions changed. Review the current roles and try again.</string>
     <string name="settings_presence">Presence</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
     <string name="presence_provider_matrix_standard">Matrix Standard</string>

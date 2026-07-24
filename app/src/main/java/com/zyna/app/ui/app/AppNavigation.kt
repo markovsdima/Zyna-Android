@@ -71,6 +71,9 @@ sealed interface AppRoute {
     data class RoomPermissions(
         val roomId: String
     ) : AppRoute
+    data class RoomRoleManagement(
+        val roomId: String
+    ) : AppRoute
     data class InviteRoomMembers(
         val roomId: String
     ) : AppRoute
@@ -121,6 +124,7 @@ data class AppNavState(
                 is AppRoute.EditRoomProfile -> topRoute.roomId
                 is AppRoute.RoomMembers -> topRoute.roomId
                 is AppRoute.RoomPermissions -> topRoute.roomId
+                is AppRoute.RoomRoleManagement -> topRoute.roomId
                 is AppRoute.InviteRoomMembers -> topRoute.roomId
                 else -> return null
             }
@@ -136,7 +140,7 @@ data class AppNavState(
             }
             val roomId = when (val topRoute = chatsStack.lastOrNull()) {
                 is AppRoute.RoomPermissions -> topRoute.roomId
-                is AppRoute.RoomMembers -> topRoute.roomId
+                is AppRoute.RoomRoleManagement -> topRoute.roomId
                 else -> return null
             }
             return chatsStack
@@ -319,7 +323,6 @@ data class AppNavState(
         }
         val roomId = when (val topRoute = chatsStack.lastOrNull()) {
             is AppRoute.RoomDetails -> topRoute.roomId
-            is AppRoute.RoomPermissions -> topRoute.roomId
             else -> return this
         }
         val ownsRoom = chatsStack.any { route ->
@@ -343,6 +346,21 @@ data class AppNavState(
         }
         val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
         return copy(chatsStack = chatsStack + AppRoute.RoomPermissions(detailsRoute.roomId))
+    }
+
+    fun openRoomRoleManagement(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) {
+            return this
+        }
+        val permissionsRoute =
+            chatsStack.lastOrNull() as? AppRoute.RoomPermissions ?: return this
+        val ownsRoom = chatsStack.any { route ->
+            route is AppRoute.RoomDetails && route.roomId == permissionsRoute.roomId
+        }
+        if (!ownsRoom) return this
+        return copy(
+            chatsStack = chatsStack + AppRoute.RoomRoleManagement(permissionsRoute.roomId)
+        )
     }
 
     fun openInviteRoomMembers(): AppNavState {

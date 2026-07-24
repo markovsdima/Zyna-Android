@@ -38,6 +38,7 @@ internal data class RoomDetailsScreenViewState(
     val historyVisibility: MatrixRoomHistoryVisibility?,
     val pinnedEventCount: Int?,
     val canonicalAlias: String?,
+    val roomVersion: String?,
     val canInviteMembers: Boolean,
     val canEditRoomProfile: Boolean,
     val unreadCount: Long,
@@ -122,6 +123,14 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
         minHeight = dp(SUBTITLE_MIN_HEIGHT_DP)
+    }
+    private val roomVersionText = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 13f
+        includeFontPadding = true
+        maxLines = 1
+        ellipsize = TextUtils.TruncateAt.END
+        minHeight = dp(ROOM_VERSION_MIN_HEIGHT_DP)
     }
     private val tagRow = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -275,6 +284,15 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
                 topMargin = dp(2)
             }
         )
+        content.addView(
+            roomVersionText,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(2)
+            }
+        )
         tagRow.addView(typeTag, tagLayoutParams())
         tagRow.addView(encryptionTag, tagLayoutParams())
         content.addView(
@@ -401,6 +419,10 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         val subtitle = state.subtitle()
         subtitleText.text = subtitle.ifBlank { EMPTY_SUBTITLE_PLACEHOLDER }
         subtitleText.contentDescription = subtitle.takeIf { it.isNotBlank() }
+        roomVersionText.text = context.getString(
+            R.string.room_profile_room_version,
+            state.roomVersion ?: UNKNOWN_ROOM_VERSION
+        )
         typeTag.text = state.kind.label()
         encryptionTag.text = state.encryption?.label() ?: loadingValue(state)
         roomIdRow.detail = state.roomId
@@ -447,6 +469,7 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         avatarView.setPaletteBackground(palette.background)
         nameText.setTextColor(palette.titleText)
         subtitleText.setTextColor(palette.secondaryText)
+        roomVersionText.setTextColor(palette.secondaryText)
         infoHeader.setTextColor(palette.secondaryText)
         sectionsHeader.setTextColor(palette.secondaryText)
         typeTag.setTextColor(palette.tagText)
@@ -641,11 +664,13 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         const val TOP_BAR_HEIGHT_DP = 64
         const val AVATAR_SIZE_DP = 96
         const val SUBTITLE_MIN_HEIGHT_DP = 20
+        const val ROOM_VERSION_MIN_HEIGHT_DP = 19
         const val ROW_HEIGHT_DP = 56
         const val CARD_RADIUS_DP = 8
         const val TAG_RADIUS_DP = 12
         const val DISABLED_ALPHA = 0.48f
         const val EMPTY_SUBTITLE_PLACEHOLDER = "\u00A0"
+        const val UNKNOWN_ROOM_VERSION = "—"
     }
 }
 

@@ -2673,6 +2673,11 @@ class MatrixClientService(
             },
             pinnedEventCount = pinnedEventIds.size,
             canonicalAlias = canonicalAlias?.takeIf { it.isNotBlank() },
+            roomVersion = roomVersion?.takeIf { it.isNotBlank() },
+            creatorSemantics = matrixRoomCreatorSemantics(
+                roomVersion = roomVersion,
+                privilegedCreatorsRole = privilegedCreatorsRole
+            ),
             capabilities = MatrixRoomCapabilities(
                 canInviteMembers = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
                     powerLevels?.canOwnUserInvite()
@@ -2706,18 +2711,7 @@ class MatrixClientService(
             PowerLevel.Infinite -> Long.MAX_VALUE
             is PowerLevel.Value -> level.value
         }
-        val mappedRole = when (suggestedRoleForPowerLevel) {
-            RoomMemberRole.CREATOR -> MatrixRoomMemberRole.OWNER
-            RoomMemberRole.ADMINISTRATOR -> {
-                if (mappedPowerLevel >= ROOM_MEMBER_OWNER_POWER_LEVEL) {
-                    MatrixRoomMemberRole.OWNER
-                } else {
-                    MatrixRoomMemberRole.ADMIN
-                }
-            }
-            RoomMemberRole.MODERATOR -> MatrixRoomMemberRole.MODERATOR
-            RoomMemberRole.USER -> MatrixRoomMemberRole.MEMBER
-        }
+        val mappedRole = suggestedRoleForPowerLevel.toMatrixRoomMemberRole(mappedPowerLevel)
         return MatrixRoomMember(
             userId = userId,
             displayName = displayName?.takeIf { it.isNotBlank() },
@@ -3483,7 +3477,6 @@ class MatrixClientService(
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
         const val ROOM_LIST_LIVE_PAGE_SIZE = 512
         const val ROOM_MEMBERS_CHUNK_SIZE = 512
-        const val ROOM_MEMBER_OWNER_POWER_LEVEL = 150L
         const val MAX_REACTION_RELATION_PAGES = 20
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
@@ -3495,6 +3488,23 @@ class MatrixClientService(
         const val DEFAULT_LEGACY_CALL_NOTIFICATION_LIFETIME_MS = 30_000L
     }
 }
+
+internal fun RoomMemberRole.toMatrixRoomMemberRole(powerLevel: Long): MatrixRoomMemberRole {
+    return when (this) {
+        RoomMemberRole.CREATOR -> MatrixRoomMemberRole.CREATOR
+        RoomMemberRole.ADMINISTRATOR -> {
+            if (powerLevel >= MATRIX_ROOM_OWNER_POWER_LEVEL) {
+                MatrixRoomMemberRole.OWNER
+            } else {
+                MatrixRoomMemberRole.ADMIN
+            }
+        }
+        RoomMemberRole.MODERATOR -> MatrixRoomMemberRole.MODERATOR
+        RoomMemberRole.USER -> MatrixRoomMemberRole.MEMBER
+    }
+}
+
+private const val MATRIX_ROOM_OWNER_POWER_LEVEL = 150L
 
 private class AndroidMatrixSessionDelegate(
     private val sessionStore: MatrixSessionStore

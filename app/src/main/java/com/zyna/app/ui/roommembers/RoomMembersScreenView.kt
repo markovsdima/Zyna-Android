@@ -821,6 +821,9 @@ private class RoomMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
             return context.getString(R.string.room_member_invited)
         }
         return when (role) {
+            MatrixRoomMemberRole.CREATOR -> {
+                context.getString(R.string.room_member_role_creator)
+            }
             MatrixRoomMemberRole.OWNER -> context.getString(R.string.room_member_role_owner)
             MatrixRoomMemberRole.ADMIN -> context.getString(R.string.room_member_role_admin)
             MatrixRoomMemberRole.MODERATOR -> {

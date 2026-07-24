@@ -6,6 +6,7 @@ enum class MatrixRoomMemberMembership {
 }
 
 enum class MatrixRoomMemberRole {
+    CREATOR,
     OWNER,
     ADMIN,
     MODERATOR,

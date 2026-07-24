@@ -147,7 +147,7 @@ class RoomRoleManagementStoreTest {
     }
 
     @Test
-    fun selfOwnerAndEqualPowerPeerAreReadOnlyBeforePreflight() = runBlocking {
+    fun selfCreatorAndEqualPowerPeerAreReadOnlyBeforePreflight() = runBlocking {
         val fixture = Fixture(coroutineContext)
         try {
             fixture.activate()
@@ -156,7 +156,14 @@ class RoomRoleManagementStoreTest {
             assertFalse(state.canChange(member(userId = USER_ID)))
             assertFalse(
                 state.canChange(
-                    member(powerLevel = Long.MAX_VALUE, role = MatrixRoomMemberRole.OWNER)
+                    member(powerLevel = Long.MAX_VALUE, role = MatrixRoomMemberRole.CREATOR)
+                )
+            )
+            assertFalse(
+                state.copy(
+                    capabilities = capabilities(ownPowerLevel = Long.MAX_VALUE)
+                ).canChange(
+                    member(powerLevel = 150, role = MatrixRoomMemberRole.OWNER)
                 )
             )
             assertFalse(

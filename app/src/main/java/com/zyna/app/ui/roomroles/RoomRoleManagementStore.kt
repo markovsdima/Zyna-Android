@@ -33,6 +33,7 @@ enum class RoomAssignableRole(val powerLevel: Long) {
     companion object {
         fun fromMemberRole(role: MatrixRoomMemberRole): RoomAssignableRole? {
             return when (role) {
+                MatrixRoomMemberRole.CREATOR,
                 MatrixRoomMemberRole.OWNER -> null
                 MatrixRoomMemberRole.ADMIN -> ADMINISTRATOR
                 MatrixRoomMemberRole.MODERATOR -> MODERATOR
@@ -81,6 +82,7 @@ data class RoomRoleManagementState(
             activeCapabilities.canEdit &&
             effectiveMember.membership == MatrixRoomMemberMembership.JOINED &&
             effectiveMember.userId != activeTarget.userId &&
+            effectiveMember.role != MatrixRoomMemberRole.CREATOR &&
             effectiveMember.role != MatrixRoomMemberRole.OWNER &&
             activeCapabilities.ownPowerLevel > effectiveMember.powerLevel
     }

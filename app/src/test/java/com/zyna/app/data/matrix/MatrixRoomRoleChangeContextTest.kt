@@ -22,11 +22,22 @@ class MatrixRoomRoleChangeContextTest {
     }
 
     @Test
-    fun selfOwnerAndPeerRolesCannotBeChanged() {
+    fun selfCreatorAndEqualPowerPeerCannotBeChanged() {
         assertFalse(context(targetUserId = USER_ID).canChangeTarget())
-        assertFalse(context(targetRole = MatrixRoomMemberRole.OWNER).canChangeTarget())
+        assertFalse(context(targetRole = MatrixRoomMemberRole.CREATOR).canChangeTarget())
         assertFalse(
             context(ownPowerLevel = 100, targetPowerLevel = 100).canChangeTarget()
+        )
+    }
+
+    @Test
+    fun privilegedCreatorCanChangeADelegatedOwner() {
+        assertTrue(
+            context(
+                ownPowerLevel = Long.MAX_VALUE,
+                targetPowerLevel = 150,
+                targetRole = MatrixRoomMemberRole.OWNER
+            ).canChangeTarget()
         )
     }
 

@@ -59,6 +59,7 @@
     <string name="room_members_invited_section">Invited</string>
     <string name="room_members_joined_section">Members</string>
     <string name="room_member_invited">Invited</string>
+    <string name="room_member_role_creator">Creator</string>
     <string name="room_member_role_owner">Owner</string>
     <string name="room_member_role_admin">Admin</string>
     <string name="room_member_role_moderator">Moderator</string>
@@ -241,6 +242,7 @@
     <string name="room_profile_edit_permission_changed">You no longer have permission to save these changes.</string>
     <string name="room_profile_edit_save_error">Could not save the changes. Try again.</string>
     <string name="room_profile_edit_partial_save_error">The name was saved, but the photo was not. You can retry the photo.</string>
+    <string name="room_profile_room_version">Room version: %1$s</string>
     <string name="room_permissions_title">Roles and Permissions</string>
     <string name="room_permissions_roles_section">Roles</string>
     <string name="room_permissions_members_roles">Members and roles</string>

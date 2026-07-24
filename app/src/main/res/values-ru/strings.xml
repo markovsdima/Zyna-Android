@@ -33,6 +33,7 @@
     <string name="room_members_invited_section">Приглашённые</string>
     <string name="room_members_joined_section">Участники</string>
     <string name="room_member_invited">Приглашён(а)</string>
+    <string name="room_member_role_creator">Создатель</string>
     <string name="room_member_role_owner">Владелец</string>
     <string name="room_member_role_admin">Администратор</string>
     <string name="room_member_role_moderator">Модератор</string>
@@ -204,6 +205,7 @@
     <string name="room_profile_edit_permission_changed">У вас больше нет права сохранять эти изменения.</string>
     <string name="room_profile_edit_save_error">Не удалось сохранить изменения. Попробуйте снова.</string>
     <string name="room_profile_edit_partial_save_error">Название сохранено, но фото — нет. Можно повторить сохранение фото.</string>
+    <string name="room_profile_room_version">Версия комнаты: %1$s</string>
     <string name="room_permissions_title">Роли и разрешения</string>
     <string name="room_permissions_roles_section">Роли</string>
     <string name="room_permissions_members_roles">Участники и роли</string>

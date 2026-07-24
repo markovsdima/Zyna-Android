@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.zyna.app.data.matrix.MatrixRoomAccess
 import com.zyna.app.data.matrix.MatrixRoomCapabilities
+import com.zyna.app.data.matrix.MatrixRoomCreatorSemantics
 import com.zyna.app.data.matrix.MatrixRoomDetails
 import com.zyna.app.data.matrix.MatrixRoomEncryption
 import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
@@ -116,6 +117,26 @@ class RoomDetailsCacheTest {
         )
     }
 
+    @Test
+    fun unknownProtocolMetadataDoesNotOverwriteKnownRoomVersion() = runBlocking {
+        val knownDetails = roomDetails(displayName = "Cached group")
+        repository.cacheRoomDetails(USER_ID, knownDetails)
+
+        repository.cacheRoomDetails(
+            USER_ID,
+            knownDetails.copy(
+                topic = "Updated topic",
+                roomVersion = null,
+                creatorSemantics = MatrixRoomCreatorSemantics.UNKNOWN
+            )
+        )
+
+        assertEquals(
+            knownDetails.copy(topic = "Updated topic"),
+            repository.observeRoomDetails(USER_ID, ROOM_ID).first { it != null }
+        )
+    }
+
     private fun roomDetails(displayName: String): MatrixRoomDetails {
         return MatrixRoomDetails(
             roomId = ROOM_ID,
@@ -130,6 +151,8 @@ class RoomDetailsCacheTest {
             historyVisibility = MatrixRoomHistoryVisibility.INVITED,
             pinnedEventCount = 2,
             canonicalAlias = "#cached:example.org",
+            roomVersion = "12",
+            creatorSemantics = MatrixRoomCreatorSemantics.PRIVILEGED,
             capabilities = MatrixRoomCapabilities(
                 canInviteMembers = true,
                 canChangeName = false,

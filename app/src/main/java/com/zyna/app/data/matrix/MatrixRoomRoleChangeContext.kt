@@ -20,7 +20,7 @@ data class MatrixRoomRoleChangeContext(
         return canEditPowerLevels &&
             targetMembership == MatrixRoomMemberMembership.JOINED &&
             targetUserId != ownUserId &&
-            targetRole != MatrixRoomMemberRole.OWNER &&
+            targetRole != MatrixRoomMemberRole.CREATOR &&
             ownPowerLevel > targetPowerLevel
     }
 

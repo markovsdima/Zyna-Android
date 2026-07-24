@@ -21,6 +21,7 @@ import com.zyna.app.data.matrix.MatrixReactionSender
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomAccess
 import com.zyna.app.data.matrix.MatrixRoomCapabilities
+import com.zyna.app.data.matrix.MatrixRoomCreatorSemantics
 import com.zyna.app.data.matrix.MatrixRoomDetails
 import com.zyna.app.data.matrix.MatrixRoomEncryption
 import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
@@ -196,6 +197,12 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         } else {
             existingRoom?.detailsCanonicalAlias
         },
+        detailsRoomVersion = roomDetails?.roomVersion ?: existingRoom?.detailsRoomVersion,
+        detailsCreatorSemantics = roomDetails
+            ?.creatorSemantics
+            ?.takeUnless { semantics -> semantics == MatrixRoomCreatorSemantics.UNKNOWN }
+            ?.name
+            ?: existingRoom?.detailsCreatorSemantics,
         detailsCanInviteMembers = roomDetails?.capabilities?.canInviteMembers
             ?: existingRoom?.detailsCanInviteMembers,
         detailsCanChangeName = roomDetails?.capabilities?.canChangeName
@@ -250,6 +257,12 @@ class LocalCacheRepository(
                     historyVisibility = details.historyVisibility.name,
                     pinnedEventCount = details.pinnedEventCount,
                     canonicalAlias = details.canonicalAlias,
+                    roomVersion = details.roomVersion,
+                    creatorSemantics = details.creatorSemantics
+                        .takeUnless { semantics ->
+                            semantics == MatrixRoomCreatorSemantics.UNKNOWN
+                        }
+                        ?.name,
                     canInviteMembers = details.capabilities.canInviteMembers,
                     canChangeName = details.capabilities.canChangeName,
                     canChangeAvatar = details.capabilities.canChangeAvatar,
@@ -280,6 +293,12 @@ class LocalCacheRepository(
                                 detailsHistoryVisibility = details.historyVisibility.name,
                                 detailsPinnedEventCount = details.pinnedEventCount,
                                 detailsCanonicalAlias = details.canonicalAlias,
+                                detailsRoomVersion = details.roomVersion,
+                                detailsCreatorSemantics = details.creatorSemantics
+                                    .takeUnless { semantics ->
+                                        semantics == MatrixRoomCreatorSemantics.UNKNOWN
+                                    }
+                                    ?.name,
                                 detailsCanInviteMembers = details.capabilities.canInviteMembers,
                                 detailsCanChangeName = details.capabilities.canChangeName,
                                 detailsCanChangeAvatar = details.capabilities.canChangeAvatar,
@@ -2179,6 +2198,10 @@ class LocalCacheRepository(
             ),
             pinnedEventCount = room.detailsPinnedEventCount ?: 0,
             canonicalAlias = room.detailsCanonicalAlias,
+            roomVersion = room.detailsRoomVersion,
+            creatorSemantics = room.detailsCreatorSemantics.toCachedEnumOrDefault(
+                MatrixRoomCreatorSemantics.UNKNOWN
+            ),
             capabilities = MatrixRoomCapabilities(
                 canInviteMembers = room.detailsCanInviteMembers,
                 canChangeName = room.detailsCanChangeName,

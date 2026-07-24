@@ -1495,6 +1495,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         historyVisibility = details?.historyVisibility,
                         pinnedEventCount = details?.pinnedEventCount,
                         canonicalAlias = details?.canonicalAlias,
+                        roomVersion = details?.roomVersion,
                         canInviteMembers = details?.capabilities?.canInviteMembers == true,
                         canEditRoomProfile = details?.let {
                             it.kind != MatrixRoomKind.DIRECT &&

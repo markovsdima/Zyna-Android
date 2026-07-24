@@ -53,6 +53,11 @@ interface CachedRoomDao {
             detailsHistoryVisibility = :historyVisibility,
             detailsPinnedEventCount = :pinnedEventCount,
             detailsCanonicalAlias = :canonicalAlias,
+            detailsRoomVersion = COALESCE(:roomVersion, detailsRoomVersion),
+            detailsCreatorSemantics = COALESCE(
+                :creatorSemantics,
+                detailsCreatorSemantics
+            ),
             detailsCanInviteMembers = COALESCE(:canInviteMembers, detailsCanInviteMembers),
             detailsCanChangeName = COALESCE(:canChangeName, detailsCanChangeName),
             detailsCanChangeAvatar = COALESCE(:canChangeAvatar, detailsCanChangeAvatar),
@@ -70,6 +75,8 @@ interface CachedRoomDao {
         historyVisibility: String,
         pinnedEventCount: Int,
         canonicalAlias: String?,
+        roomVersion: String?,
+        creatorSemantics: String?,
         canInviteMembers: Boolean?,
         canChangeName: Boolean?,
         canChangeAvatar: Boolean?,

@@ -19,9 +19,13 @@ data class MatrixRoomRoleChangeContext(
     fun canChangeTarget(): Boolean {
         return canEditPowerLevels &&
             targetMembership == MatrixRoomMemberMembership.JOINED &&
-            targetUserId != ownUserId &&
-            targetRole != MatrixRoomMemberRole.CREATOR &&
-            ownPowerLevel > targetPowerLevel
+            canOwnUserActOnRoomMember(
+                ownUserId = ownUserId,
+                ownPowerLevel = ownPowerLevel,
+                targetUserId = targetUserId,
+                targetPowerLevel = targetPowerLevel,
+                targetRole = targetRole
+            )
     }
 
     fun canAssign(powerLevel: Long): Boolean {

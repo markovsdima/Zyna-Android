@@ -69,6 +69,7 @@ import com.zyna.app.ui.navigation.OwnProfileActions
 import com.zyna.app.ui.navigation.ProfileFeatureActions
 import com.zyna.app.ui.navigation.RoomsFeatureActions
 import com.zyna.app.ui.navigation.RoomDetailsFeatureActions
+import com.zyna.app.ui.navigation.RoomMemberModerationActions
 import com.zyna.app.ui.navigation.RoomMembersFeatureActions
 import com.zyna.app.ui.navigation.RoomPermissionsFeatureActions
 import com.zyna.app.ui.navigation.RoomRolesFeatureActions
@@ -391,10 +392,15 @@ class MainActivity : AppCompatActivity() {
                                         inviteMembers = inviteMembers
                                     )
                                 },
+                                appViewModel.roomMemberModerationState,
                                 appViewModel.roomPermissionsState,
                                 appViewModel.roomRoleManagementState
-                            ) { room, permissions, roles ->
-                                room.copy(permissions = permissions, roles = roles)
+                            ) { room, memberModeration, permissions, roles ->
+                                room.copy(
+                                    memberModeration = memberModeration,
+                                    permissions = permissions,
+                                    roles = roles
+                                )
                             }
                         ) { state, roomList, room ->
                             AppFeatureInput(
@@ -572,7 +578,15 @@ class MainActivity : AppCompatActivity() {
             roomMembers = RoomMembersFeatureActions(
                 onRetry = appViewModel::retryRoomMembers,
                 onSearchQueryChanged = appViewModel::setRoomMembersSearchQuery,
-                onOpenInviteMembers = appViewModel::openInviteRoomMembers
+                onOpenInviteMembers = appViewModel::openInviteRoomMembers,
+                onOpenMember = appViewModel::openRoomMemberDetails
+            ),
+            roomMemberModeration = RoomMemberModerationActions(
+                onRetry = appViewModel::retryRoomMemberModeration,
+                onMessage = appViewModel::openRoomMemberChat,
+                onRequest = appViewModel::requestRoomMemberModeration,
+                onConfirm = appViewModel::confirmRoomMemberModeration,
+                onCancel = appViewModel::cancelRoomMemberModeration
             ),
             inviteMembers = InviteMembersFeatureActions(
                 onRetryPreparation = appViewModel::retryInviteMembersPreparation,
@@ -1469,6 +1483,8 @@ private fun AppRoute.perfName(): String {
         is AppRoute.SessionSecurity -> "SessionSecurity"
         is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
         is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
+        is AppRoute.RoomMemberDetails ->
+            "RoomMemberDetails(${roomId.takeLast(10)},${userId.takeLast(10)})"
         is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
         is AppRoute.RoomRoleManagement -> "RoomRoleManagement(${roomId.takeLast(10)})"
         is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"

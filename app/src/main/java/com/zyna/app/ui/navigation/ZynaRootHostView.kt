@@ -73,6 +73,11 @@ import com.zyna.app.ui.roommembers.RoomMembersScreenView
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
 import com.zyna.app.ui.roommembers.RoomMembersState
+import com.zyna.app.ui.roommembers.RoomMemberDetailsScreenView
+import com.zyna.app.ui.roommembers.RoomMemberDetailsScreenViewActions
+import com.zyna.app.ui.roommembers.RoomMemberDetailsScreenViewState
+import com.zyna.app.ui.roommembers.RoomMemberModerationError
+import com.zyna.app.ui.roommembers.RoomMemberModerationState
 import com.zyna.app.ui.roompermissions.RoomPermissionsError
 import com.zyna.app.ui.roompermissions.RoomPermissionsScreenView
 import com.zyna.app.ui.roompermissions.RoomPermissionsScreenViewActions
@@ -148,6 +153,17 @@ private fun RoomRoleManagementError?.localizedMessage(context: Context): String?
         RoomRoleManagementError.SAVE -> com.zyna.app.R.string.room_roles_save_error
         RoomRoleManagementError.PERMISSION_CHANGED ->
             com.zyna.app.R.string.room_roles_permission_changed
+    }
+    return context.getString(stringId)
+}
+
+private fun RoomMemberModerationError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        RoomMemberModerationError.LOAD -> com.zyna.app.R.string.room_member_load_error
+        RoomMemberModerationError.SAVE -> com.zyna.app.R.string.room_member_save_error
+        RoomMemberModerationError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.room_member_permission_changed
     }
     return context.getString(stringId)
 }
@@ -917,6 +933,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     dependencies = dependencies,
                     route = route
                 )
+                is AppRoute.RoomMemberDetails -> roomMemberDetailsEntry(
+                    moderation = room.memberModeration,
+                    contacts = contacts,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
+                )
                 is AppRoute.RoomPermissions -> roomPermissionsEntry(
                     permissions = room.permissions,
                     roomDetails = room.details,
@@ -1547,6 +1570,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         searchQuery = routeState?.searchQuery.orEmpty(),
                         invitedMembers = routeState?.invitedMembers.orEmpty(),
                         joinedMembers = routeState?.joinedMembers.orEmpty(),
+                        bannedMembers = routeState?.bannedMembers.orEmpty(),
                         canInviteMembers = roomDetails
                             .takeIf { it.target?.roomId == route.roomId }
                             ?.details
@@ -1562,13 +1586,45 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onRetry = actions.roomMembers.onRetry,
                         onOpenInviteMembers = actions.roomMembers.onOpenInviteMembers,
                         onSearchQueryChanged = actions.roomMembers.onSearchQueryChanged,
-                        onOpenProfile = { member ->
-                            actions.profile.user.onOpen(
-                                member.userId,
-                                member.displayName,
-                                member.avatarUrl
-                            )
-                        }
+                        onOpenProfile = actions.roomMembers.onOpenMember
+                    )
+                )
+            }
+        )
+    }
+
+    private fun roomMemberDetailsEntry(
+        moderation: RoomMemberModerationState,
+        contacts: ContactsFeatureState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.RoomMemberDetails
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "roomMember:${route.roomId}:${route.userId}",
+            createView = { context -> RoomMemberDetailsScreenView(context) },
+            updateView = { view ->
+                val routeState = moderation.takeIf { state ->
+                    state.target?.let { target ->
+                        target.roomId == route.roomId &&
+                            target.memberUserId == route.userId
+                    } == true
+                } ?: RoomMemberModerationState()
+                (view as RoomMemberDetailsScreenView).render(
+                    state = RoomMemberDetailsScreenViewState(
+                        moderation = routeState,
+                        directActionUserId = contacts.directRoomAction.activeUserId,
+                        directActionErrorMessage = contacts.directRoomAction.errorMessage,
+                        errorMessage = routeState.error.localizedMessage(view.context),
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = RoomMemberDetailsScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onMessage = actions.roomMemberModeration.onMessage,
+                        onRetry = actions.roomMemberModeration.onRetry,
+                        onRequestAction = actions.roomMemberModeration.onRequest,
+                        onConfirmAction = actions.roomMemberModeration.onConfirm,
+                        onCancelAction = actions.roomMemberModeration.onCancel
                     )
                 )
             }
@@ -1630,6 +1686,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         searchQuery = memberState?.searchQuery.orEmpty(),
                         invitedMembers = emptyList(),
                         joinedMembers = memberState?.joinedMembers.orEmpty(),
+                        bannedMembers = emptyList(),
                         canInviteMembers = false,
                         isLoading = memberState?.isLoading ?: true,
                         errorMessage = roleError ?: memberState?.errorMessage,
@@ -2031,6 +2088,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.SessionSecurity -> "SessionSecurity"
             is AppRoute.RoomDetails -> "RoomDetails(${roomId.takeLast(10)})"
             is AppRoute.RoomMembers -> "RoomMembers(${roomId.takeLast(10)})"
+            is AppRoute.RoomMemberDetails ->
+                "RoomMemberDetails(${roomId.takeLast(10)},${userId.takeLast(10)})"
             is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
             is AppRoute.RoomRoleManagement ->
                 "RoomRoleManagement(${roomId.takeLast(10)})"

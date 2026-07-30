@@ -68,6 +68,10 @@ sealed interface AppRoute {
     data class RoomMembers(
         val roomId: String
     ) : AppRoute
+    data class RoomMemberDetails(
+        val roomId: String,
+        val userId: String
+    ) : AppRoute
     data class RoomPermissions(
         val roomId: String
     ) : AppRoute
@@ -123,6 +127,7 @@ data class AppNavState(
                 is AppRoute.RoomDetails -> topRoute.roomId
                 is AppRoute.EditRoomProfile -> topRoute.roomId
                 is AppRoute.RoomMembers -> topRoute.roomId
+                is AppRoute.RoomMemberDetails -> topRoute.roomId
                 is AppRoute.RoomPermissions -> topRoute.roomId
                 is AppRoute.RoomRoleManagement -> topRoute.roomId
                 is AppRoute.InviteRoomMembers -> topRoute.roomId
@@ -338,6 +343,27 @@ data class AppNavState(
         }
         val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
         return copy(chatsStack = chatsStack + AppRoute.EditRoomProfile(detailsRoute.roomId))
+    }
+
+    fun openRoomMemberDetails(userId: String): AppNavState {
+        if (
+            mode != AppNavMode.Main ||
+            selectedTab != AppTab.CHATS ||
+            userId.isBlank()
+        ) {
+            return this
+        }
+        val membersRoute = chatsStack.lastOrNull() as? AppRoute.RoomMembers ?: return this
+        val ownsRoom = chatsStack.any { route ->
+            route is AppRoute.RoomDetails && route.roomId == membersRoute.roomId
+        }
+        if (!ownsRoom) return this
+        return copy(
+            chatsStack = chatsStack + AppRoute.RoomMemberDetails(
+                roomId = membersRoute.roomId,
+                userId = userId
+            )
+        )
     }
 
     fun openRoomPermissions(): AppNavState {

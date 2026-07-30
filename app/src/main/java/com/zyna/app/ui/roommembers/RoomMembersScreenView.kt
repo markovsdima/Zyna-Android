@@ -42,6 +42,7 @@ internal data class RoomMembersScreenViewState(
     val searchQuery: String,
     val invitedMembers: List<MatrixRoomMember>,
     val joinedMembers: List<MatrixRoomMember>,
+    val bannedMembers: List<MatrixRoomMember>,
     val canInviteMembers: Boolean,
     val isLoading: Boolean,
     val errorMessage: String?,
@@ -144,7 +145,8 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
     }
     private val adapter = RoomMembersAdapter(
         invitedTitle = context.getString(R.string.room_members_invited_section),
-        joinedTitle = context.getString(R.string.room_members_joined_section)
+        joinedTitle = context.getString(R.string.room_members_joined_section),
+        bannedTitle = context.getString(R.string.room_members_banned_section)
     )
 
     init {
@@ -316,7 +318,8 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
             isApplyingSearchState = false
         }
 
-        val visibleCount = state.invitedMembers.size + state.joinedMembers.size
+        val visibleCount =
+            state.invitedMembers.size + state.joinedMembers.size + state.bannedMembers.size
         statusText.text = when {
             state.errorMessage != null -> state.errorMessage
             state.roleManagement?.isSaving == true ->
@@ -333,7 +336,8 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
 
         adapter.submitMembers(
             invited = state.invitedMembers,
-            joined = state.joinedMembers
+            joined = state.joinedMembers,
+            banned = state.bannedMembers
         )
         renderRoleConfirmation(state.roleManagement, actions)
     }
@@ -477,19 +481,24 @@ internal class RoomMembersScreenView(context: Context) : FrameLayout(context) {
 
 private class RoomMembersAdapter(
     invitedTitle: String,
-    joinedTitle: String
+    joinedTitle: String,
+    bannedTitle: String
 ) {
     private val invitedHeader = RoomMemberHeaderAdapter(invitedTitle)
     private val invitedMembers = RoomMemberListAdapter()
     private val joinedHeader = RoomMemberHeaderAdapter(joinedTitle)
     private val joinedMembers = RoomMemberListAdapter()
+    private val bannedHeader = RoomMemberHeaderAdapter(bannedTitle)
+    private val bannedMembers = RoomMemberListAdapter()
     private var submissionGeneration = 0L
 
     val recyclerAdapter = ConcatAdapter(
         invitedHeader,
         invitedMembers,
         joinedHeader,
-        joinedMembers
+        joinedMembers,
+        bannedHeader,
+        bannedMembers
     )
 
     var onMemberClick: ((MatrixRoomMember) -> Unit)? = null
@@ -497,6 +506,7 @@ private class RoomMembersAdapter(
             field = value
             invitedMembers.onMemberClick = value
             joinedMembers.onMemberClick = value
+            bannedMembers.onMemberClick = value
         }
 
     var roleManagement: RoomRoleManagementState? = null
@@ -506,9 +516,11 @@ private class RoomMembersAdapter(
             field = value
             invitedMembers.roleManagement = value
             joinedMembers.roleManagement = value
+            bannedMembers.roleManagement = value
             if (previousPresentation != value.toListPresentation()) {
                 invitedMembers.notifyRolePresentationChanged()
                 joinedMembers.notifyRolePresentationChanged()
+                bannedMembers.notifyRolePresentationChanged()
             }
         }
 
@@ -517,6 +529,7 @@ private class RoomMembersAdapter(
             field = value
             invitedMembers.matrixMediaLoader = value
             joinedMembers.matrixMediaLoader = value
+            bannedMembers.matrixMediaLoader = value
         }
 
     var palette: SettingsPalette? = null
@@ -526,35 +539,45 @@ private class RoomMembersAdapter(
             invitedMembers.palette = value
             joinedHeader.palette = value
             joinedMembers.palette = value
+            bannedHeader.palette = value
+            bannedMembers.palette = value
         }
 
     fun submitMembers(
         invited: List<MatrixRoomMember>,
-        joined: List<MatrixRoomMember>
+        joined: List<MatrixRoomMember>,
+        banned: List<MatrixRoomMember>
     ) {
         submissionGeneration += 1
         val generation = submissionGeneration
         var invitedCommitted = false
         var joinedCommitted = false
+        var bannedCommitted = false
 
-        fun updateHeadersAfterBothListsCommit() {
+        fun updateHeadersAfterAllListsCommit() {
             if (
                 generation == submissionGeneration &&
                 invitedCommitted &&
-                joinedCommitted
+                joinedCommitted &&
+                bannedCommitted
             ) {
                 invitedHeader.setVisible(invited.isNotEmpty())
                 joinedHeader.setVisible(invited.isNotEmpty() && joined.isNotEmpty())
+                bannedHeader.setVisible(banned.isNotEmpty())
             }
         }
 
         invitedMembers.submitList(invited) {
             invitedCommitted = true
-            updateHeadersAfterBothListsCommit()
+            updateHeadersAfterAllListsCommit()
         }
         joinedMembers.submitList(joined) {
             joinedCommitted = true
-            updateHeadersAfterBothListsCommit()
+            updateHeadersAfterAllListsCommit()
+        }
+        bannedMembers.submitList(banned) {
+            bannedCommitted = true
+            updateHeadersAfterAllListsCommit()
         }
     }
 
@@ -563,6 +586,8 @@ private class RoomMembersAdapter(
         invitedMembers.notifyDataSetChanged()
         joinedHeader.notifyAppearanceChanged()
         joinedMembers.notifyDataSetChanged()
+        bannedHeader.notifyAppearanceChanged()
+        bannedMembers.notifyDataSetChanged()
     }
 }
 
@@ -817,8 +842,15 @@ private class RoomMemberViewHolder(context: Context) : RecyclerView.ViewHolder(
     }
 
     private fun MatrixRoomMember.roleLabel(context: Context): String? {
-        if (membership == MatrixRoomMemberMembership.INVITED) {
-            return context.getString(R.string.room_member_invited)
+        when (membership) {
+            MatrixRoomMemberMembership.INVITED -> {
+                return context.getString(R.string.room_member_invited)
+            }
+            MatrixRoomMemberMembership.BANNED -> {
+                return context.getString(R.string.room_member_banned)
+            }
+            MatrixRoomMemberMembership.LEFT -> return null
+            MatrixRoomMemberMembership.JOINED -> Unit
         }
         return when (role) {
             MatrixRoomMemberRole.CREATOR -> {

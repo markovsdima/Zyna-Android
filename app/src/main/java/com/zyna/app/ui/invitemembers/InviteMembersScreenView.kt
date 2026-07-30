@@ -644,6 +644,10 @@ private class InviteMemberViewHolder(context: Context) : RecyclerView.ViewHolder
             MatrixRoomMemberMembership.INVITED -> {
                 itemView.context.getString(R.string.invite_members_already_invited)
             }
+            MatrixRoomMemberMembership.BANNED -> {
+                itemView.context.getString(R.string.invite_members_banned)
+            }
+            MatrixRoomMemberMembership.LEFT -> null
             null -> null
         }
         accessory.text = when {

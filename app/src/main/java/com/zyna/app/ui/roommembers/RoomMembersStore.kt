@@ -4,6 +4,7 @@ import androidx.annotation.MainThread
 import com.zyna.app.data.matrix.MatrixClientService
 import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberMembership
+import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -28,6 +29,7 @@ data class RoomMembersState(
     val searchQuery: String = "",
     val invitedMembers: List<MatrixRoomMember> = emptyList(),
     val joinedMembers: List<MatrixRoomMember> = emptyList(),
+    val bannedMembers: List<MatrixRoomMember> = emptyList(),
     val totalMemberCount: Int = 0,
     val isLoading: Boolean = false,
     val isRefreshing: Boolean = false,
@@ -69,6 +71,7 @@ internal class RoomMembersStore(
     private var allMembers: List<MatrixRoomMember> = emptyList()
     private var allInvitedMembers: List<MatrixRoomMember> = emptyList()
     private var allJoinedMembers: List<MatrixRoomMember> = emptyList()
+    private var allBannedMembers: List<MatrixRoomMember> = emptyList()
     private var hasPublishedSnapshot = false
     private var loadJob: Job? = null
     private var filterGeneration = 0L
@@ -195,12 +198,51 @@ internal class RoomMembersStore(
                 query = query,
                 visibleMembers = VisibleRoomMembers(
                     invited = allInvitedMembers,
-                    joined = allJoinedMembers
+                    joined = allJoinedMembers,
+                    banned = allBannedMembers
                 )
             )
         } else {
             scheduleFilter(query = query, debounceMillis = searchDebounceMillis)
         }
+    }
+
+    /**
+     * Applies a server-confirmed command immediately while the authoritative reload is in flight.
+     *
+     * This prevents a removed member from flashing in the previous section after navigation pops
+     * back. The normal server pass still runs and remains the final reconciliation source.
+     */
+    @MainThread
+    fun applyConfirmedModeration(
+        roomId: String,
+        userId: String,
+        action: MatrixRoomMemberModerationAction
+    ) {
+        val target = _state.value.target
+            ?.takeIf { it.roomId == roomId }
+            ?: return
+        val memberIndex = allMembers.indexOfFirst { member -> member.userId == userId }
+        if (memberIndex < 0) return
+        val updatedMembers = when (action) {
+            MatrixRoomMemberModerationAction.BAN -> {
+                allMembers.toMutableList().apply {
+                    this[memberIndex] = this[memberIndex].copy(
+                        membership = MatrixRoomMemberMembership.BANNED
+                    )
+                }
+            }
+            MatrixRoomMemberModerationAction.KICK,
+            MatrixRoomMemberModerationAction.UNBAN -> {
+                allMembers.toMutableList().apply { removeAt(memberIndex) }
+            }
+        }
+        applyMembers(
+            target = target,
+            prepared = prepareMembers(updatedMembers),
+            isAuthoritative = true,
+            isRefreshing = _state.value.isRefreshing
+        )
     }
 
     @MainThread
@@ -258,6 +300,12 @@ internal class RoomMembersStore(
             joinedMembers = if (retainSnapshot) {
                 previousState.joinedMembers.takeIf { retainsCurrentTarget }
                     ?: allJoinedMembers
+            } else {
+                emptyList()
+            },
+            bannedMembers = if (retainSnapshot) {
+                previousState.bannedMembers.takeIf { retainsCurrentTarget }
+                    ?: allBannedMembers
             } else {
                 emptyList()
             },
@@ -369,7 +417,8 @@ internal class RoomMembersStore(
                 query = query,
                 visibleMembers = VisibleRoomMembers(
                     invited = prepared.invited,
-                    joined = prepared.joined
+                    joined = prepared.joined,
+                    banned = prepared.banned
                 )
             )
         } else {
@@ -395,6 +444,7 @@ internal class RoomMembersStore(
             searchQuery = query,
             invitedMembers = visibleMembers.invited,
             joinedMembers = visibleMembers.joined,
+            bannedMembers = visibleMembers.banned,
             totalMemberCount = allMembers.size,
             isLoading = false
         )
@@ -434,13 +484,16 @@ internal class RoomMembersStore(
         allMembers = prepared.members
         allInvitedMembers = prepared.invited
         allJoinedMembers = prepared.joined
+        allBannedMembers = prepared.banned
     }
 
     private fun cachedSnapshotIsTrustworthy(
         members: List<MatrixRoomMember>,
         expectedJoinedCount: Long?
     ): Boolean {
-        val expected = expectedJoinedCount ?: return members.isNotEmpty()
+        val expected = expectedJoinedCount ?: return members.any {
+            it.membership == MatrixRoomMemberMembership.JOINED
+        }
         if (expected == 0L) {
             return true
         }
@@ -486,20 +539,23 @@ private data class RoomMembersSnapshot(
 private data class PreparedRoomMembers(
     val members: List<MatrixRoomMember>,
     val invited: List<MatrixRoomMember>,
-    val joined: List<MatrixRoomMember>
+    val joined: List<MatrixRoomMember>,
+    val banned: List<MatrixRoomMember>
 ) {
     companion object {
         val Empty = PreparedRoomMembers(
             members = emptyList(),
             invited = emptyList(),
-            joined = emptyList()
+            joined = emptyList(),
+            banned = emptyList()
         )
     }
 }
 
 private data class VisibleRoomMembers(
     val invited: List<MatrixRoomMember>,
-    val joined: List<MatrixRoomMember>
+    val joined: List<MatrixRoomMember>,
+    val banned: List<MatrixRoomMember>
 )
 
 private class RoomMembersSnapshotCache(
@@ -570,16 +626,20 @@ private fun prepareMembers(members: List<MatrixRoomMember>): PreparedRoomMembers
     val sorted = members.sortedWith(RoomMemberComparator)
     val invited = ArrayList<MatrixRoomMember>()
     val joined = ArrayList<MatrixRoomMember>()
+    val banned = ArrayList<MatrixRoomMember>()
     sorted.forEach { member ->
         when (member.membership) {
             MatrixRoomMemberMembership.INVITED -> invited += member
             MatrixRoomMemberMembership.JOINED -> joined += member
+            MatrixRoomMemberMembership.BANNED -> banned += member
+            MatrixRoomMemberMembership.LEFT -> Unit
         }
     }
     return PreparedRoomMembers(
         members = sorted,
         invited = invited,
-        joined = joined
+        joined = joined,
+        banned = banned
     )
 }
 
@@ -590,12 +650,13 @@ private suspend fun filterMembers(
     val normalizedQuery = query.trim()
     if (normalizedQuery.isEmpty()) {
         val prepared = prepareMembers(members)
-        return VisibleRoomMembers(prepared.invited, prepared.joined)
+        return VisibleRoomMembers(prepared.invited, prepared.joined, prepared.banned)
     }
 
     val coroutineContext = currentCoroutineContext()
     val invited = ArrayList<MatrixRoomMember>()
     val joined = ArrayList<MatrixRoomMember>()
+    val banned = ArrayList<MatrixRoomMember>()
     members.forEachIndexed { index, member ->
         if (index and FILTER_CANCELLATION_CHECK_MASK == 0) {
             coroutineContext.ensureActive()
@@ -606,10 +667,12 @@ private suspend fun filterMembers(
             when (member.membership) {
                 MatrixRoomMemberMembership.INVITED -> invited += member
                 MatrixRoomMemberMembership.JOINED -> joined += member
+                MatrixRoomMemberMembership.BANNED -> banned += member
+                MatrixRoomMemberMembership.LEFT -> Unit
             }
         }
     }
-    return VisibleRoomMembers(invited = invited, joined = joined)
+    return VisibleRoomMembers(invited = invited, joined = joined, banned = banned)
 }
 
 internal fun createRoomMembersStore(

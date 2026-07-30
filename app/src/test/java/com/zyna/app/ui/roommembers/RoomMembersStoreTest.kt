@@ -2,6 +2,7 @@ package com.zyna.app.ui.roommembers
 
 import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberMembership
+import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
 import com.zyna.app.data.matrix.MatrixRoomMemberRole
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CompletableDeferred
@@ -131,6 +132,73 @@ class RoomMembersStoreTest {
                     fixture.store.state.value.invitedMembers == listOf(invited)
             }
             assertEquals(4, fixture.store.state.value.totalMemberCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun bannedMembersHaveTheirOwnSearchableSection() = runBlocking {
+        val fixture = RoomMembersStoreFixture(coroutineContext)
+        val joined = member(USER_A, "Alice")
+        val banned = member(
+            userId = USER_B,
+            displayName = "Blocked Bob",
+            membership = MatrixRoomMemberMembership.BANNED
+        )
+        fixture.loadBehavior = { _, source ->
+            if (source == RoomMembersSource.CACHE) emptyList() else listOf(joined, banned)
+        }
+        try {
+            fixture.store.activate(RoomMembersTarget(USER_A, ROOM_A), expectedJoinedCount = 1)
+            awaitRoomMembersCondition { !fixture.store.state.value.isLoading }
+
+            assertEquals(listOf(joined), fixture.store.state.value.joinedMembers)
+            assertEquals(listOf(banned), fixture.store.state.value.bannedMembers)
+
+            fixture.store.setSearchQuery("blocked")
+            awaitRoomMembersCondition {
+                fixture.store.state.value.bannedMembers == listOf(banned) &&
+                    fixture.store.state.value.joinedMembers.isEmpty()
+            }
+            assertEquals(2, fixture.store.state.value.totalMemberCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun confirmedModerationUpdatesVisibleSectionsBeforeServerReconciliation() = runBlocking {
+        val fixture = RoomMembersStoreFixture(coroutineContext)
+        val alice = member(USER_A, "Alice")
+        val bob = member(USER_B, "Bob")
+        fixture.loadBehavior = { _, source ->
+            if (source == RoomMembersSource.CACHE) emptyList() else listOf(alice, bob)
+        }
+        try {
+            fixture.store.activate(RoomMembersTarget(USER_A, ROOM_A), expectedJoinedCount = 2)
+            awaitRoomMembersCondition { !fixture.store.state.value.isLoading }
+
+            fixture.store.applyConfirmedModeration(
+                roomId = ROOM_A,
+                userId = USER_B,
+                action = MatrixRoomMemberModerationAction.BAN
+            )
+
+            assertEquals(listOf(alice), fixture.store.state.value.joinedMembers)
+            assertEquals(
+                listOf(bob.copy(membership = MatrixRoomMemberMembership.BANNED)),
+                fixture.store.state.value.bannedMembers
+            )
+
+            fixture.store.applyConfirmedModeration(
+                roomId = ROOM_A,
+                userId = USER_B,
+                action = MatrixRoomMemberModerationAction.UNBAN
+            )
+
+            assertTrue(fixture.store.state.value.bannedMembers.isEmpty())
+            assertEquals(1, fixture.store.state.value.totalMemberCount)
         } finally {
             fixture.close()
         }

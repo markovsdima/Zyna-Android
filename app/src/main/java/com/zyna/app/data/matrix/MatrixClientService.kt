@@ -1073,6 +1073,57 @@ class MatrixClientService(
         } ?: error("Matrix room is not available")
     }
 
+    suspend fun loadRoomMemberModerationContext(
+        roomId: String,
+        targetUserId: String
+    ): MatrixRoomMemberModerationContext = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val ownUserId = activeClient.userId()
+        activeClient.getRoom(roomId)?.use { room ->
+            val roomInfo = room.roomInfo()
+            try {
+                val ownMember = room.member(ownUserId)
+                val targetMember = room.member(targetUserId)
+                val powerLevels = roomInfo.powerLevels
+                if (powerLevels != null) {
+                    powerLevels.toMatrixRoomMemberModerationContext(
+                        roomId = roomId,
+                        ownUserId = ownUserId,
+                        ownMember = ownMember,
+                        targetMember = targetMember
+                    )
+                } else {
+                    room.getPowerLevels().use { loadedPowerLevels ->
+                        loadedPowerLevels.toMatrixRoomMemberModerationContext(
+                            roomId = roomId,
+                            ownUserId = ownUserId,
+                            ownMember = ownMember,
+                            targetMember = targetMember
+                        )
+                    }
+                }
+            } finally {
+                roomInfo.destroy()
+            }
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun moderateRoomMember(
+        roomId: String,
+        userId: String,
+        action: MatrixRoomMemberModerationAction,
+        reason: String?
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            when (action) {
+                MatrixRoomMemberModerationAction.KICK -> room.kickUser(userId, reason)
+                MatrixRoomMemberModerationAction.BAN -> room.banUser(userId, reason)
+                MatrixRoomMemberModerationAction.UNBAN -> room.unbanUser(userId, reason)
+            }
+        } ?: error("Matrix room is not available")
+    }
+
     suspend fun canInviteRoomMembers(roomId: String): Boolean = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         activeClient.getRoom(roomId)?.use { room ->
@@ -2698,13 +2749,17 @@ class MatrixClientService(
         )
     }
 
-    private fun RustRoomMember.toMatrixRoomMemberOrNull(): MatrixRoomMember? {
+    private fun RustRoomMember.toMatrixRoomMemberOrNull(
+        includeLeft: Boolean = false
+    ): MatrixRoomMember? {
         val mappedMembership = when (membership) {
             MembershipState.Invite -> MatrixRoomMemberMembership.INVITED
             MembershipState.Join -> MatrixRoomMemberMembership.JOINED
-            MembershipState.Ban,
+            MembershipState.Ban -> MatrixRoomMemberMembership.BANNED
+            MembershipState.Leave -> {
+                if (includeLeft) MatrixRoomMemberMembership.LEFT else return null
+            }
             MembershipState.Knock,
-            MembershipState.Leave,
             is MembershipState.Custom -> return null
         }
         val mappedPowerLevel = when (val level = powerLevel) {
@@ -2743,6 +2798,27 @@ class MatrixClientService(
             targetPowerLevel = mappedTarget.powerLevel,
             targetMembership = mappedTarget.membership,
             targetRole = mappedTarget.role
+        )
+    }
+
+    private fun org.matrix.rustcomponents.sdk.RoomPowerLevels
+        .toMatrixRoomMemberModerationContext(
+            roomId: String,
+            ownUserId: String,
+            ownMember: RustRoomMember,
+            targetMember: RustRoomMember
+        ): MatrixRoomMemberModerationContext {
+        val mappedOwnMember = ownMember.toMatrixRoomMemberOrNull()
+            ?: error("The current user is not an active room member")
+        val mappedTarget = targetMember.toMatrixRoomMemberOrNull(includeLeft = true)
+            ?: error("The selected room membership is not supported")
+        return MatrixRoomMemberModerationContext(
+            roomId = roomId,
+            ownUserId = ownUserId,
+            ownPowerLevel = mappedOwnMember.powerLevel,
+            canKickMembers = canOwnUserKick(),
+            canBanMembers = canOwnUserBan(),
+            member = mappedTarget
         )
     }
 

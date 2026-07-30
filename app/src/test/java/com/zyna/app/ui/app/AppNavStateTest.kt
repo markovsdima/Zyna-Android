@@ -334,6 +334,58 @@ class AppNavStateTest {
     }
 
     @Test
+    fun memberDetailsPushesFromOwnedMembersAndKeepsRoomOwnersActive() {
+        val roomId = "!room:example.org"
+        val userId = "@alice:example.org"
+        val detailsRoute = AppRoute.RoomDetails(roomId)
+        val membersRoute = AppRoute.RoomMembers(roomId)
+        val memberRoute = AppRoute.RoomMemberDetails(roomId, userId)
+        val state = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+            .openRoomDetails()
+            .openRoomMembers()
+            .openRoomMemberDetails(userId)
+
+        assertEquals(
+            listOf(
+                AppRoute.Rooms,
+                AppRoute.Chat(roomId, "Room"),
+                detailsRoute,
+                membersRoute,
+                memberRoute
+            ),
+            state.visibleStack
+        )
+        assertEquals(detailsRoute, state.activeRoomDetailsRoute)
+        assertEquals(membersRoute, state.popActiveStack()?.top)
+        assertFalse(state.showsTabs)
+    }
+
+    @Test
+    fun memberDetailsRequiresOwnedTopMembersRouteAndNonBlankUser() {
+        val roomId = "!room:example.org"
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = roomId, displayName = "Room")
+        val detailsState = chatState.openRoomDetails()
+        val malformedMembersState = detailsState.copy(
+            chatsStack = detailsState.chatsStack + AppRoute.RoomMembers("!other:example.org")
+        )
+
+        assertEquals(chatState, chatState.openRoomMemberDetails("@alice:example.org"))
+        assertEquals(detailsState, detailsState.openRoomMemberDetails("@alice:example.org"))
+        assertEquals(
+            detailsState.openRoomMembers(),
+            detailsState.openRoomMembers().openRoomMemberDetails(" ")
+        )
+        assertEquals(
+            malformedMembersState,
+            malformedMembersState.openRoomMemberDetails("@alice:example.org")
+        )
+    }
+
+    @Test
     fun roomPermissionsOwnsDetailsAndCanOpenRoleManagement() {
         val roomId = "!room:example.org"
         val detailsRoute = AppRoute.RoomDetails(roomId)

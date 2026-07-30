@@ -2,7 +2,9 @@ package com.zyna.app.data.matrix
 
 enum class MatrixRoomMemberMembership {
     INVITED,
-    JOINED
+    JOINED,
+    BANNED,
+    LEFT
 }
 
 enum class MatrixRoomMemberRole {
@@ -27,4 +29,16 @@ data class MatrixRoomMember(
 ) {
     val displayNameOrUserId: String
         get() = displayName?.takeIf { it.isNotBlank() } ?: userId
+}
+
+internal fun canOwnUserActOnRoomMember(
+    ownUserId: String,
+    ownPowerLevel: Long,
+    targetUserId: String,
+    targetPowerLevel: Long,
+    targetRole: MatrixRoomMemberRole
+): Boolean {
+    return targetUserId != ownUserId &&
+        targetRole != MatrixRoomMemberRole.CREATOR &&
+        ownPowerLevel > targetPowerLevel
 }

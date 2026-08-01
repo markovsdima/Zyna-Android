@@ -193,6 +193,14 @@ The UI renders the cached flow. SDK synchronization writes the cache instead
 of publishing a competing in-memory list. This preserves one source of truth
 and supports fast startup.
 
+When the persisted session identity is known before the Matrix client has
+finished restoring, activate the cached projection during that restoration.
+Route activation may reveal a cache-backed screen only after its first cache
+emission; otherwise a durable cache still produces an avoidable empty frame.
+The inverse transition has the opposite ordering: publish a terminal or login
+route before awaiting feature teardown. Cancellation or closure of an SDK
+operation must not delay the shell transition that already hides its data.
+
 When an asynchronous database read would otherwise leave a route's first
 frame empty, the repository may keep a bounded in-memory mirror of durable
 snapshots. The mirror must be populated only from cache reads or successful
@@ -207,6 +215,47 @@ arrived. A partial refresh must not erase a more complete cached snapshot.
 Keep or merge the cached tail while pagination is incomplete, and allow a
 terminal snapshot to replace it atomically, including a legitimate terminal
 empty result.
+
+For the main room list, the Matrix SDK's ordered dynamic entries are the
+ordering authority. Apply their diffs serially and persist sparse order labels;
+do not rebuild or alphabetically/timestamp-sort a second list in app code.
+Preserve existing labels where their relative order is still valid so moving
+one room does not rewrite every shifted database row. A failed positional diff
+invalidates that SDK projection: stop publishing it and reopen a fresh dynamic
+list rather than applying later indexes to an uncertain base. Reopening is
+bounded by an exponential-backoff circuit breaker; a persistent SDK or mapping
+failure must leave the durable cache visible instead of creating an infinite
+retry loop. Explicitly known left or banned entries may be removed from a
+partial cached list immediately;
+absence alone remains authoritative only in a terminal snapshot.
+An opened circuit is presentation state, not a log-only condition: keep cached
+rooms visible and expose an explicit retry action.
+The SDK's maximum count describes the unfiltered source, so pagination
+completion must be based on consumed source positions even when left rooms are
+omitted from the rendered projection. Subscribe only the visible rooms plus a
+small prefetch window so their latest event and room info stay warm without
+expanding every sync into per-room FFI work. Viewport ownership must be scoped
+to a concrete screen instance: a hidden or detached screen may clear only its
+own subscription and must not override a newly revealed room-list consumer.
+List reordering follows the same ownership rule for scroll state: preserve an
+explicit room anchor only after the user has scrolled, while a viewport already
+at the top remains at position zero when the SDK moves rooms above old rows.
+
+The room-list repository may keep a session-scoped in-memory mirror containing
+a compact ordering projection. Seed it once from Room and update it only
+after successful transactions; this avoids rereading and sorting every cached
+room for each live diff without mirroring mutable room content. A rooms-table
+writer outside the authoritative snapshot transaction invalidates this mirror
+when it can add a row or change explicit ordering. Preview-only writes do not:
+a warm mirror contains explicit labels for every row, so timestamp and name
+fallback keys cannot affect its order. The SDK session tracks changed room IDs
+until the corresponding cache revision is acknowledged,
+so normal updates read and write only affected summaries. Provisional rooms
+created by navigation workflows may temporarily lead a partial list, but their
+retention must be time-bounded as well as reconciled by terminal snapshots.
+Expiry may delete only a room explicitly written by the create-room workflow;
+a room resolved by an existing-room or direct-message workflow merely loses
+its temporary leading status, regardless of whether it was already cached.
 
 For a derived list, readiness belongs to its upstream source. In particular,
 an early empty Spaces root update cannot remove cached roots until the SDK room

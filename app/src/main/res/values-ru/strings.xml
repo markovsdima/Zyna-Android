@@ -147,6 +147,9 @@
     <string name="common_retry">Повторить</string>
     <string name="common_skip">Пропустить</string>
     <string name="rooms_create_group">Новая</string>
+    <string name="rooms_loading">Загружаем чаты</string>
+    <string name="rooms_empty">Нет чатов</string>
+    <string name="rooms_update_error">Не удалось обновить чаты</string>
     <string name="create_group_title">Новая группа</string>
     <string name="create_group_create">Создать</string>
     <string name="create_group_name">Название группы</string>

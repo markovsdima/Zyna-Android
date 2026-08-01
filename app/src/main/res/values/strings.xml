@@ -186,6 +186,9 @@
     <string name="common_retry">Retry</string>
     <string name="common_skip">Skip</string>
     <string name="rooms_create_group">New</string>
+    <string name="rooms_loading">Loading chats</string>
+    <string name="rooms_empty">No chats</string>
+    <string name="rooms_update_error">Couldn’t update chats</string>
     <string name="create_group_title">New Group</string>
     <string name="create_group_create">Create</string>
     <string name="create_group_name">Group Name</string>

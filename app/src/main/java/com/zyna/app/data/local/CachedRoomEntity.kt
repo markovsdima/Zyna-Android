@@ -20,6 +20,7 @@ data class CachedRoomEntity(
     val unreadCount: Long,
     val unreadMentionCount: Long,
     val isMarkedUnread: Boolean,
+    val listPosition: Long? = null,
     val updatedAtMillis: Long,
     val detailsTopic: String? = null,
     val detailsJoinedMemberCount: Long? = null,

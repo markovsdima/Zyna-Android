@@ -58,7 +58,10 @@ class RoomDetailsCacheTest {
                     avatarUrl = details.avatarUrl,
                     unreadCount = 4
                 )
-            )
+            ),
+            updatedRoomIds = setOf(ROOM_ID),
+            excludedRoomIds = emptySet(),
+            isComplete = true
         )
 
         val refreshed = repository.observeRooms(USER_ID).first { rooms ->
@@ -76,7 +79,7 @@ class RoomDetailsCacheTest {
             avatarUrl = "mxc://example.org/summary-avatar",
             directUserId = DIRECT_USER_ID
         )
-        repository.cacheRoomSummary(USER_ID, summary)
+        repository.cacheResolvedRoomSummary(USER_ID, summary)
 
         val narrowerDetails = roomDetails(displayName = "RoomInfo name").copy(
             avatarUrl = null,
@@ -134,6 +137,38 @@ class RoomDetailsCacheTest {
         assertEquals(
             knownDetails.copy(topic = "Updated topic"),
             repository.observeRoomDetails(USER_ID, ROOM_ID).first { it != null }
+        )
+    }
+
+    @Test
+    fun provisionalRoomStaysAtTopUntilLiveRoomListIncludesIt() = runBlocking {
+        val first = MatrixRoomSummary("!first:example.org", "First", avatarUrl = null)
+        val second = MatrixRoomSummary("!second:example.org", "Second", avatarUrl = null)
+        val provisional = MatrixRoomSummary("!new:example.org", "New", avatarUrl = null)
+        repository.cacheRoomsSnapshot(
+            userId = USER_ID,
+            rooms = listOf(first, second),
+            updatedRoomIds = setOf(first.id, second.id),
+            excludedRoomIds = emptySet(),
+            isComplete = true
+        )
+
+        repository.cacheCreatedRoomSummary(USER_ID, provisional)
+        assertEquals(
+            listOf(provisional.id, first.id, second.id),
+            repository.observeRooms(USER_ID).first { it.size == 3 }.map(MatrixRoomSummary::id)
+        )
+
+        repository.cacheRoomsSnapshot(
+            userId = USER_ID,
+            rooms = listOf(first, second),
+            updatedRoomIds = emptySet(),
+            excludedRoomIds = emptySet(),
+            isComplete = false
+        )
+        assertEquals(
+            listOf(provisional.id, first.id, second.id),
+            repository.observeRooms(USER_ID).first { it.size == 3 }.map(MatrixRoomSummary::id)
         )
     }
 

@@ -45,6 +45,7 @@ import com.zyna.app.data.outgoing.PendingReactionState
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -129,7 +130,9 @@ private inline fun <reified T : Enum<T>> String?.toCachedEnumOrDefault(default: 
 
 internal data class PendingResolvedRoomSummary(
     val room: MatrixRoomSummary,
-    val remainingAbsentSnapshots: Int
+    val remainingAbsentSnapshots: Int,
+    val expiresAtMillis: Long = Long.MAX_VALUE,
+    val removeFromCacheOnExpiry: Boolean = false
 )
 
 internal data class MergedRoomSnapshot(
@@ -162,6 +165,25 @@ internal fun mergeRoomSnapshotWithPendingResolvedRooms(
     )
 }
 
+internal fun activePendingResolvedRooms(
+    pendingRooms: Map<String, PendingResolvedRoomSummary>,
+    nowMillis: Long
+): Map<String, PendingResolvedRoomSummary> {
+    return pendingRooms.filterValues { pending -> pending.expiresAtMillis > nowMillis }
+}
+
+internal fun expiredProvisionalRoomIds(
+    pendingCandidates: Map<String, PendingResolvedRoomSummary>,
+    activePendingRoomIds: Set<String>
+): Set<String> {
+    return pendingCandidates.asSequence()
+        .filter { (roomId, pending) ->
+            roomId !in activePendingRoomIds && pending.removeFromCacheOnExpiry
+        }
+        .map { (roomId, _) -> roomId }
+        .toSet()
+}
+
 private fun MatrixRoomSummary.toCachedRoomEntity(
     userId: String,
     existingRoom: CachedRoomEntity?,
@@ -182,6 +204,7 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         unreadCount = unreadCount,
         unreadMentionCount = unreadMentionCount,
         isMarkedUnread = isMarkedUnread,
+        listPosition = existingRoom?.listPosition,
         updatedAtMillis = updatedAtMillis,
         detailsTopic = if (roomDetails != null) roomDetails.topic else existingRoom?.detailsTopic,
         detailsJoinedMemberCount = roomDetails?.joinedMemberCount
@@ -217,6 +240,152 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
     )
 }
 
+private fun CachedRoomEntity.hasSameCachedContent(existing: CachedRoomEntity): Boolean {
+    return copy(
+        updatedAtMillis = existing.updatedAtMillis,
+        detailsUpdatedAtMillis = existing.detailsUpdatedAtMillis
+    ) == existing
+}
+
+private const val ROOM_LIST_POSITION_STRIDE = 1_048_576L
+private val CachedRoomListOrderComparator =
+    compareBy<CachedRoomListOrder> { it.listPosition == null }
+        .thenBy { it.listPosition ?: Long.MAX_VALUE }
+        .thenByDescending { it.lastMessageAtMillis }
+        .thenBy { it.displayName.lowercase(Locale.ROOT) }
+        .thenBy(CachedRoomListOrder::id)
+
+/**
+ * Assigns order-maintenance labels while preserving the largest already ordered subsequence.
+ * A one-room SDK move therefore updates one label in the common case instead of rewriting every
+ * shifted row. Exhausted integer gaps trigger a rare full relabel with fresh sparse positions.
+ */
+internal fun assignStableRoomListPositions(
+    ordered: List<CachedRoomListOrder>
+): List<CachedRoomListOrder> {
+    if (ordered.isEmpty()) return emptyList()
+    val anchors = longestIncreasingPositionSubsequence(ordered)
+    if (anchors.isEmpty()) return ordered.withFreshRoomListPositions()
+
+    val positions = LongArray(ordered.size)
+    anchors.forEach { index -> positions[index] = requireNotNull(ordered[index].listPosition) }
+    try {
+        val firstAnchor = anchors.first()
+        for (index in firstAnchor - 1 downTo 0) {
+            positions[index] = Math.subtractExact(
+                positions[index + 1],
+                ROOM_LIST_POSITION_STRIDE
+            )
+        }
+        anchors.zipWithNext().forEach { (leftIndex, rightIndex) ->
+            val missingCount = rightIndex - leftIndex - 1
+            if (missingCount == 0) return@forEach
+            val gap = Math.subtractExact(positions[rightIndex], positions[leftIndex])
+            val step = gap / (missingCount + 1L)
+            if (step < 1L) return ordered.withFreshRoomListPositions()
+            for (offset in 1..missingCount) {
+                positions[leftIndex + offset] = Math.addExact(
+                    positions[leftIndex],
+                    Math.multiplyExact(step, offset.toLong())
+                )
+            }
+        }
+        val lastAnchor = anchors.last()
+        for (index in lastAnchor + 1..ordered.lastIndex) {
+            positions[index] = Math.addExact(
+                positions[index - 1],
+                ROOM_LIST_POSITION_STRIDE
+            )
+        }
+    } catch (_: ArithmeticException) {
+        return ordered.withFreshRoomListPositions()
+    }
+    return ordered.mapIndexed { index, entity -> entity.copy(listPosition = positions[index]) }
+}
+
+private fun longestIncreasingPositionSubsequence(
+    rooms: List<CachedRoomListOrder>
+): List<Int> {
+    val tails = LongArray(rooms.size)
+    val tailRoomIndexes = IntArray(rooms.size)
+    val previousRoomIndexes = IntArray(rooms.size) { -1 }
+    var size = 0
+    rooms.forEachIndexed { roomIndex, room ->
+        val position = room.listPosition ?: return@forEachIndexed
+        var low = 0
+        var high = size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (tails[middle] < position) low = middle + 1 else high = middle
+        }
+        if (low > 0) previousRoomIndexes[roomIndex] = tailRoomIndexes[low - 1]
+        tails[low] = position
+        tailRoomIndexes[low] = roomIndex
+        if (low == size) size += 1
+    }
+    if (size == 0) return emptyList()
+
+    val result = IntArray(size)
+    var roomIndex = tailRoomIndexes[size - 1]
+    for (resultIndex in size - 1 downTo 0) {
+        result[resultIndex] = roomIndex
+        roomIndex = previousRoomIndexes[roomIndex]
+    }
+    return result.toList()
+}
+
+private fun List<CachedRoomListOrder>.withFreshRoomListPositions(): List<CachedRoomListOrder> {
+    return mapIndexed { index, entity ->
+        entity.copy(listPosition = index.toLong() * ROOM_LIST_POSITION_STRIDE)
+    }
+}
+
+internal fun reconcileCachedRoomListOrder(
+    liveRoomIds: List<String>,
+    existing: List<CachedRoomListOrder>,
+    retainedExtraRoomIds: List<String> = emptyList(),
+    excludedRoomIds: Set<String> = emptySet(),
+    isComplete: Boolean
+): List<CachedRoomListOrder> {
+    val liveIds = liveRoomIds.toHashSet()
+    val retainedIds = retainedExtraRoomIds.toHashSet()
+    val existingById = existing.associateBy(CachedRoomListOrder::id)
+    val cachedTail = if (isComplete) {
+        emptyList()
+    } else {
+        existing.filterNot { room ->
+            room.id in liveIds || room.id in retainedIds || room.id in excludedRoomIds
+        }
+    }
+    val orderedIds = (retainedExtraRoomIds + liveRoomIds + cachedTail.map { room -> room.id })
+        .filterNot(excludedRoomIds::contains)
+        .distinct()
+    if (
+        orderedIds.size == existing.size &&
+        existing.hasStrictlyIncreasingListPositions() &&
+        orderedIds.indices.all { index -> orderedIds[index] == existing[index].id }
+    ) {
+        return existing
+    }
+    return orderedIds
+        .map { roomId ->
+            existingById[roomId] ?: CachedRoomListOrder(id = roomId, listPosition = null)
+        }
+        .let(::assignStableRoomListPositions)
+}
+
+private fun List<CachedRoomListOrder>.hasStrictlyIncreasingListPositions(): Boolean {
+    var previous: Long? = null
+    forEach { room ->
+        val position = room.listPosition ?: return false
+        if (previous?.let { previousPosition -> position <= previousPosition } == true) {
+            return false
+        }
+        previous = position
+    }
+    return true
+}
+
 class LocalCacheRepository(
     private val database: ZynaDatabase,
     private val context: Context
@@ -227,14 +396,16 @@ class LocalCacheRepository(
     private val pendingReactionDao = database.pendingReactionDao()
     private val matrixRtcCallHistoryDao = database.matrixRtcCallHistoryDao()
     private val roomCacheWriteMutex = Mutex()
+    private val roomListOrderByUserId =
+        ConcurrentHashMap<String, List<CachedRoomListOrder>>()
     private val pendingResolvedRoomsByUserId =
         mutableMapOf<String, Map<String, PendingResolvedRoomSummary>>()
 
     fun observeRooms(userId: String): Flow<List<MatrixRoomSummary>> {
         return roomDao.observeRooms(userId).map { rooms ->
-            rooms.map { it.toRoomSummary() }
-                .sortedWith(RoomSummaryComparator)
-        }
+            rooms.sortedWith(CachedRoomComparator)
+                .map { it.toRoomSummary() }
+        }.flowOn(Dispatchers.Default)
     }
 
     fun observeRoomDetails(userId: String, roomId: String): Flow<MatrixRoomDetails?> {
@@ -308,6 +479,7 @@ class LocalCacheRepository(
                     )
                 }
             }
+            invalidateRoomListOrder(userId)
         }
     }
 
@@ -324,69 +496,211 @@ class LocalCacheRepository(
         }.flowOn(Dispatchers.Default)
     }
 
-    suspend fun cacheRoomSummary(userId: String, room: MatrixRoomSummary) {
+    suspend fun cacheCreatedRoomSummary(userId: String, room: MatrixRoomSummary) {
+        cacheRoomSummary(userId, room, removeFromCacheOnExpiry = true)
+    }
+
+    suspend fun cacheResolvedRoomSummary(userId: String, room: MatrixRoomSummary) {
+        cacheRoomSummary(userId, room, removeFromCacheOnExpiry = false)
+    }
+
+    private suspend fun cacheRoomSummary(
+        userId: String,
+        room: MatrixRoomSummary,
+        removeFromCacheOnExpiry: Boolean
+    ) {
         val now = System.currentTimeMillis()
         roomCacheWriteMutex.withLock {
             database.withTransaction {
                 val existingRoom = roomDao.roomSnapshot(userId = userId, roomId = room.id)
+                val provisionalPosition = existingRoom?.listPosition
+                    ?: roomDao.minimumListPosition(userId)
+                        ?.let { minimum ->
+                            runCatching {
+                                Math.subtractExact(minimum, ROOM_LIST_POSITION_STRIDE)
+                            }.getOrDefault(Long.MIN_VALUE)
+                        }
+                    ?: 0L
                 roomDao.upsertRooms(
                     listOf(
                         room.toCachedRoomEntity(
                             userId = userId,
                             existingRoom = existingRoom,
                             updatedAtMillis = now
-                        )
+                        ).copy(listPosition = provisionalPosition)
                     )
                 )
             }
-            pendingResolvedRoomsByUserId[userId] =
-                pendingResolvedRoomsByUserId[userId].orEmpty() +
-                (room.id to PendingResolvedRoomSummary(
+            invalidateRoomListOrder(userId)
+            val previousPending = pendingResolvedRoomsByUserId[userId].orEmpty()
+            pendingResolvedRoomsByUserId[userId] = buildMap {
+                put(room.id, PendingResolvedRoomSummary(
                     room = room,
-                    remainingAbsentSnapshots = RESOLVED_ROOM_ABSENT_SNAPSHOT_GRACE_COUNT
+                    remainingAbsentSnapshots = RESOLVED_ROOM_ABSENT_SNAPSHOT_GRACE_COUNT,
+                    expiresAtMillis = now + PENDING_RESOLVED_ROOM_RETENTION_MILLIS,
+                    removeFromCacheOnExpiry = removeFromCacheOnExpiry
                 ))
+                previousPending.forEach { (pendingRoomId, pendingRoom) ->
+                    if (pendingRoomId != room.id) put(pendingRoomId, pendingRoom)
+                }
+            }
         }
     }
 
-    suspend fun cacheRoomsSnapshot(userId: String, rooms: List<MatrixRoomSummary>) {
+    suspend fun cacheRoomsSnapshot(
+        userId: String,
+        rooms: List<MatrixRoomSummary>,
+        updatedRoomIds: Set<String>,
+        excludedRoomIds: Set<String>,
+        isComplete: Boolean
+    ) {
         val now = System.currentTimeMillis()
         roomCacheWriteMutex.withLock {
-            val mergedSnapshot = mergeRoomSnapshotWithPendingResolvedRooms(
-                authoritativeRooms = rooms,
-                pendingRooms = pendingResolvedRoomsByUserId[userId].orEmpty()
+            val pendingCandidates = pendingResolvedRoomsByUserId[userId]
+                .orEmpty()
+                .filterKeys { roomId -> roomId !in excludedRoomIds }
+            val pendingRooms = activePendingResolvedRooms(
+                pendingRooms = pendingCandidates,
+                nowMillis = now
             )
+            val expiredPendingRoomIds = expiredProvisionalRoomIds(
+                pendingCandidates = pendingCandidates,
+                activePendingRoomIds = pendingRooms.keys
+            )
+            var remainingPendingRooms: Map<String, PendingResolvedRoomSummary> = pendingRooms
+            var nextOrder: List<CachedRoomListOrder>? = null
             database.withTransaction {
-                val existingRoomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
-                roomDao.clearRooms(userId)
-                roomDao.upsertRooms(
-                    mergedSnapshot.rooms.map { room ->
-                        room.toCachedRoomEntity(
-                            userId = userId,
-                            existingRoom = existingRoomsById[room.id],
-                            updatedAtMillis = now
-                        )
+                val existingOrder = roomListOrderByUserId[userId]
+                    ?: roomDao.roomListOrderSnapshot(userId)
+                        .sortedWith(CachedRoomListOrderComparator)
+                val liveRooms = rooms
+                    .filterNot { room -> room.id in excludedRoomIds }
+                    .distinctBy(MatrixRoomSummary::id)
+                val liveRoomIds = liveRooms.map(MatrixRoomSummary::id)
+                val liveRoomIdSet = liveRoomIds.toHashSet()
+                val removedRoomIds = excludedRoomIds +
+                    expiredPendingRoomIds.filterNot(liveRoomIdSet::contains)
+                val retainedExtraSummaries = if (isComplete) {
+                    val mergedSnapshot = mergeRoomSnapshotWithPendingResolvedRooms(
+                        authoritativeRooms = liveRooms,
+                        pendingRooms = pendingRooms
+                    )
+                    remainingPendingRooms = mergedSnapshot.remainingPendingRooms
+                    mergedSnapshot.rooms.filterNot { room -> room.id in liveRoomIdSet }
+                } else {
+                    val absentPendingRooms = pendingRooms
+                        .filterKeys { roomId -> roomId !in liveRoomIdSet }
+                    remainingPendingRooms = absentPendingRooms
+                    absentPendingRooms.values
+                        .map(PendingResolvedRoomSummary::room)
+                }
+                val retainedExtraRoomIds = retainedExtraSummaries.map(MatrixRoomSummary::id)
+                val contentSummaries = liveRooms
+                    .filter { room -> room.id in updatedRoomIds } + retainedExtraSummaries
+                val existingRoomsById = roomSnapshotsByIds(
+                    userId = userId,
+                    roomIds = contentSummaries.map(MatrixRoomSummary::id)
+                ).associateBy(CachedRoomEntity::id)
+                val orderedRooms = reconcileCachedRoomListOrder(
+                    liveRoomIds = liveRoomIds,
+                    existing = existingOrder,
+                    retainedExtraRoomIds = retainedExtraRoomIds,
+                    excludedRoomIds = removedRoomIds,
+                    isComplete = isComplete
+                )
+                val positionsByRoomId = orderedRooms.associate { order ->
+                    order.id to requireNotNull(order.listPosition)
+                }
+                val targetIds = positionsByRoomId.keys
+                val deletedRoomIds = existingOrder.asSequence()
+                    .map(CachedRoomListOrder::id)
+                    .filter { roomId ->
+                        roomId in removedRoomIds || (isComplete && roomId !in targetIds)
                     }
-                )
-                val roomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
-                materializeMissingMatrixRtcTimelineRows(
-                    userId = userId,
-                    roomsById = roomsById,
-                    now = now,
-                    limit = CALL_TIMELINE_BACKFILL_BATCH_LIMIT
-                )
-                refreshMatrixRtcCallProjectionsForRoomState(
-                    userId = userId,
-                    roomsById = roomsById,
-                    now = now,
-                    limit = CALL_HISTORY_ROOM_REFRESH_LIMIT
-                )
+                    .toList()
+                deletedRoomIds.chunked(ROOM_DELETE_CHUNK_SIZE).forEach { roomIds ->
+                    roomDao.deleteRooms(userId, roomIds)
+                }
+
+                val contentEntities = contentSummaries.map { room ->
+                    room.toCachedRoomEntity(
+                        userId = userId,
+                        existingRoom = existingRoomsById[room.id],
+                        updatedAtMillis = now
+                    ).copy(listPosition = requireNotNull(positionsByRoomId[room.id]))
+                }
+                val contentIds = contentEntities.mapTo(mutableSetOf(), CachedRoomEntity::id)
+                val existingPositionsById = existingOrder.associate { order ->
+                    order.id to order.listPosition
+                }
+                val positionChanges = orderedRooms.mapNotNull { order ->
+                    val existingPosition = existingPositionsById[order.id]
+                    val nextPosition = requireNotNull(order.listPosition)
+                    if (order.id !in contentIds && existingPosition != nextPosition) {
+                        CachedRoomListPositionUpdate(userId, order.id, nextPosition)
+                    } else {
+                        null
+                    }
+                }
+                positionChanges.chunked(ROOM_POSITION_UPDATE_CHUNK_SIZE).forEach { changes ->
+                    roomDao.updateListPositions(changes)
+                }
+                val changedEntities = contentEntities.filter { entity ->
+                    val existing = existingRoomsById[entity.id]
+                    existing == null || !entity.hasSameCachedContent(existing)
+                }
+                if (changedEntities.isNotEmpty()) roomDao.upsertRooms(changedEntities)
+
+                val roomDirectnessChanged = deletedRoomIds.isNotEmpty() ||
+                    contentEntities.any { entity ->
+                        val existing = existingRoomsById[entity.id]
+                        existing == null || existing.directUserId != entity.directUserId
+                    }
+                if (roomDirectnessChanged) {
+                    val roomsById = roomDao.roomsSnapshot(userId).associateBy { it.id }
+                    materializeMissingMatrixRtcTimelineRows(
+                        userId = userId,
+                        roomsById = roomsById,
+                        now = now,
+                        limit = CALL_TIMELINE_BACKFILL_BATCH_LIMIT
+                    )
+                    refreshMatrixRtcCallProjectionsForRoomState(
+                        userId = userId,
+                        roomsById = roomsById,
+                        now = now,
+                        limit = CALL_HISTORY_ROOM_REFRESH_LIMIT
+                    )
+                }
+                nextOrder = orderedRooms
             }
-            if (mergedSnapshot.remainingPendingRooms.isEmpty()) {
-                pendingResolvedRoomsByUserId.remove(userId)
-            } else {
-                pendingResolvedRoomsByUserId[userId] = mergedSnapshot.remainingPendingRooms
-            }
+            roomListOrderByUserId[userId] = requireNotNull(nextOrder)
+            updatePendingResolvedRooms(userId, remainingPendingRooms)
         }
+    }
+
+    private suspend fun roomSnapshotsByIds(
+        userId: String,
+        roomIds: List<String>
+    ): List<CachedRoomEntity> {
+        return roomIds.distinct()
+            .chunked(ROOM_LOOKUP_CHUNK_SIZE)
+            .flatMap { ids -> roomDao.roomsSnapshotByIds(userId, ids) }
+    }
+
+    private fun updatePendingResolvedRooms(
+        userId: String,
+        remaining: Map<String, PendingResolvedRoomSummary>
+    ) {
+        if (remaining.isEmpty()) {
+            pendingResolvedRoomsByUserId.remove(userId)
+        } else {
+            pendingResolvedRoomsByUserId[userId] = remaining
+        }
+    }
+
+    /** Writers that may add a row or change explicit ordering invalidate the derived mirror. */
+    private fun invalidateRoomListOrder(userId: String) {
+        roomListOrderByUserId.remove(userId)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -2008,6 +2322,7 @@ class LocalCacheRepository(
                 matrixRtcCallHistoryDao.clearAllMemberships()
                 matrixRtcCallHistoryDao.clearAllCalls()
             }
+            roomListOrderByUserId.clear()
             pendingResolvedRoomsByUserId.clear()
         }
         cleanupOrphanOutgoingMediaFiles()
@@ -2522,6 +2837,9 @@ class LocalCacheRepository(
             lastOwnMessageStatus = latestMessage?.lastOwnMessageStatus()?.name,
             updatedAtMillis = updatedAtMillis
         )
+        // A warm order mirror is published only after every row has an explicit sparse label.
+        // Preview fields are fallback sort keys solely for rows that have no label, so this
+        // hot timeline write cannot change the order represented by a warm mirror.
     }
 
     private fun mergeTimelineWithOutgoing(
@@ -3530,7 +3848,9 @@ class LocalCacheRepository(
     }
 
     private companion object {
-        val RoomSummaryComparator = compareByDescending<MatrixRoomSummary> { it.lastMessageAtMillis }
+        val CachedRoomComparator = compareBy<CachedRoomEntity> { it.listPosition == null }
+            .thenBy { it.listPosition ?: Long.MAX_VALUE }
+            .thenByDescending { it.lastMessageAtMillis }
             .thenBy { it.displayName.lowercase(Locale.ROOT) }
             .thenBy { it.id }
 
@@ -3538,7 +3858,11 @@ class LocalCacheRepository(
         const val LOCAL_MESSAGE_ID_PATTERN = "$LOCAL_MESSAGE_ID_PREFIX%"
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
         const val ROOM_PREVIEW_CANDIDATE_LIMIT = 64
+        const val ROOM_DELETE_CHUNK_SIZE = 250
+        const val ROOM_LOOKUP_CHUNK_SIZE = 250
+        const val ROOM_POSITION_UPDATE_CHUNK_SIZE = 250
         const val RESOLVED_ROOM_ABSENT_SNAPSHOT_GRACE_COUNT = 1
+        const val PENDING_RESOLVED_ROOM_RETENTION_MILLIS = 2 * 60 * 1000L
         const val REDACTION_ID_QUERY_CHUNK_SIZE = 250
         const val DEDUPE_TIMESTAMP_TOLERANCE_MS = 50L
         const val REDACTED_MESSAGE_BODY = "Deleted message"

@@ -1185,6 +1185,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     state = RoomsScreenViewState(
                         rooms = visibleRooms,
                         isSynchronizing = roomList.isSynchronizing,
+                        hasSynchronizationError = roomList.hasSynchronizationError,
                         title = title,
                         showBack = onBack != null,
                         showCreateRoom = onBack == null,
@@ -1204,7 +1205,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             actions.rooms.onOpenRoom
                         },
                         onCreateRoom = actions.rooms.onCreateRoom.takeIf { onBack == null },
-                        onBack = onBack
+                        onBack = onBack,
+                        onRetrySynchronization = actions.rooms.onRetrySynchronization,
+                        onVisibleRoomsChanged = { roomIds ->
+                            actions.rooms.onVisibleRoomsChanged(entryKey, roomIds)
+                        },
+                        onVisibleRoomsInactive = {
+                            actions.rooms.onVisibleRoomsInactive(entryKey)
+                        }
                     )
                 )
                 ZynaPerfLog.end(updateStart, "root.roomsEntry.updateView") {
@@ -1902,7 +1910,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             MatrixClientState.LoggedOut,
                             is MatrixClientState.Error,
                             MatrixClientState.LoggingIn,
-                            MatrixClientState.RestoringSession -> null
+                            is MatrixClientState.RestoringSession -> null
                         },
                         roomSubtitle = PresenceText.label(
                             context = context,

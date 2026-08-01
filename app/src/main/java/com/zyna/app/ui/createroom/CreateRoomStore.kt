@@ -537,7 +537,7 @@ internal fun createCreateRoomStore(
             isAliasValid = matrixClientService::isRoomAliasValid,
             isAliasAvailable = matrixClientService::isRoomAliasAvailable,
             createGroup = matrixClientService::createGroup,
-            cacheCreatedRoom = localCacheRepository::cacheRoomSummary,
+            cacheCreatedRoom = localCacheRepository::cacheCreatedRoomSummary,
             deleteDraft = { path ->
                 path?.takeIf { it.isNotBlank() }?.let { localPath ->
                     runCatching { File(localPath).delete() }

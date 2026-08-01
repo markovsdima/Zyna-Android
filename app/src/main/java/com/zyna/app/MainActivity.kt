@@ -550,7 +550,10 @@ class MainActivity : AppCompatActivity() {
             rooms = RoomsFeatureActions(
                 onOpenRoom = appViewModel::openRoom,
                 onCreateRoom = appViewModel::openCreateRoom,
-                onForwardRoomSelected = appViewModel::selectForwardRoom
+                onForwardRoomSelected = appViewModel::selectForwardRoom,
+                onVisibleRoomsChanged = appViewModel::updateVisibleRooms,
+                onVisibleRoomsInactive = appViewModel::clearVisibleRooms,
+                onRetrySynchronization = appViewModel::retryRoomListSynchronization
             ),
             spaces = SpacesFeatureActions(
                 onOpenRoom = appViewModel::openSpaceChild,

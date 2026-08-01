@@ -2,8 +2,22 @@ package com.zyna.app.data.local
 
 import androidx.room.Dao
 import androidx.room.Query
+import androidx.room.Update
 import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
+
+data class CachedRoomListOrder(
+    val id: String,
+    val listPosition: Long?,
+    val lastMessageAtMillis: Long? = null,
+    val displayName: String = ""
+)
+
+data class CachedRoomListPositionUpdate(
+    val userId: String,
+    val id: String,
+    val listPosition: Long
+)
 
 @Dao
 interface CachedRoomDao {
@@ -13,8 +27,28 @@ interface CachedRoomDao {
     @Query("SELECT * FROM rooms WHERE userId = :userId")
     suspend fun roomsSnapshot(userId: String): List<CachedRoomEntity>
 
+    @Query(
+        """
+        SELECT id, listPosition, lastMessageAtMillis, displayName FROM rooms
+        WHERE userId = :userId
+        """
+    )
+    suspend fun roomListOrderSnapshot(userId: String): List<CachedRoomListOrder>
+
+    @Query("SELECT * FROM rooms WHERE userId = :userId AND id IN (:roomIds)")
+    suspend fun roomsSnapshotByIds(
+        userId: String,
+        roomIds: List<String>
+    ): List<CachedRoomEntity>
+
     @Query("SELECT * FROM rooms WHERE userId = :userId AND id = :roomId LIMIT 1")
     suspend fun roomSnapshot(userId: String, roomId: String): CachedRoomEntity?
+
+    @Query("SELECT MIN(listPosition) FROM rooms WHERE userId = :userId")
+    suspend fun minimumListPosition(userId: String): Long?
+
+    @Update(entity = CachedRoomEntity::class)
+    suspend fun updateListPositions(updates: List<CachedRoomListPositionUpdate>)
 
     @Query("SELECT * FROM rooms WHERE userId = :userId AND id = :roomId LIMIT 1")
     fun observeRoom(userId: String, roomId: String): Flow<CachedRoomEntity?>
@@ -83,8 +117,8 @@ interface CachedRoomDao {
         detailsUpdatedAtMillis: Long
     ): Int
 
-    @Query("DELETE FROM rooms WHERE userId = :userId")
-    suspend fun clearRooms(userId: String)
+    @Query("DELETE FROM rooms WHERE userId = :userId AND id IN (:roomIds)")
+    suspend fun deleteRooms(userId: String, roomIds: List<String>)
 
     @Query("DELETE FROM rooms")
     suspend fun clearAllRooms()

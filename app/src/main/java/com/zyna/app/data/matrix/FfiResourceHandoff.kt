@@ -12,7 +12,7 @@ import kotlinx.coroutines.withContext
  * before resumption. The pending reference keeps ownership here until that resumption succeeds.
  */
 internal suspend fun <T : Any> withFfiResourceHandoff(
-    release: (T) -> Unit,
+    release: suspend (T) -> Unit,
     acquire: suspend (own: (T) -> Unit) -> T
 ): T {
     val pending = AtomicReference<T?>()

@@ -40,6 +40,7 @@ import java.io.File
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
@@ -82,6 +83,7 @@ import org.matrix.rustcomponents.sdk.MessageFormat
 import org.matrix.rustcomponents.sdk.MessageContent
 import org.matrix.rustcomponents.sdk.MessageLikeEventContent
 import org.matrix.rustcomponents.sdk.MessageType
+import org.matrix.rustcomponents.sdk.Membership
 import org.matrix.rustcomponents.sdk.MembershipState
 import org.matrix.rustcomponents.sdk.MsgLikeContent
 import org.matrix.rustcomponents.sdk.MsgLikeKind
@@ -98,14 +100,9 @@ import org.matrix.rustcomponents.sdk.Room
 import org.matrix.rustcomponents.sdk.RoomInfo
 import org.matrix.rustcomponents.sdk.RoomInfoListener
 import org.matrix.rustcomponents.sdk.RoomHistoryVisibility
-import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
-import org.matrix.rustcomponents.sdk.RoomListEntriesListener
-import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
 import org.matrix.rustcomponents.sdk.RoomListLoadingState
 import org.matrix.rustcomponents.sdk.RoomListLoadingStateListener
 import org.matrix.rustcomponents.sdk.RoomListService
-import org.matrix.rustcomponents.sdk.RoomListServiceState
-import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
 import org.matrix.rustcomponents.sdk.RoomPreset
 import org.matrix.rustcomponents.sdk.RoomVisibility
 import org.matrix.rustcomponents.sdk.RtcCallIntent
@@ -146,7 +143,7 @@ import uniffi.matrix_sdk_ui.TimelineReadReceiptTracking
 
 sealed interface MatrixClientState {
     data object LoggedOut : MatrixClientState
-    data object RestoringSession : MatrixClientState
+    data class RestoringSession(val userId: String) : MatrixClientState
     data object LoggingIn : MatrixClientState
     data class LoggedIn(val userId: String) : MatrixClientState
     data class Syncing(val userId: String) : MatrixClientState
@@ -432,6 +429,8 @@ class MatrixClientService(
     private var client: Client? = null
     private var syncService: SyncService? = null
     private var roomListService: RoomListService? = null
+    private val roomListSessionsLock = Any()
+    private val activeRoomListSessions = mutableSetOf<SdkMatrixRoomListSession>()
     private var matrixRtcNotificationHandlerClient: Client? = null
     private val deliveredMatrixRtcNotificationIds = LinkedHashSet<String>()
     private val _incomingMatrixRtcCallNotifications =
@@ -505,6 +504,50 @@ class MatrixClientService(
         }
     }
 
+    /** Opens an ordered, paginated room-list boundary owned by the caller. */
+    internal suspend fun openRoomListSession(
+        userId: String
+    ): MatrixRoomListSession = withContext(Dispatchers.IO) {
+        withFfiResourceHandoff<SdkMatrixRoomListSession>(
+            release = SdkMatrixRoomListSession::close
+        ) { own ->
+            val service = synchronized(roomListSessionsLock) {
+                roomListService
+            } ?: error("Matrix room list service is not available")
+            check(activeMatrixUserId() == userId) {
+                "Matrix session changed while opening the room list"
+            }
+            val list = service.allRooms()
+            val session = try {
+                SdkMatrixRoomListSession(
+                    roomList = list,
+                    roomListService = service,
+                    roomEntryMapper = { room -> room.toRoomListEntry() },
+                    onClosed = { closed ->
+                        synchronized(roomListSessionsLock) {
+                            activeRoomListSessions.remove(closed)
+                        }
+                    }
+                )
+            } catch (error: Throwable) {
+                runCatching { list.destroy() }
+                throw error
+            }
+            own(session)
+            session.start()
+            val registered = synchronized(roomListSessionsLock) {
+                if (roomListService === service && activeMatrixUserId() == userId) {
+                    activeRoomListSessions += session
+                    true
+                } else {
+                    false
+                }
+            }
+            check(registered) { "Matrix session changed while opening the room list" }
+            session
+        }
+    }
+
     private suspend fun restoreSessionIfAvailableLocked() {
         if (client != null) {
             startSync()
@@ -519,7 +562,7 @@ class MatrixClientService(
             return
         }
 
-        _state.value = MatrixClientState.RestoringSession
+        _state.value = MatrixClientState.RestoringSession(session.userId)
         var restoredClient: Client? = null
         try {
             restoredClient = buildClient(session.homeserverUrl)
@@ -534,8 +577,7 @@ class MatrixClientService(
             restoredClient?.close()
             client = null
             matrixRtcNotificationHandlerClient = null
-            roomListService?.close()
-            roomListService = null
+            closeRoomListResources()
             syncService = null
             _state.value = MatrixClientState.Error(error.displayMessage())
         }
@@ -566,8 +608,7 @@ class MatrixClientService(
             loginClient?.close()
             client = null
             matrixRtcNotificationHandlerClient = null
-            roomListService?.close()
-            roomListService = null
+            closeRoomListResources()
             syncService = null
             clearStoredMatrixState()
             _state.value = MatrixClientState.Error(error.displayMessage())
@@ -576,8 +617,7 @@ class MatrixClientService(
 
     private suspend fun resetClientForFreshLogin() {
         sessionSecurityService.detach()
-        roomListService?.close()
-        roomListService = null
+        closeRoomListResources()
         syncService?.stop()
         syncService?.close()
         syncService = null
@@ -594,9 +634,8 @@ class MatrixClientService(
         val activeClient = client
         runCatching { sessionSecurityService.detach() }
             .onFailure { Log.w(TAG, "Failed to detach session security during logout", it) }
-        runCatching { roomListService?.close() }
+        runCatching { closeRoomListResources() }
             .onFailure { Log.w(TAG, "Failed to close room list during logout", it) }
-        roomListService = null
         runCatching { syncService?.stop() }
             .onFailure { Log.w(TAG, "Failed to stop sync during logout", it) }
         runCatching { syncService?.close() }
@@ -1012,17 +1051,6 @@ class MatrixClientService(
         }
     }
 
-    suspend fun roomsSnapshot(): List<MatrixRoomSummary> = withContext(Dispatchers.IO) {
-        client?.rooms()
-            ?.map { room ->
-                room.use { activeRoom ->
-                    activeRoom.toRoomSummary()
-                }
-            }
-            ?.sortedBy { it.displayName.lowercase() }
-            ?: emptyList()
-    }
-
     suspend fun loadRoomMembers(
         roomId: String,
         useCachedSnapshot: Boolean
@@ -1340,47 +1368,6 @@ class MatrixClientService(
             room.inviteUserById(normalizedUserId)
         } ?: error("Matrix room is not available")
     }
-
-    fun roomListChangeSignals(): Flow<Unit> = callbackFlow {
-        val service = roomListService
-        if (service == null) {
-            close(IllegalStateException("Matrix room list service is not ready"))
-            return@callbackFlow
-        }
-
-        val stateListenerHandle = service.state(
-            object : RoomListServiceStateListener {
-                override fun onUpdate(state: RoomListServiceState) {
-                    if (state == RoomListServiceState.RUNNING) {
-                        trySendBlocking(Unit)
-                    }
-                }
-            }
-        )
-        val roomList = service.allRooms()
-        val entriesListener = object : RoomListEntriesListener {
-            override fun onUpdate(roomEntriesUpdate: List<RoomListEntriesUpdate>) {
-                trySendBlocking(Unit)
-                roomEntriesUpdate.forEach { it.destroy() }
-            }
-        }
-        val entriesResult = roomList.entriesWithDynamicAdapters(
-            pageSize = ROOM_LIST_LIVE_PAGE_SIZE.toUInt(),
-            listener = entriesListener
-        )
-        val entriesController = entriesResult.controller()
-        entriesController.setFilter(RoomListEntriesDynamicFilterKind.NonLeft)
-        trySend(Unit)
-
-        awaitClose {
-            entriesResult.entriesStream().cancelAndDestroy()
-            entriesController.destroy()
-            entriesResult.destroy()
-            roomList.destroy()
-            stateListenerHandle.cancelAndDestroy()
-        }
-    }.buffer(Channel.CONFLATED)
-        .flowOn(Dispatchers.IO)
 
     /**
      * Reports when the SDK room list has an authoritative loaded snapshot.
@@ -2706,30 +2693,82 @@ class MatrixClientService(
     }
 
     private suspend fun Room.toRoomSummary(): MatrixRoomSummary {
+        val roomId = id()
         val roomInfo = runCatching { roomInfo() }.getOrNull()
         try {
-            val latestPreview = latestEvent().toRoomPreview()
-            val details = roomInfo?.toMatrixRoomDetails(resolveCapabilities = false)
-            return MatrixRoomSummary(
-                id = id(),
-                displayName = displayName()
-                    ?.takeIf { it.isNotBlank() }
-                    ?: roomInfo?.displayName?.takeIf { it.isNotBlank() }
-                    ?: id(),
-                avatarUrl = avatarUrl() ?: roomInfo?.avatarUrl,
-                directUserId = roomInfo?.directUserId(),
-                isSpace = roomInfo?.isSpace == true,
-                lastMessageText = latestPreview.body,
-                lastMessageSenderName = latestPreview.senderName,
-                lastMessageAtMillis = latestPreview.timestampMillis,
-                lastOwnMessageStatus = resolveLastOwnMessageStatus(latestPreview),
-                unreadCount = roomInfo?.numUnreadMessages?.toLong() ?: 0,
-                unreadMentionCount = roomInfo?.numUnreadMentions?.toLong() ?: 0,
-                isMarkedUnread = roomInfo?.isMarkedUnread ?: false,
-                roomDetails = details
+            return toRoomSummary(roomId = roomId, roomInfo = roomInfo)
+        } finally {
+            roomInfo?.destroy()
+        }
+    }
+
+    private suspend fun Room.toRoomListEntry(): MatrixRoomListEntry {
+        val roomId = id()
+        val roomInfo = runCatching { roomInfo() }.getOrNull()
+        try {
+            val isVisible = roomInfo?.membership != Membership.LEFT &&
+                roomInfo?.membership != Membership.BANNED
+            return MatrixRoomListEntry(
+                id = roomId,
+                room = if (isVisible) {
+                    toRoomSummary(roomId = roomId, roomInfo = roomInfo)
+                } else {
+                    null
+                }
             )
         } finally {
             roomInfo?.destroy()
+        }
+    }
+
+    private suspend fun Room.toRoomSummary(
+        roomId: String,
+        roomInfo: RoomInfo?
+    ): MatrixRoomSummary {
+        // A single room with temporarily unreadable presentation data must not invalidate the
+        // positional SDK list. Preserve the entry and let the cache retain richer older fields.
+        val latestPreview = readRoomListField(roomId, "latest event") {
+            latestEvent().toRoomPreview()
+        } ?: MatrixRoomPreview()
+        val sdkDisplayName = readRoomListField(roomId, "display name") { displayName() }
+        val sdkAvatarUrl = readRoomListField(roomId, "avatar") { avatarUrl() }
+        val details = roomInfo?.let { info ->
+            readRoomListField(roomId, "room info") {
+                info.toMatrixRoomDetails(resolveCapabilities = false)
+            }
+        }
+        return MatrixRoomSummary(
+            id = roomId,
+            displayName = sdkDisplayName
+                ?.takeIf { it.isNotBlank() }
+                ?: roomInfo?.displayName?.takeIf { it.isNotBlank() }
+                ?: roomId,
+            avatarUrl = sdkAvatarUrl ?: roomInfo?.avatarUrl,
+            directUserId = roomInfo?.directUserId(),
+            isSpace = roomInfo?.isSpace == true,
+            lastMessageText = latestPreview.body,
+            lastMessageSenderName = latestPreview.senderName,
+            lastMessageAtMillis = latestPreview.timestampMillis,
+            lastOwnMessageStatus = resolveLastOwnMessageStatus(latestPreview),
+            unreadCount = roomInfo?.numUnreadMessages?.toLong() ?: 0,
+            unreadMentionCount = roomInfo?.numUnreadMentions?.toLong() ?: 0,
+            isMarkedUnread = roomInfo?.isMarkedUnread ?: false,
+            roomDetails = details
+        )
+    }
+
+    private suspend fun <T> readRoomListField(
+        roomId: String,
+        field: String,
+        read: suspend () -> T
+    ): T? {
+        return try {
+            read()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            Log.w(TAG, "Failed to read room-list $field for $roomId", error)
+            null
         }
     }
 
@@ -3498,11 +3537,35 @@ class MatrixClientService(
         }
         val roomList = service.roomListService()
         syncService = service
-        roomListService = roomList
+        synchronized(roomListSessionsLock) {
+            roomListService = roomList
+        }
         registerMatrixRtcNotificationHandler(activeClient)
         service.start()
         _state.value = MatrixClientState.Syncing(activeClient.userId())
         registerPushPusher(activeClient)
+    }
+
+    private fun activeMatrixUserId(): String? {
+        return when (val current = state.value) {
+            is MatrixClientState.LoggedIn -> current.userId
+            is MatrixClientState.Syncing -> current.userId
+            else -> null
+        }
+    }
+
+    private suspend fun closeRoomListResources() {
+        val resources = synchronized(roomListSessionsLock) {
+            val sessions = activeRoomListSessions.toList()
+            activeRoomListSessions.clear()
+            val service = roomListService
+            roomListService = null
+            sessions to service
+        }
+        withContext(NonCancellable + Dispatchers.IO) {
+            resources.first.forEach { session -> runCatching { session.close() } }
+            resources.second?.close()
+        }
     }
 
     private suspend fun registerPushPusher(activeClient: Client) {
@@ -3613,7 +3676,6 @@ class MatrixClientService(
         const val TIMELINE_INTERACTIVE_BACKFILL_PAGES = 3
         const val TIMELINE_EMIT_COALESCE_MS = 50L
         const val TIMELINE_UPDATE_TIMEOUT_MS = 2_000L
-        const val ROOM_LIST_LIVE_PAGE_SIZE = 512
         const val ROOM_MEMBERS_CHUNK_SIZE = 512
         const val MAX_REACTION_RELATION_PAGES = 20
         const val TRANSACTION_ID_CONTENT_KEY = "com.zyna.client_txn_id"

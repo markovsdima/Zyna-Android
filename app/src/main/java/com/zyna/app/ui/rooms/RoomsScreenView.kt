@@ -28,7 +28,6 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
-import androidx.recyclerview.widget.SimpleItemAnimator
 import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
@@ -48,6 +47,7 @@ import kotlin.math.roundToInt
 data class RoomsScreenViewState(
     val rooms: List<MatrixRoomSummary>,
     val isSynchronizing: Boolean,
+    val hasSynchronizationError: Boolean,
     val title: String,
     val showBack: Boolean,
     val showCreateRoom: Boolean,
@@ -65,7 +65,10 @@ data class RoomsScrollAnchor(
 data class RoomsScreenViewActions(
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onCreateRoom: (() -> Unit)?,
-    val onBack: (() -> Unit)?
+    val onBack: (() -> Unit)?,
+    val onRetrySynchronization: () -> Unit,
+    val onVisibleRoomsChanged: (List<String>) -> Unit,
+    val onVisibleRoomsInactive: () -> Unit
 )
 
 class RoomsScreenView(context: Context) : FrameLayout(context) {
@@ -108,14 +111,43 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         isClickable = true
         isFocusable = true
     }
+    private val retrySynchronizationButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        text = context.getString(R.string.common_retry)
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+        isClickable = true
+        isFocusable = true
+        updatePadding(left = dp(12), right = dp(12), top = dp(8), bottom = dp(8))
+    }
+    private val synchronizationErrorBar = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        updatePadding(left = dp(20), right = dp(8), top = dp(5), bottom = dp(5))
+        addView(
+            TextView(context).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                text = context.getString(R.string.rooms_update_error)
+                textSize = 14f
+                tag = SYNCHRONIZATION_ERROR_TEXT_TAG
+            },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        addView(
+            retrySynchronizationButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+    }
     private val contentFrame = FrameLayout(context)
     private val recyclerView = RecyclerView(context).apply {
         layoutManager = LinearLayoutManager(context)
         clipToPadding = false
         setHasFixedSize(true)
-        itemAnimator?.let { animator ->
-            (animator as? SimpleItemAnimator)?.supportsChangeAnimations = false
-        }
+        itemAnimator = null
     }
     private val emptyView = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -124,6 +156,9 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
     private val adapter = RoomsAdapter(palette)
     private var consumedInitialScrollAnchor: RoomsScrollAnchor? = null
+    private var latestActions: RoomsScreenViewActions? = null
+    private var lastReportedVisibleRoomIds: List<String>? = null
+    private var lastReportedVisibleRange: Pair<Int, Int>? = null
 
     init {
         setBackgroundColor(palette.background)
@@ -165,6 +200,13 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         root.addView(
+            synchronizationErrorBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(
             contentFrame,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -173,6 +215,13 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         recyclerView.adapter = adapter
+        recyclerView.addOnScrollListener(
+            object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    dispatchVisibleRooms()
+                }
+            }
+        )
         contentFrame.addView(
             recyclerView,
             LayoutParams(
@@ -209,8 +258,25 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     override fun onDetachedFromWindow() {
+        latestActions?.onVisibleRoomsInactive?.invoke()
+        lastReportedVisibleRoomIds = null
+        lastReportedVisibleRange = null
         adapter.cancelAvatarLoads()
         super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (changedView !== this) return
+        if (visibility == View.VISIBLE) {
+            post { dispatchVisibleRooms(force = true) }
+        } else {
+            latestActions?.onVisibleRoomsInactive?.invoke()
+            // The store has released this screen's viewport ownership. Forget the local
+            // delivery snapshot as well, so the same visible rows reclaim it on return.
+            lastReportedVisibleRoomIds = null
+            lastReportedVisibleRange = null
+        }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration?) {
@@ -219,24 +285,39 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     fun render(state: RoomsScreenViewState, actions: RoomsScreenViewActions) {
+        latestActions = actions
         updateThemeIfNeeded(force = false)
         val renderStart = ZynaPerfLog.start()
         val pendingInitialScrollAnchor = state.initialScrollAnchor
             ?.takeUnless { it == consumedInitialScrollAnchor }
         val listMutationScrollAnchor = pendingInitialScrollAnchor
             ?: captureScrollAnchorForListMutation()
+        val shouldKeepListAtTop = pendingInitialScrollAnchor == null &&
+            state.rooms.isNotEmpty() &&
+            recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE &&
+            isListAtTop()
         titleText.text = state.title
         backButton.visibility = if (state.showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { actions.onBack?.invoke() }
         createRoomButton.visibility = if (state.showCreateRoom) View.VISIBLE else View.GONE
         createRoomButton.setOnClickListener { actions.onCreateRoom?.invoke() }
+        retrySynchronizationButton.setOnClickListener { actions.onRetrySynchronization() }
+        synchronizationErrorBar.visibility = if (state.hasSynchronizationError) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
         recyclerView.setPadding(
             recyclerView.paddingLeft,
             recyclerView.paddingTop,
             recyclerView.paddingRight,
             state.bottomContentPaddingPx
         )
-        emptyView.text = if (state.isSynchronizing) "Loading chats" else "No chats"
+        emptyView.text = when {
+            state.isSynchronizing -> context.getString(R.string.rooms_loading)
+            state.hasSynchronizationError -> ""
+            else -> context.getString(R.string.rooms_empty)
+        }
         emptyView.visibility = if (state.rooms.isEmpty()) View.VISIBLE else View.GONE
         recyclerView.visibility = if (state.rooms.isEmpty()) View.GONE else View.VISIBLE
 
@@ -250,19 +331,65 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         adapter.setMatrixMediaLoader(state.matrixMediaLoader)
         adapter.setPresenceStatuses(state.presenceByUserId)
         adapter.submitList(state.rooms) {
+            var didRestoreScrollAnchor = false
             if (listMutationScrollAnchor != null) {
-                val didRestore = restoreScrollAnchor(listMutationScrollAnchor, state.rooms)
+                didRestoreScrollAnchor = restoreScrollAnchor(listMutationScrollAnchor, state.rooms)
                 if (pendingInitialScrollAnchor != null) {
-                    val userStartedScrolling = recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE
-                    if (didRestore || userStartedScrolling) {
+                    val userStartedScrolling =
+                        recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE
+                    if (didRestoreScrollAnchor || userStartedScrolling) {
                         consumedInitialScrollAnchor = pendingInitialScrollAnchor
                     }
                 }
             }
+            val shouldFallbackInvalidInitialAnchor =
+                pendingInitialScrollAnchor != null && !didRestoreScrollAnchor
+            val canAdjustScrollAfterCommit =
+                recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE
+            if (
+                canAdjustScrollAfterCommit &&
+                (shouldKeepListAtTop || shouldFallbackInvalidInitialAnchor)
+            ) {
+                (recyclerView.layoutManager as? LinearLayoutManager)
+                    ?.scrollToPositionWithOffset(0, recyclerView.paddingTop)
+                if (pendingInitialScrollAnchor != null) {
+                    consumedInitialScrollAnchor = pendingInitialScrollAnchor
+                }
+            }
+            recyclerView.post { dispatchVisibleRooms(force = true) }
         }
         ZynaPerfLog.end(renderStart, "roomsView.render") {
             "title=${state.title} rooms=${state.rooms.size} " +
                 "synchronizing=${state.isSynchronizing}"
+        }
+    }
+
+    private fun dispatchVisibleRooms(force: Boolean = false) {
+        val actions = latestActions ?: return
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return
+        val firstVisible = layoutManager.findFirstVisibleItemPosition()
+        val lastVisible = layoutManager.findLastVisibleItemPosition()
+        val visibleRange = firstVisible to lastVisible
+        if (!force && visibleRange == lastReportedVisibleRange) return
+        lastReportedVisibleRange = visibleRange
+        val roomIds = if (
+            firstVisible == RecyclerView.NO_POSITION ||
+            lastVisible == RecyclerView.NO_POSITION
+        ) {
+            emptyList()
+        } else {
+            val fromIndex = (firstVisible - VISIBLE_PREFETCH_BEFORE).coerceAtLeast(0)
+            val toIndex = (lastVisible + VISIBLE_PREFETCH_AFTER)
+                .coerceAtMost(adapter.currentList.lastIndex)
+            if (fromIndex > toIndex) {
+                emptyList()
+            } else {
+                (fromIndex..toIndex).mapNotNull { index -> adapter.currentList.getOrNull(index)?.id }
+            }
+        }
+        if (lastReportedVisibleRoomIds != roomIds) {
+            lastReportedVisibleRoomIds = roomIds
+            actions.onVisibleRoomsChanged(roomIds)
         }
     }
 
@@ -296,6 +423,10 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.actionText)
         createRoomButton.setTextColor(palette.actionText)
+        retrySynchronizationButton.setTextColor(palette.actionText)
+        synchronizationErrorBar.setBackgroundColor(palette.secondaryBackground)
+        synchronizationErrorBar.findViewWithTag<TextView>(SYNCHRONIZATION_ERROR_TEXT_TAG)
+            ?.setTextColor(palette.secondaryText)
         titleText.setTextColor(palette.titleText)
         emptyView.setTextColor(palette.secondaryText)
         adapter.setPalette(palette)
@@ -316,6 +447,15 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             return null
         }
         return captureScrollAnchor()
+    }
+
+    private fun isListAtTop(): Boolean {
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return true
+        val position = layoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) return adapter.currentList.isEmpty()
+        if (position != 0) return false
+        val child = layoutManager.findViewByPosition(position) ?: return false
+        return child.top >= recyclerView.paddingTop
     }
 
     private fun restoreScrollAnchor(anchor: RoomsScrollAnchor, rooms: List<MatrixRoomSummary>): Boolean {
@@ -339,6 +479,9 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     private companion object {
+        const val SYNCHRONIZATION_ERROR_TEXT_TAG = "rooms-sync-error-text"
+        const val VISIBLE_PREFETCH_BEFORE = 4
+        const val VISIBLE_PREFETCH_AFTER = 20
         const val TOP_BAR_HEIGHT_DP = 64
     }
 }
@@ -1039,6 +1182,7 @@ private fun List<Any>.roomRowPayloadOrNull(): RoomRowPayload? {
 
 private data class RoomsPalette(
     val background: Int,
+    val secondaryBackground: Int,
     val titleText: Int,
     val secondaryText: Int,
     val actionText: Int,
@@ -1057,6 +1201,7 @@ private data class RoomsPalette(
             return if (isDarkTheme) {
                 RoomsPalette(
                     background = Color.rgb(18, 18, 22),
+                    secondaryBackground = Color.rgb(30, 29, 34),
                     titleText = Color.rgb(232, 225, 229),
                     secondaryText = Color.rgb(202, 196, 208),
                     actionText = Color.rgb(208, 188, 255),
@@ -1073,6 +1218,7 @@ private data class RoomsPalette(
             } else {
                 RoomsPalette(
                     background = Color.WHITE,
+                    secondaryBackground = Color.rgb(247, 242, 248),
                     titleText = Color.rgb(29, 27, 32),
                     secondaryText = Color.rgb(73, 69, 79),
                     actionText = Color.rgb(33, 0, 93),

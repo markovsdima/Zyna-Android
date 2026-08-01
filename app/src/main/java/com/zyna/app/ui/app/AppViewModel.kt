@@ -47,6 +47,7 @@ import com.zyna.app.ui.chat.ChatMessageActionRequest
 import com.zyna.app.ui.chat.ChatMessageActionResult
 import com.zyna.app.ui.chat.ChatMessageActionTarget
 import com.zyna.app.ui.chat.ChatReadReceiptCoordinator
+import com.zyna.app.ui.chat.ChatRouteRevealCoordinator
 import com.zyna.app.ui.chat.ChatTimelineNavigationRequest
 import com.zyna.app.ui.chat.ChatTimelineState
 import com.zyna.app.ui.chat.ChatTimelineTarget
@@ -350,6 +351,7 @@ class AppViewModel(
         onNavigationError = ::failChatTimelineNavigation,
         onNavigationTrace = ::logTeleport
     )
+    private val chatRouteRevealCoordinator = ChatRouteRevealCoordinator(viewModelScope)
     val chatTimelineState: StateFlow<ChatTimelineState> = chatTimelineStore.state
     private val chatReadReceiptCoordinator = ChatReadReceiptCoordinator(
         scope = viewModelScope,
@@ -455,6 +457,7 @@ class AppViewModel(
             matrixClientService.state.collect { matrixState ->
                 val previousUserId = _uiState.value.matrixState.userIdOrNull()
                 val nextUserId = matrixState.userIdOrNull()
+                val restoringUserId = (matrixState as? MatrixClientState.RestoringSession)?.userId
                 presenceRepository.setSessionContext(
                     userId = nextUserId,
                     allowed = nextUserId != null &&
@@ -468,6 +471,51 @@ class AppViewModel(
                 val shouldClearSessionData = nextUserId == null || didChangeUser
                 val shouldClearChat = shouldClearSessionData ||
                     matrixState is MatrixClientState.Error
+                val publishMatrixState = {
+                    _uiState.update { current ->
+                        val nextNavState = navStateForState(
+                            matrixState,
+                            if (didChangeUser) AppNavState() else current.navState,
+                            current.sessionSecurity
+                        )
+
+                        current.copy(
+                            matrixState = matrixState,
+                            presenceByUserId = if (shouldClearSessionData) {
+                                emptyMap()
+                            } else {
+                                current.presenceByUserId
+                            },
+                            pendingNativeMatrixRtcCallLaunch =
+                                if (shouldClearSessionData || shouldClearChat) {
+                                    null
+                                } else {
+                                    current.pendingNativeMatrixRtcCallLaunch
+                                },
+                            isLoggingOut = if (shouldClearSessionData) {
+                                false
+                            } else {
+                                current.isLoggingOut
+                            },
+                            logoutErrorMessage = if (shouldClearSessionData) {
+                                null
+                            } else {
+                                current.logoutErrorMessage
+                            },
+                            logoutConfirmation = if (shouldClearSessionData) {
+                                null
+                            } else {
+                                current.logoutConfirmation
+                            }
+                        ).withNavigationState(nextNavState)
+                    }
+                }
+                val publishedBeforeTeardown = nextUserId == null
+                if (publishedBeforeTeardown) {
+                    // Terminal/login states have no cache-backed destination to gate. Reveal
+                    // them before awaiting cancellation of potentially blocking SDK operations.
+                    publishMatrixState()
+                }
                 if (
                     nextUserId == null ||
                     didChangeUser ||
@@ -505,45 +553,23 @@ class AppViewModel(
                     shouldClearChat -> chatComposerStore.deactivateRoom()
                 }
 
-                _uiState.update { current ->
-                    val nextNavState = navStateForState(
-                        matrixState,
-                        if (didChangeUser) AppNavState() else current.navState,
-                        current.sessionSecurity
-                    )
-
-                    current.copy(
-                        matrixState = matrixState,
-                        presenceByUserId = if (shouldClearSessionData) {
-                            emptyMap()
-                        } else {
-                            current.presenceByUserId
-                        },
-                        pendingNativeMatrixRtcCallLaunch = if (shouldClearSessionData || shouldClearChat) {
-                            null
-                        } else {
-                            current.pendingNativeMatrixRtcCallLaunch
-                        },
-                        isLoggingOut = if (shouldClearSessionData) false else current.isLoggingOut,
-                        logoutErrorMessage = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.logoutErrorMessage
-                        },
-                        logoutConfirmation = if (shouldClearSessionData) {
-                            null
-                        } else {
-                            current.logoutConfirmation
-                        }
-                    ).withNavigationState(nextNavState)
-                }
-
                 if (nextUserId == null || didChangeUser || matrixState is MatrixClientState.Error) {
                     contactsStore.clear()
                 }
+                val cachedRoomListUserId = nextUserId ?: restoringUserId
+                if (cachedRoomListUserId != null) {
+                    roomListStore.activate(cachedRoomListUserId)
+                }
+                if (matrixClientService.state.value != matrixState) {
+                    return@collect
+                }
+                if (restoringUserId == null && !publishedBeforeTeardown) {
+                    // Room has now published its first cache result, so an active session cannot
+                    // reveal an empty Chats screen before its durable data is available.
+                    publishMatrixState()
+                }
 
                 if (nextUserId != null) {
-                    roomListStore.activate(nextUserId)
                     callHistoryStore.activate(nextUserId)
                     ownProfileStore.activate(nextUserId)
                     if (previousUserId != nextUserId) {
@@ -803,6 +829,18 @@ class AppViewModel(
         spaceChildrenStore.loadMore()
     }
 
+    fun updateVisibleRooms(ownerId: String, roomIds: List<String>) {
+        roomListStore.updateVisibleRooms(ownerId, roomIds)
+    }
+
+    fun clearVisibleRooms(ownerId: String) {
+        roomListStore.clearVisibleRooms(ownerId)
+    }
+
+    fun retryRoomListSynchronization() {
+        roomListStore.retrySynchronization()
+    }
+
     fun retrySpaceChildren() {
         spaceChildrenStore.retry()
     }
@@ -855,11 +893,13 @@ class AppViewModel(
         room: MatrixRoomSummary,
         forwardTarget: MatrixForwardTarget?,
         initialEventId: String? = null,
-        preserveSpaceContext: Boolean = false
+        preserveSpaceContext: Boolean = false,
+        onOpened: (() -> Unit)? = null
     ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         directRoomActionCoordinator.cancel()
         val isReplacingUserProfile = _uiState.value.route is AppRoute.UserProfile
+        val sourceNavigationState = _uiState.value.navState
         val requestStart = ZynaPerfLog.start()
         ZynaPerfLog.mark {
             "openRoom.request roomId=${room.id} name=${room.displayName} " +
@@ -874,38 +914,68 @@ class AppViewModel(
             "roomId=${room.id}"
         }
 
-        val routeUpdateStart = ZynaPerfLog.start()
         val timelineTarget = ChatTimelineTarget(userId = userId, roomId = room.id)
-        if (_uiState.value.matrixState.userIdOrNull() == userId) {
+        var didRevealChat = false
+        fun revealChatIfOwned(): Boolean {
+            if (didRevealChat) {
+                return _uiState.value.isRouteForRoom(userId, room.id)
+            }
+            val current = _uiState.value
+            if (
+                current.matrixState.userIdOrNull() != userId ||
+                current.navState != sourceNavigationState
+            ) {
+                return false
+            }
             chatComposerStore.enterRoom(
                 target = ChatComposerSendTarget(userId = userId, roomId = room.id),
                 forwardTarget = forwardTarget
             )
-        }
-        _uiState.update {
-            if (it.matrixState.userIdOrNull() != userId) {
-                it
-            } else {
-                it.enterChatLoadingState(
-                    userId = userId,
-                    room = room,
-                    preserveSpaceContext = preserveSpaceContext
-                )
+            _uiState.update { state ->
+                if (
+                    state.matrixState.userIdOrNull() != userId ||
+                    state.navState != sourceNavigationState
+                ) {
+                    state
+                } else {
+                    state.enterChatLoadingState(
+                        userId = userId,
+                        room = room,
+                        preserveSpaceContext = preserveSpaceContext
+                    )
+                }
             }
-        }
-        if (_uiState.value.isRouteForRoom(userId, room.id)) {
+            if (!_uiState.value.isRouteForRoom(userId, room.id)) {
+                chatComposerStore.deactivateRoom()
+                return false
+            }
+            didRevealChat = true
             if (isReplacingUserProfile) {
                 userProfileStore.clear()
-            }
-            chatTimelineStore.open(timelineTarget) {
-                initialEventId?.let(::jumpToChatEvent)
             }
             chatCallInfoCoordinator.activate(
                 ChatCallInfoTarget(userId = userId, roomId = room.id)
             )
+            return true
         }
-        ZynaPerfLog.end(routeUpdateStart, "openRoom.routeUpdate") {
-            "roomId=${room.id}"
+        val revealRequestId = chatRouteRevealCoordinator.begin(
+            reveal = ::revealChatIfOwned,
+            onAbandoned = chatTimelineStore::deactivate
+        )
+        chatTimelineStore.open(
+            target = timelineTarget,
+            onActivated = onActivated@{
+                if (!chatRouteRevealCoordinator.ready(revealRequestId)) return@onActivated
+                initialEventId?.let(::jumpToChatEvent)
+                onOpened?.invoke()
+                ZynaPerfLog.mark {
+                    "openRoom.cacheReadyAndRouted roomId=${room.id} " +
+                        "messages=${chatTimelineStore.state.value.messages.size}"
+                }
+            }
+        )
+        ZynaPerfLog.mark {
+            "openRoom.bootstrapScheduled roomId=${room.id}"
         }
     }
 
@@ -1565,25 +1635,30 @@ class AppViewModel(
         if (!canDeliverDirectRoomAction(result.request)) {
             return
         }
-        openRoom(result.room)
-        if (result.request.intent != DirectRoomActionIntent.START_CALL) {
-            return
-        }
-        _uiState.update { current ->
-            if (current.matrixState.userIdOrNull() != result.request.sessionUserId ||
-                current.activeChatRoute?.roomId != result.room.id
-            ) {
-                current
-            } else {
-                current.copy(
-                    pendingNativeMatrixRtcCallLaunch = PendingNativeMatrixRtcCallLaunch(
-                        requestId = nextPendingNativeMatrixRtcCallLaunchId(),
-                        roomId = result.room.id,
-                        roomName = result.room.displayName
-                    )
-                )
+        openRoom(
+            room = result.room,
+            forwardTarget = null,
+            onOpened = {
+                if (result.request.intent == DirectRoomActionIntent.START_CALL) {
+                    _uiState.update { current ->
+                        if (
+                            current.matrixState.userIdOrNull() != result.request.sessionUserId ||
+                            current.activeChatRoute?.roomId != result.room.id
+                        ) {
+                            current
+                        } else {
+                            current.copy(
+                                pendingNativeMatrixRtcCallLaunch = PendingNativeMatrixRtcCallLaunch(
+                                    requestId = nextPendingNativeMatrixRtcCallLaunchId(),
+                                    roomId = result.room.id,
+                                    roomName = result.room.displayName
+                                )
+                            )
+                        }
+                    }
+                }
             }
-        }
+        )
     }
 
     private fun openCallHistoryRoom(
@@ -1595,25 +1670,29 @@ class AppViewModel(
         }
         val activeUserId = _uiState.value.matrixState.userIdOrNull() ?: return
         val room = callHistoryRoomSummary(item)
-        openRoom(room)
-
-        _uiState.update { current ->
-            if (current.matrixState.userIdOrNull() != activeUserId) {
-                current
-            } else {
-                current.copy(
-                    pendingNativeMatrixRtcCallLaunch = if (startCall) {
-                        PendingNativeMatrixRtcCallLaunch(
-                            requestId = nextPendingNativeMatrixRtcCallLaunchId(),
-                            roomId = room.id,
-                            roomName = room.displayName
-                        )
+        openRoom(
+            room = room,
+            forwardTarget = null,
+            onOpened = {
+                _uiState.update { current ->
+                    if (current.matrixState.userIdOrNull() != activeUserId) {
+                        current
                     } else {
-                        current.pendingNativeMatrixRtcCallLaunch
+                        current.copy(
+                            pendingNativeMatrixRtcCallLaunch = if (startCall) {
+                                PendingNativeMatrixRtcCallLaunch(
+                                    requestId = nextPendingNativeMatrixRtcCallLaunchId(),
+                                    roomId = room.id,
+                                    roomName = room.displayName
+                                )
+                            } else {
+                                current.pendingNativeMatrixRtcCallLaunch
+                            }
+                        )
                     }
-                )
+                }
             }
-        }
+        )
     }
 
     private fun callHistoryRoomSummary(item: MatrixRtcCallHistoryItem): MatrixRoomSummary {
@@ -2073,7 +2152,7 @@ class AppViewModel(
                 )
             }
             MatrixClientState.LoggingIn,
-            MatrixClientState.RestoringSession -> currentNavState
+            is MatrixClientState.RestoringSession -> currentNavState
         }
     }
 
@@ -2115,6 +2194,7 @@ class AppViewModel(
     }
 
     private fun stopChatTimeline() {
+        chatRouteRevealCoordinator.cancel()
         chatTimelineStore.deactivate()
         chatCallInfoCoordinator.clear()
         chatReadReceiptCoordinator.reset()
@@ -2667,7 +2747,7 @@ class AppViewModel(
             MatrixClientState.LoggedOut,
             is MatrixClientState.Error,
             MatrixClientState.LoggingIn,
-            MatrixClientState.RestoringSession -> null
+            is MatrixClientState.RestoringSession -> null
         }
     }
 

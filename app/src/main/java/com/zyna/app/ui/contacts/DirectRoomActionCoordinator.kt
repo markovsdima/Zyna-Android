@@ -214,7 +214,7 @@ internal fun createDirectRoomActionCoordinator(
                     )
                 }
             },
-            cacheRoom = localCacheRepository::cacheRoomSummary
+            cacheRoom = localCacheRepository::cacheResolvedRoomSummary
         ),
         canDeliver = canDeliver,
         onResolved = onResolved,

@@ -80,6 +80,7 @@ import com.zyna.app.ui.navigation.ZynaRenderDependencies
 import com.zyna.app.ui.navigation.ZynaRootActions
 import com.zyna.app.ui.navigation.ZynaRootHostView
 import com.zyna.app.ui.navigation.ZynaRootPreferences
+import com.zyna.app.ui.navigation.SpacesFeatureActions
 import com.zyna.app.ui.photo.PhotoMessageEditor
 import com.zyna.app.ui.profile.ProfileAvatarCropCoordinator
 import com.zyna.app.ui.profile.ProfileAvatarCropError
@@ -91,6 +92,7 @@ import com.zyna.app.ui.profile.ProfileFeatureState
 import com.zyna.app.ui.roomdetails.RoomFeatureState
 import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
 import com.zyna.app.ui.rooms.RoomListState
+import com.zyna.app.ui.spaces.SpaceFeatureState
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 import java.io.File
@@ -106,13 +108,15 @@ class MainActivity : AppCompatActivity() {
     private data class AppFeatureInput(
         val state: AppUiState,
         val roomList: RoomListState,
-        val room: RoomFeatureState
+        val room: RoomFeatureState,
+        val spaces: SpaceFeatureState
     )
 
     private data class RootFeatureInput(
         val state: AppUiState,
         val roomList: RoomListState,
         val room: RoomFeatureState,
+        val spaces: SpaceFeatureState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -123,6 +127,7 @@ class MainActivity : AppCompatActivity() {
         val state: AppUiState,
         val roomList: RoomListState,
         val room: RoomFeatureState,
+        val spaces: SpaceFeatureState,
         val contacts: ContactsFeatureState,
         val profile: ProfileFeatureState,
         val callHistory: CallHistoryState,
@@ -186,7 +191,9 @@ class MainActivity : AppCompatActivity() {
             this,
             AppViewModelFactory(
                 matrixClientService = appContainer.matrixClientService,
+                matrixSpaceService = appContainer.matrixSpaceService,
                 localCacheRepository = appContainer.localCacheRepository,
+                spaceCacheRepository = appContainer.spaceCacheRepository,
                 outgoingOutboxService = appContainer.outgoingOutboxService,
                 matrixMediaLoader = appContainer.matrixMediaLoader,
                 presenceRepository = appContainer.presenceRepository,
@@ -401,12 +408,19 @@ class MainActivity : AppCompatActivity() {
                                     permissions = permissions,
                                     roles = roles
                                 )
+                            },
+                            combine(
+                                appViewModel.spaceRootsState,
+                                appViewModel.spaceChildrenState
+                            ) { roots, children ->
+                                SpaceFeatureState(roots = roots, children = children)
                             }
-                        ) { state, roomList, room ->
+                        ) { state, roomList, room, spaces ->
                             AppFeatureInput(
                                 state = state,
                                 roomList = roomList,
-                                room = room
+                                room = room,
+                                spaces = spaces
                             )
                         },
                         combine(
@@ -441,6 +455,7 @@ class MainActivity : AppCompatActivity() {
                             state = app.state,
                             roomList = app.roomList,
                             room = app.room,
+                            spaces = app.spaces,
                             contacts = contacts,
                             profile = profile,
                             callHistory = callHistory,
@@ -455,6 +470,7 @@ class MainActivity : AppCompatActivity() {
                         state = feature.state,
                         roomList = feature.roomList,
                         room = feature.room,
+                        spaces = feature.spaces,
                         contacts = feature.contacts,
                         profile = feature.profile,
                         callHistory = feature.callHistory,
@@ -482,6 +498,7 @@ class MainActivity : AppCompatActivity() {
                         state = state,
                         roomList = input.roomList,
                         room = input.room,
+                        spaces = input.spaces,
                         contacts = input.contacts,
                         profile = input.profile,
                         callHistory = input.callHistory,
@@ -534,6 +551,12 @@ class MainActivity : AppCompatActivity() {
                 onOpenRoom = appViewModel::openRoom,
                 onCreateRoom = appViewModel::openCreateRoom,
                 onForwardRoomSelected = appViewModel::selectForwardRoom
+            ),
+            spaces = SpacesFeatureActions(
+                onOpenRoom = appViewModel::openSpaceChild,
+                onLoadMore = appViewModel::loadMoreSpaceChildren,
+                onRetry = appViewModel::retrySpaceChildren,
+                onOpenDetails = appViewModel::openRoomDetails
             ),
             createRoom = CreateRoomActions(
                 onNameChanged = appViewModel::setCreateRoomName,
@@ -1490,6 +1513,8 @@ private fun AppRoute.perfName(): String {
         is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
         is AppRoute.InviteCreatedRoomMembers ->
             "InviteCreatedRoomMembers(${roomId.takeLast(10)})"
+        is AppRoute.Space ->
+            "Space(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
         AppRoute.CreateRoom -> "CreateRoom"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"

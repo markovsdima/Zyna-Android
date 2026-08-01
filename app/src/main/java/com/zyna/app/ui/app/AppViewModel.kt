@@ -9,6 +9,7 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryItem
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
+import com.zyna.app.data.local.SpaceCacheRepository
 import com.zyna.app.data.local.TimelineWindowUpdate
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixChatMessage
@@ -23,6 +24,11 @@ import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
 import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixSpaceJoinRule
+import com.zyna.app.data.matrix.MatrixSpaceMembership
+import com.zyna.app.data.matrix.MatrixSpaceRoom
+import com.zyna.app.data.matrix.MatrixSpaceRoomKind
+import com.zyna.app.data.matrix.MatrixSpaceService
 import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
@@ -93,6 +99,11 @@ import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
 import com.zyna.app.ui.roomprofile.createRoomProfileEditorStore
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
+import com.zyna.app.ui.spaces.SpaceChildrenState
+import com.zyna.app.ui.spaces.SpaceTarget
+import com.zyna.app.ui.spaces.SpaceRootsState
+import com.zyna.app.ui.spaces.createSpaceChildrenStore
+import com.zyna.app.ui.spaces.createSpaceRootsStore
 import com.zyna.app.util.ZynaPerfLog
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -101,6 +112,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -183,7 +195,9 @@ internal fun AppUiState.withNavigationState(nextNavState: AppNavState): AppUiSta
 
 class AppViewModel(
     private val matrixClientService: MatrixClientService,
+    private val matrixSpaceService: MatrixSpaceService,
     private val localCacheRepository: LocalCacheRepository,
+    private val spaceCacheRepository: SpaceCacheRepository,
     private val outgoingOutboxService: OutgoingOutboxService,
     private val matrixMediaLoader: MatrixMediaLoader,
     private val presenceRepository: PresenceRepository,
@@ -249,6 +263,20 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomListState: StateFlow<RoomListState> = roomListStore.state
+    private val spaceRootsStore = createSpaceRootsStore(
+        scope = viewModelScope,
+        matrixSpaceService = matrixSpaceService,
+        cacheRepository = spaceCacheRepository,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val spaceRootsState: StateFlow<SpaceRootsState> = spaceRootsStore.state
+    private val spaceChildrenStore = createSpaceChildrenStore(
+        scope = viewModelScope,
+        matrixSpaceService = matrixSpaceService,
+        cacheRepository = spaceCacheRepository,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val spaceChildrenState: StateFlow<SpaceChildrenState> = spaceChildrenStore.state
     private val createRoomStore = createCreateRoomStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -374,6 +402,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeSpaceRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeRoomProfileEditorOwner()
         }
 
@@ -442,6 +474,9 @@ class AppViewModel(
                     matrixState is MatrixClientState.Error
                 ) {
                     roomListStore.deactivate()
+                    spaceRootsStore.deactivate()
+                    spaceChildrenStore.deactivate()
+                    matrixSpaceService.deactivate()
                     roomDetailsStore.deactivate()
                     roomProfileEditorStore.deactivate()
                     createRoomStore.deactivate()
@@ -511,6 +546,16 @@ class AppViewModel(
                     roomListStore.activate(nextUserId)
                     callHistoryStore.activate(nextUserId)
                     ownProfileStore.activate(nextUserId)
+                    if (previousUserId != nextUserId) {
+                        try {
+                            spaceCacheRepository.warmSession(nextUserId)
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            Log.w(TAG, "Failed to warm Spaces cache", error)
+                        }
+                    }
+                    spaceRootsStore.activate(nextUserId)
                 }
 
                 if (matrixState is MatrixClientState.Syncing) {
@@ -520,6 +565,7 @@ class AppViewModel(
                         _uiState.value.sessionSecurity.gateComplete
                     ) {
                         roomListStore.enableReactiveSynchronization(userId)
+                        enableSpacesLive(userId)
                     }
                 }
             }
@@ -575,6 +621,7 @@ class AppViewModel(
                     )
                     if (becameGateComplete && matrixState is MatrixClientState.Syncing) {
                         roomListStore.enableReactiveSynchronization(userId)
+                        enableSpacesLive(userId)
                     }
                 }
             }
@@ -704,7 +751,60 @@ class AppViewModel(
     }
 
     fun openRoom(room: MatrixRoomSummary) {
+        if (room.kind == MatrixRoomKind.SPACE) {
+            openSpace(
+                MatrixSpaceRoom(
+                    roomId = room.id,
+                    displayName = room.displayName,
+                    avatarUrl = room.avatarUrl,
+                    topic = room.roomDetails?.topic,
+                    kind = MatrixSpaceRoomKind.SPACE,
+                    membership = MatrixSpaceMembership.JOINED,
+                    joinedMemberCount = room.roomDetails?.joinedMemberCount ?: 0L,
+                    childrenCount = 0L,
+                    canonicalAlias = room.roomDetails?.canonicalAlias,
+                    joinRule = MatrixSpaceJoinRule.UNKNOWN,
+                    worldReadable = null,
+                    guestCanJoin = false,
+                    isDirect = false,
+                    isDm = false,
+                    via = emptyList()
+                ),
+                parentSpaceId = null
+            )
+            return
+        }
         openRoom(room, forwardTarget = null)
+    }
+
+    fun openSpaceChild(room: MatrixSpaceRoom) {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.Space ?: return
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val children = spaceChildrenStore.state.value
+        val currentChild = children.joinedChildForOpen(
+            userId = userId,
+            spaceId = route.spaceId,
+            parentSpaceId = route.parentSpaceId,
+            childRoomId = room.roomId
+        ) ?: return
+        if (currentChild.kind == MatrixSpaceRoomKind.SPACE) {
+            openSpace(currentChild, parentSpaceId = route.spaceId)
+        } else {
+            openRoom(
+                room = currentChild.toJoinedRoomSummary(),
+                forwardTarget = null,
+                preserveSpaceContext = true
+            )
+        }
+    }
+
+    fun loadMoreSpaceChildren() {
+        spaceChildrenStore.loadMore()
+    }
+
+    fun retrySpaceChildren() {
+        spaceChildrenStore.retry()
     }
 
     fun handleExternalRoute(command: ExternalRouteCommand) {
@@ -754,7 +854,8 @@ class AppViewModel(
     private fun openRoom(
         room: MatrixRoomSummary,
         forwardTarget: MatrixForwardTarget?,
-        initialEventId: String? = null
+        initialEventId: String? = null,
+        preserveSpaceContext: Boolean = false
     ) {
         val userId = _uiState.value.matrixState.userIdOrNull() ?: return
         directRoomActionCoordinator.cancel()
@@ -787,7 +888,8 @@ class AppViewModel(
             } else {
                 it.enterChatLoadingState(
                     userId = userId,
-                    room = room
+                    room = room,
+                    preserveSpaceContext = preserveSpaceContext
                 )
             }
         }
@@ -826,9 +928,9 @@ class AppViewModel(
     private fun selectTabImmediately(tab: AppTab) {
         val state = _uiState.value
         val previousContactActionOwner = state.route.directRoomActionOwnerKey()
-        _uiState.update { current ->
-            current.withNavigationState(current.navState.selectTab(tab))
-        }
+        val nextNavState = state.navState.selectTab(tab)
+        if (!_uiState.compareAndSet(state, state.withNavigationState(nextNavState))) return
+        prepareSpaceRoute(nextNavState.activeSpaceRoute, state.matrixState.userIdOrNull())
         if (tab == AppTab.PROFILE) {
             _uiState.value.matrixState.userIdOrNull()?.let(ownProfileStore::activate)
         }
@@ -898,6 +1000,13 @@ class AppViewModel(
             else -> {
                 popActiveStack()
             }
+        }
+        if (didNavigate && route is AppRoute.Space) {
+            val current = _uiState.value
+            prepareSpaceRoute(
+                route = current.navState.activeSpaceRoute,
+                userId = current.matrixState.userIdOrNull()
+            )
         }
         if (_uiState.value.route.directRoomActionOwnerKey() != previousContactActionOwner) {
             directRoomActionCoordinator.cancel()
@@ -996,6 +1105,33 @@ class AppViewModel(
         _uiState.update { current ->
             current.withNavigationState(current.navState.openRoomDetails())
         }
+    }
+
+    private fun openSpace(room: MatrixSpaceRoom, parentSpaceId: String?) {
+        val current = _uiState.value
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val nextNavState = current.navState.openSpace(
+            spaceId = room.roomId,
+            parentSpaceId = parentSpaceId,
+            displayName = room.displayName,
+            avatarUrl = room.avatarUrl,
+            topic = room.topic
+        )
+        if (nextNavState == current.navState) return
+        if (!_uiState.compareAndSet(current, current.withNavigationState(nextNavState))) return
+        directRoomActionCoordinator.cancel()
+        stopChatTimeline()
+        chatComposerStore.deactivateRoom()
+        // Seed immediately after the navigation CAS. The route observer repeats
+        // the same idempotent activation, so either scheduling order is safe.
+        spaceChildrenStore.activate(
+            SpaceTarget(
+                userId = userId,
+                spaceId = room.roomId,
+                parentSpaceId = parentSpaceId,
+                seed = room
+            )
+        )
     }
 
     fun openCreateRoom() {
@@ -1884,6 +2020,7 @@ class AppViewModel(
             roomListStore.deactivate()
         }
         runLogoutCleanup("clear local cache") { localCacheRepository.clearAll() }
+        runLogoutCleanup("clear Spaces cache") { spaceCacheRepository.clearAll() }
         runLogoutCleanup("clear media cache") {
             withContext(Dispatchers.IO) {
                 matrixMediaLoader.clear()
@@ -2050,6 +2187,51 @@ class AppViewModel(
                 roomDetailsStore.deactivate()
             } else {
                 roomDetailsStore.activate(input.target, input.seed)
+            }
+        }
+    }
+
+    private suspend fun observeSpaceRouteInputs() {
+        _uiState
+            .map { state ->
+                val userId = state.matrixState.userIdOrNull() ?: return@map null
+                val route = state.navState.activeSpaceRoute ?: return@map null
+                route.toSpaceTarget(userId)
+            }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    spaceChildrenStore.deactivate()
+                } else {
+                    spaceChildrenStore.activate(target)
+                }
+            }
+    }
+
+    private fun prepareSpaceRoute(route: AppRoute.Space?, userId: String?) {
+        if (route == null || userId == null) return
+        spaceChildrenStore.activate(route.toSpaceTarget(userId))
+    }
+
+    private suspend fun enableSpacesLive(userId: String) {
+        try {
+            matrixSpaceService.activate(userId)
+            if (_uiState.value.matrixState.userIdOrNull() == userId) {
+                spaceRootsStore.enableLive(userId)
+                val activeSpace = _uiState.value.navState.activeSpaceRoute
+                if (
+                    activeSpace != null &&
+                    spaceChildrenStore.state.value.target?.spaceId == activeSpace.spaceId &&
+                    spaceChildrenStore.state.value.error != null
+                ) {
+                    spaceChildrenStore.retry()
+                }
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (_uiState.value.matrixState.userIdOrNull() == userId) {
+                Log.w(TAG, "Failed to activate Matrix Spaces", error)
             }
         }
     }
@@ -2416,16 +2598,24 @@ class AppViewModel(
 
     private fun AppUiState.enterChatLoadingState(
         userId: String,
-        room: MatrixRoomSummary
+        room: MatrixRoomSummary,
+        preserveSpaceContext: Boolean = false
     ): AppUiState {
         if (matrixState.userIdOrNull() != userId) {
             return this
         }
         return withNavigationState(
-            navState.openChat(
-                roomId = room.id,
-                displayName = room.displayName
-            )
+            if (preserveSpaceContext) {
+                navState.openChatFromSpace(
+                    roomId = room.id,
+                    displayName = room.displayName
+                )
+            } else {
+                navState.openChat(
+                    roomId = room.id,
+                    displayName = room.displayName
+                )
+            }
         )
     }
 
@@ -2462,6 +2652,8 @@ class AppViewModel(
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.shortLogId()})"
             is AppRoute.InviteCreatedRoomMembers ->
                 "InviteCreatedRoomMembers(${roomId.shortLogId()})"
+            is AppRoute.Space ->
+                "Space(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"
@@ -2516,9 +2708,36 @@ private fun String.shortLogId(): String {
     return takeLast(10)
 }
 
+private fun AppRoute.Space.toSpaceTarget(userId: String): SpaceTarget {
+    return SpaceTarget(
+        userId = userId,
+        spaceId = spaceId,
+        parentSpaceId = parentSpaceId,
+        seed = MatrixSpaceRoom(
+            roomId = spaceId,
+            displayName = displayName,
+            avatarUrl = avatarUrl,
+            topic = topic,
+            kind = MatrixSpaceRoomKind.SPACE,
+            membership = MatrixSpaceMembership.JOINED,
+            joinedMemberCount = 0L,
+            childrenCount = 0L,
+            canonicalAlias = null,
+            joinRule = MatrixSpaceJoinRule.UNKNOWN,
+            worldReadable = null,
+            guestCanJoin = false,
+            isDirect = false,
+            isDm = false,
+            via = emptyList()
+        )
+    )
+}
+
 class AppViewModelFactory(
     private val matrixClientService: MatrixClientService,
+    private val matrixSpaceService: MatrixSpaceService,
     private val localCacheRepository: LocalCacheRepository,
+    private val spaceCacheRepository: SpaceCacheRepository,
     private val outgoingOutboxService: OutgoingOutboxService,
     private val matrixMediaLoader: MatrixMediaLoader,
     private val presenceRepository: PresenceRepository,
@@ -2529,7 +2748,9 @@ class AppViewModelFactory(
         if (modelClass.isAssignableFrom(AppViewModel::class.java)) {
             return AppViewModel(
                 matrixClientService = matrixClientService,
+                matrixSpaceService = matrixSpaceService,
                 localCacheRepository = localCacheRepository,
+                spaceCacheRepository = spaceCacheRepository,
                 outgoingOutboxService = outgoingOutboxService,
                 matrixMediaLoader = matrixMediaLoader,
                 presenceRepository = presenceRepository,

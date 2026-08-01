@@ -20,6 +20,10 @@ import androidx.core.view.ViewCompat
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixRoomKind
+import com.zyna.app.data.matrix.MatrixSpaceJoinRule
+import com.zyna.app.data.matrix.MatrixSpaceMembership
+import com.zyna.app.data.matrix.MatrixSpaceRoom
+import com.zyna.app.data.matrix.MatrixSpaceRoomKind
 import com.zyna.app.ui.app.AppRoute
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
@@ -100,6 +104,12 @@ import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewState
 import com.zyna.app.ui.settings.SettingsScreenView
 import com.zyna.app.ui.settings.SettingsScreenViewActions
 import com.zyna.app.ui.settings.SettingsScreenViewState
+import com.zyna.app.ui.spaces.SpaceFeatureState
+import com.zyna.app.ui.spaces.SpacePresentationKind
+import com.zyna.app.ui.spaces.SpaceScreenView
+import com.zyna.app.ui.spaces.SpaceScreenViewActions
+import com.zyna.app.ui.spaces.SpaceScreenViewState
+import com.zyna.app.ui.spaces.VisibleChatRootRoomsProjection
 import com.zyna.app.ui.theme.ZynaAndroidTheme
 import com.zyna.app.util.ZynaPerfLog
 import kotlin.math.abs
@@ -195,6 +205,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var latestState: AppUiState? = null
     private var latestRoomList: RoomListState? = null
     private var latestRoom: RoomFeatureState? = null
+    private var latestSpaces: SpaceFeatureState? = null
     private var latestContacts: ContactsFeatureState? = null
     private var latestProfile: ProfileFeatureState? = null
     private var latestCallHistory: CallHistoryState? = null
@@ -207,6 +218,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var didScheduleChatViewWarmup = false
     private var prewarmedChatView: ChatScreenView? = null
     private val roomsScrollAnchors = mutableMapOf<String, RoomsScrollAnchor>()
+    private val visibleChatRootRooms = VisibleChatRootRoomsProjection()
     private val tabBarInterpolator = DecelerateInterpolator()
     private val fullscreenBackTouchSlop = ViewConfiguration.get(context).scaledTouchSlop
     private var fullscreenBackGesturePhase = FullscreenBackGesturePhase.Idle
@@ -321,6 +333,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         roomList: RoomListState,
         room: RoomFeatureState,
+        spaces: SpaceFeatureState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -339,6 +352,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         latestState = state
         latestRoomList = roomList
         latestRoom = room
+        latestSpaces = spaces
         latestContacts = contacts
         latestProfile = profile
         latestCallHistory = callHistory
@@ -717,6 +731,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         val state = latestState ?: return
         val roomList = latestRoomList ?: return
         val room = latestRoom ?: return
+        val spaces = latestSpaces ?: return
         val contacts = latestContacts ?: return
         val profile = latestProfile ?: return
         val callHistory = latestCallHistory ?: return
@@ -732,6 +747,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             state,
             roomList,
             room,
+            spaces,
             contacts,
             profile,
             callHistory,
@@ -847,6 +863,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         state: AppUiState,
         roomList: RoomListState,
         room: RoomFeatureState,
+        spaces: SpaceFeatureState,
         contacts: ContactsFeatureState,
         profile: ProfileFeatureState,
         callHistory: CallHistoryState,
@@ -881,6 +898,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.Rooms -> roomsEntry(
                     state = state,
                     roomList = roomList,
+                    spaces = spaces,
                     actions = actions,
                     dependencies = dependencies,
                     title = "Chats",
@@ -895,6 +913,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.ForwardPicker -> roomsEntry(
                     state = state,
                     roomList = roomList,
+                    spaces = spaces,
                     actions = actions,
                     dependencies = dependencies,
                     title = "Forward to",
@@ -967,6 +986,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     dependencies = dependencies,
                     roomId = route.roomId,
                     canSkip = true
+                )
+                is AppRoute.Space -> spaceEntry(
+                    spaces = spaces,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
                 )
                 is AppRoute.Chat -> chatEntry(
                     state,
@@ -1124,6 +1149,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private fun roomsEntry(
         state: AppUiState,
         roomList: RoomListState,
+        spaces: SpaceFeatureState,
         actions: ZynaRootActions,
         dependencies: ZynaRenderDependencies,
         title: String,
@@ -1131,6 +1157,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         withBottomPadding: Boolean
     ): ZynaScreenEntry {
         val entryKey = roomsEntryKey(title = title, onBack = onBack)
+        val visibleRooms = if (onBack == null) {
+            visibleChatRootRooms.project(roomList.rooms, spaces.roots)
+        } else {
+            roomList.rooms.filterNot { it.isSpace }
+        }
         return ZynaScreenEntry(
             key = entryKey,
             createView = { context ->
@@ -1152,7 +1183,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 val updateStart = ZynaPerfLog.start()
                 (view as RoomsScreenView).render(
                     state = RoomsScreenViewState(
-                        rooms = roomList.rooms,
+                        rooms = visibleRooms,
                         isSynchronizing = roomList.isSynchronizing,
                         title = title,
                         showBack = onBack != null,
@@ -1177,8 +1208,75 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     )
                 )
                 ZynaPerfLog.end(updateStart, "root.roomsEntry.updateView") {
-                    "title=$title rooms=${roomList.rooms.size} " +
+                    "title=$title rooms=${visibleRooms.size} " +
                         "synchronizing=${roomList.isSynchronizing}"
+                }
+            }
+        )
+    }
+
+    private fun spaceEntry(
+        spaces: SpaceFeatureState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.Space
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "space:${route.spaceId}:parent=${route.parentSpaceId.orEmpty()}",
+            createView = { context -> SpaceScreenView(context) },
+            updateView = { view ->
+                val updateStart = ZynaPerfLog.start()
+                val children = spaces.children
+                val routeOwnedState = children.takeIf {
+                    it.target?.spaceId == route.spaceId &&
+                        it.target.parentSpaceId == route.parentSpaceId
+                }
+                val seed = MatrixSpaceRoom(
+                    roomId = route.spaceId,
+                    displayName = route.displayName,
+                    avatarUrl = route.avatarUrl,
+                    topic = route.topic,
+                    kind = MatrixSpaceRoomKind.SPACE,
+                    membership = MatrixSpaceMembership.JOINED,
+                    joinedMemberCount = 0L,
+                    childrenCount = 0L,
+                    canonicalAlias = null,
+                    joinRule = MatrixSpaceJoinRule.UNKNOWN,
+                    worldReadable = null,
+                    guestCanJoin = false,
+                    isDirect = false,
+                    isDm = false,
+                    via = emptyList()
+                )
+                (view as SpaceScreenView).render(
+                    state = SpaceScreenViewState(
+                        spaceId = route.spaceId,
+                        presentationKind = if (route.parentSpaceId == null) {
+                            SpacePresentationKind.STORYLINE
+                        } else {
+                            SpacePresentationKind.TRACK
+                        },
+                        space = routeOwnedState?.space ?: seed,
+                        tracks = routeOwnedState?.tracks.orEmpty(),
+                        chats = routeOwnedState?.chats.orEmpty(),
+                        isKnown = routeOwnedState?.isKnown == true,
+                        isPaginating = routeOwnedState?.isPaginating == true,
+                        endReached = routeOwnedState?.endReached == true,
+                        error = routeOwnedState?.error,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = SpaceScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onOpenDetails = actions.spaces.onOpenDetails,
+                        onOpenRoom = actions.spaces.onOpenRoom,
+                        onLoadMore = actions.spaces.onLoadMore,
+                        onRetry = actions.spaces.onRetry
+                    )
+                )
+                ZynaPerfLog.end(updateStart, "root.spaceEntry.updateView") {
+                    "spaceId=${route.spaceId} " +
+                        "known=${routeOwnedState?.isKnown == true} " +
+                        "rooms=${routeOwnedState?.let { it.tracks.size + it.chats.size } ?: 0}"
                 }
             }
         )
@@ -2096,6 +2194,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"
             is AppRoute.InviteCreatedRoomMembers ->
                 "InviteCreatedRoomMembers(${roomId.takeLast(10)})"
+            is AppRoute.Space ->
+                "Space(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

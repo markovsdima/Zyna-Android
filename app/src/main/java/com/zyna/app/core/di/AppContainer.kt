@@ -6,8 +6,10 @@ import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCallManager
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.local.LocalDatabasePassphraseStore
+import com.zyna.app.data.local.SpaceCacheRepository
 import com.zyna.app.data.local.ZynaDatabase
 import com.zyna.app.data.matrix.MatrixClientService
+import com.zyna.app.data.matrix.MatrixSpaceService
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.MatrixAudioMediaLoader
 import com.zyna.app.data.media.MatrixMediaLoader
@@ -51,12 +53,14 @@ class AppContainer(
         database = database,
         context = appContext
     )
+    val spaceCacheRepository = SpaceCacheRepository(database)
     val matrixClientService = MatrixClientService(
         context = appContext,
         sessionStore = sessionStore,
         storePassphraseStore = matrixStorePassphraseStore,
         pushRegistrar = matrixPushRegistrar
     )
+    val matrixSpaceService = MatrixSpaceService(matrixClientService)
     val presenceRepository = PresenceRepository(
         settingsStore = presenceSettingsStore,
         zynaBackend = ZynaWebSocketPresenceBackend(),

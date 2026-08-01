@@ -193,6 +193,31 @@ The UI renders the cached flow. SDK synchronization writes the cache instead
 of publishing a competing in-memory list. This preserves one source of truth
 and supports fast startup.
 
+When an asynchronous database read would otherwise leave a route's first
+frame empty, the repository may keep a bounded in-memory mirror of durable
+snapshots. The mirror must be populated only from cache reads or successful
+cache writes, be keyed by session identity, and be cleared with the durable
+cache. Once seeded, only a successful repository write may replace an entry;
+an asynchronous database emission must not roll it back. Wall-clock timestamps
+are metadata, not an ordering mechanism. The mirror is a synchronous seed for
+the same cached state, not a second live source.
+
+Paginated SDK state is not authoritative merely because the first update has
+arrived. A partial refresh must not erase a more complete cached snapshot.
+Keep or merge the cached tail while pagination is incomplete, and allow a
+terminal snapshot to replace it atomically, including a legitimate terminal
+empty result.
+
+For a derived list, readiness belongs to its upstream source. In particular,
+an early empty Spaces root update cannot remove cached roots until the SDK room
+list reports `Loaded`; at that transition, read a fresh root snapshot instead
+of promoting a pre-readiness update retroactively.
+
+Request the first hierarchy page on activation, then paginate on viewport
+demand. A failed page request keeps the live session and cached content owned
+by the store and exposes an inline retry; it must not turn a populated screen
+into a terminal stale state.
+
 This is not a pull-to-refresh contract. Reactive SDK signals and session
 activation drive synchronization.
 

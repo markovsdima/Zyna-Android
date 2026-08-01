@@ -20,6 +20,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+internal enum class MatrixAvatarShape {
+    CIRCLE,
+    ROUNDED_RECT
+}
+
 internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
     private val density = resources.displayMetrics.density
     private val decodeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -29,6 +34,7 @@ internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
     private var loadedKey: String? = null
     private var currentLoader: MatrixMediaLoader? = null
     private var currentColorSeed: String? = null
+    private var currentShape = MatrixAvatarShape.CIRCLE
 
     private val initialsText = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -42,7 +48,7 @@ internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
         clipToOutline = true
         outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(view: View, outline: Outline) {
-                outline.setOval(0, 0, view.width, view.height)
+                outline.setAvatarShape(view, currentShape)
             }
         }
     }
@@ -51,7 +57,7 @@ internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
         clipToOutline = true
         outlineProvider = object : ViewOutlineProvider() {
             override fun getOutline(view: View, outline: Outline) {
-                outline.setOval(0, 0, view.width, view.height)
+                outline.setAvatarShape(view, currentShape)
             }
         }
         addView(
@@ -89,8 +95,14 @@ internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
         avatarUrl: String?,
         localAvatarPath: String?,
         matrixMediaLoader: MatrixMediaLoader?,
-        sizePx: Int
+        sizePx: Int,
+        shape: MatrixAvatarShape = MatrixAvatarShape.CIRCLE
     ) {
+        if (currentShape != shape) {
+            currentShape = shape
+            invalidateOutline()
+            imageView.invalidateOutline()
+        }
         val name = displayName?.takeIf { it.isNotBlank() } ?: userId
         val colorSeed = userId.ifBlank { name }
         currentColorSeed = colorSeed
@@ -202,6 +214,19 @@ internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
         return trim().firstOrNull()?.uppercaseChar()?.toString() ?: "#"
     }
 
+    private fun Outline.setAvatarShape(view: View, shape: MatrixAvatarShape) {
+        when (shape) {
+            MatrixAvatarShape.CIRCLE -> setOval(0, 0, view.width, view.height)
+            MatrixAvatarShape.ROUNDED_RECT -> setRoundRect(
+                0,
+                0,
+                view.width,
+                view.height,
+                view.width * ROUNDED_RECT_CORNER_RATIO
+            )
+        }
+    }
+
     private companion object {
         val LIGHT_AVATAR_COLORS = intArrayOf(
             Color.rgb(0, 122, 255),
@@ -217,5 +242,6 @@ internal class MatrixAvatarView(context: Context) : FrameLayout(context) {
             Color.rgb(191, 90, 242),
             Color.rgb(255, 55, 95)
         )
+        const val ROUNDED_RECT_CORNER_RATIO = 0.28f
     }
 }

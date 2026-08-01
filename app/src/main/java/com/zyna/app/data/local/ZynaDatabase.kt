@@ -17,9 +17,11 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         OutgoingEnvelopeEntity::class,
         PendingReactionEntity::class,
         MatrixRtcCallEntity::class,
-        MatrixRtcCallMembershipEntity::class
+        MatrixRtcCallMembershipEntity::class,
+        CachedSpaceListSnapshotEntity::class,
+        CachedSpaceListEntryEntity::class
     ],
-    version = 25,
+    version = 26,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -32,6 +34,8 @@ abstract class ZynaDatabase : RoomDatabase() {
     abstract fun pendingReactionDao(): PendingReactionDao
 
     abstract fun matrixRtcCallHistoryDao(): MatrixRtcCallHistoryDao
+
+    abstract fun cachedSpaceDao(): CachedSpaceDao
 
     companion object {
         fun create(context: Context, passphraseStore: LocalDatabasePassphraseStore): ZynaDatabase {
@@ -77,7 +81,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_21_22,
                     MIGRATION_22_23,
                     MIGRATION_23_24,
-                    MIGRATION_24_25
+                    MIGRATION_24_25,
+                    MIGRATION_25_26
                 )
                 .build()
         }
@@ -518,6 +523,68 @@ abstract class ZynaDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE rooms ADD COLUMN detailsRoomVersion TEXT")
                 db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCreatorSemantics TEXT")
+            }
+        }
+
+        private val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS space_list_snapshots (
+                        userId TEXT NOT NULL,
+                        listId TEXT NOT NULL,
+                        spaceRoomId TEXT,
+                        spaceDisplayName TEXT,
+                        spaceAvatarUrl TEXT,
+                        spaceTopic TEXT,
+                        spaceMembership TEXT,
+                        spaceJoinedMemberCount INTEGER,
+                        spaceChildrenCount INTEGER,
+                        spaceCanonicalAlias TEXT,
+                        spaceJoinRule TEXT,
+                        spaceWorldReadable INTEGER,
+                        spaceGuestCanJoin INTEGER,
+                        spaceIsDirect INTEGER,
+                        spaceIsDm INTEGER,
+                        spaceViaJson TEXT,
+                        isKnown INTEGER NOT NULL,
+                        endReached INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        PRIMARY KEY(userId, listId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS space_list_entries (
+                        userId TEXT NOT NULL,
+                        listId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        displayName TEXT NOT NULL,
+                        avatarUrl TEXT,
+                        topic TEXT,
+                        kind TEXT NOT NULL,
+                        membership TEXT NOT NULL,
+                        joinedMemberCount INTEGER NOT NULL,
+                        childrenCount INTEGER NOT NULL,
+                        canonicalAlias TEXT,
+                        joinRule TEXT NOT NULL,
+                        worldReadable INTEGER,
+                        guestCanJoin INTEGER NOT NULL,
+                        isDirect INTEGER,
+                        isDm INTEGER,
+                        viaJson TEXT NOT NULL,
+                        PRIMARY KEY(userId, listId, roomId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_space_list_entries_userId_listId_position
+                    ON space_list_entries(userId, listId, position)
+                    """.trimIndent()
+                )
             }
         }
     }

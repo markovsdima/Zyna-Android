@@ -101,6 +101,8 @@ import org.matrix.rustcomponents.sdk.RoomHistoryVisibility
 import org.matrix.rustcomponents.sdk.RoomListEntriesDynamicFilterKind
 import org.matrix.rustcomponents.sdk.RoomListEntriesListener
 import org.matrix.rustcomponents.sdk.RoomListEntriesUpdate
+import org.matrix.rustcomponents.sdk.RoomListLoadingState
+import org.matrix.rustcomponents.sdk.RoomListLoadingStateListener
 import org.matrix.rustcomponents.sdk.RoomListService
 import org.matrix.rustcomponents.sdk.RoomListServiceState
 import org.matrix.rustcomponents.sdk.RoomListServiceStateListener
@@ -110,6 +112,7 @@ import org.matrix.rustcomponents.sdk.RtcCallIntent
 import org.matrix.rustcomponents.sdk.RtcCallIntentConsensus
 import org.matrix.rustcomponents.sdk.RtcNotificationType
 import org.matrix.rustcomponents.sdk.Session
+import org.matrix.rustcomponents.sdk.SpaceService
 import org.matrix.rustcomponents.sdk.SlidingSyncVersionBuilder
 import org.matrix.rustcomponents.sdk.SqliteStoreBuilder
 import org.matrix.rustcomponents.sdk.StateEventType
@@ -470,6 +473,35 @@ class MatrixClientService(
                 accessToken = session.accessToken,
                 userId = session.userId
             )
+        }
+    }
+
+    /**
+     * Opens the SDK Spaces boundary for the requested active account.
+     *
+     * MatrixSpaceService owns and disposes the returned FFI object. Keeping creation here avoids
+     * exposing the session Client outside the data layer while preserving MatrixClientService as
+     * the owner of client/session lifetime.
+     */
+    internal suspend fun openSpaceService(userId: String): SpaceService {
+        return withFfiResourceHandoff(
+            release = { service -> service.destroy() }
+        ) { own ->
+            val activeClient = client ?: error("Matrix client is not available")
+            val activeUserId = when (val current = state.value) {
+                is MatrixClientState.LoggedIn -> current.userId
+                is MatrixClientState.Syncing -> current.userId
+                else -> null
+            }
+            check(activeUserId == userId) { "Matrix session changed while opening Spaces" }
+            val service = activeClient.spaceService().also(own)
+            val stillCurrent = client === activeClient && when (val current = state.value) {
+                is MatrixClientState.LoggedIn -> current.userId == userId
+                is MatrixClientState.Syncing -> current.userId == userId
+                else -> false
+            }
+            check(stillCurrent) { "Matrix session changed while opening Spaces" }
+            service
         }
     }
 
@@ -1348,6 +1380,36 @@ class MatrixClientService(
             stateListenerHandle.cancelAndDestroy()
         }
     }.buffer(Channel.CONFLATED)
+        .flowOn(Dispatchers.IO)
+
+    /**
+     * Reports when the SDK room list has an authoritative loaded snapshot.
+     * Space roots are derived from joined rooms and must not treat an early
+     * empty list as an authoritative removal before this becomes true.
+     */
+    fun roomListLoadedStates(): Flow<Boolean> = callbackFlow {
+        val service = roomListService
+        if (service == null) {
+            close(IllegalStateException("Matrix room list service is not ready"))
+            return@callbackFlow
+        }
+        val roomList = service.allRooms()
+        val listener = object : RoomListLoadingStateListener {
+            override fun onUpdate(state: RoomListLoadingState) {
+                trySendBlocking(state is RoomListLoadingState.Loaded)
+            }
+        }
+        val result = roomList.loadingState(listener)
+        trySend(result.state is RoomListLoadingState.Loaded)
+
+        awaitClose {
+            result.stateStream.cancelAndDestroy()
+            runCatching { result.destroy() }
+            runCatching { roomList.destroy() }
+        }
+    }
+        .buffer(Channel.CONFLATED)
+        .distinctUntilChanged()
         .flowOn(Dispatchers.IO)
 
     fun roomCallInfoUpdates(roomId: String): Flow<MatrixRoomCallInfo> = callbackFlow {

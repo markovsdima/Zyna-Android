@@ -9,6 +9,7 @@ import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixSpaceRoom
 import com.zyna.app.data.matrix.MatrixUserProfile
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.MatrixMediaLoader
@@ -29,6 +30,7 @@ data class ZynaRootActions(
     val contacts: ContactsFeatureActions,
     val calls: CallsFeatureActions,
     val rooms: RoomsFeatureActions,
+    val spaces: SpacesFeatureActions,
     val createRoom: CreateRoomActions,
     val roomDetails: RoomDetailsFeatureActions,
     val roomPermissions: RoomPermissionsFeatureActions,
@@ -69,6 +71,13 @@ data class RoomsFeatureActions(
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onCreateRoom: () -> Unit,
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit
+)
+
+data class SpacesFeatureActions(
+    val onOpenRoom: (MatrixSpaceRoom) -> Unit,
+    val onLoadMore: () -> Unit,
+    val onRetry: () -> Unit,
+    val onOpenDetails: () -> Unit
 )
 
 data class CreateRoomActions(

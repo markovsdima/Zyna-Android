@@ -271,6 +271,29 @@
     <string name="room_roles_confirm_action">Изменить роль</string>
     <string name="room_roles_save_error">Не удалось сохранить роль. Попробуйте снова.</string>
     <string name="room_roles_permission_changed">Роль или ваши права изменились. Проверьте актуальные роли и попробуйте снова.</string>
+    <string name="space_storyline">Сюжет</string>
+    <string name="space_track">Линия</string>
+    <string name="space_tracks">Линии</string>
+    <string name="space_chats">Чаты</string>
+    <string name="space_details">Подробнее</string>
+    <string name="space_empty">Здесь пока нет чатов и линий.</string>
+    <string name="space_update_error">Не удалось обновить список.</string>
+    <string name="space_load_error">Не удалось загрузить пространство.</string>
+    <string name="space_invited_format">Приглашение · %1$s</string>
+    <string name="space_requested_format">Запрос отправлен · %1$s</string>
+    <string name="space_not_joined_format">Не вступили · %1$s</string>
+    <plurals name="space_items_count">
+        <item quantity="one">%1$d элемент</item>
+        <item quantity="few">%1$d элемента</item>
+        <item quantity="many">%1$d элементов</item>
+        <item quantity="other">%1$d элемента</item>
+    </plurals>
+    <plurals name="space_members_count">
+        <item quantity="one">%1$d участник</item>
+        <item quantity="few">%1$d участника</item>
+        <item quantity="many">%1$d участников</item>
+        <item quantity="other">%1$d участника</item>
+    </plurals>
     <string name="settings_presence">Статус онлайн</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
     <string name="presence_provider_matrix_standard">Matrix Standard</string>

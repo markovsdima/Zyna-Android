@@ -308,6 +308,25 @@
     <string name="room_roles_confirm_action">Change role</string>
     <string name="room_roles_save_error">Could not save this role. Try again.</string>
     <string name="room_roles_permission_changed">The role or your permissions changed. Review the current roles and try again.</string>
+    <string name="space_storyline">Storyline</string>
+    <string name="space_track">Track</string>
+    <string name="space_tracks">Tracks</string>
+    <string name="space_chats">Chats</string>
+    <string name="space_details">Space details</string>
+    <string name="space_empty">There aren’t any chats or tracks here yet.</string>
+    <string name="space_update_error">Couldn’t update this list.</string>
+    <string name="space_load_error">Couldn’t load this Space.</string>
+    <string name="space_invited_format">Invited · %1$s</string>
+    <string name="space_requested_format">Request sent · %1$s</string>
+    <string name="space_not_joined_format">Not joined · %1$s</string>
+    <plurals name="space_items_count">
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
+    </plurals>
+    <plurals name="space_members_count">
+        <item quantity="one">%1$d member</item>
+        <item quantity="other">%1$d members</item>
+    </plurals>
     <string name="settings_presence">Presence</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>
     <string name="presence_provider_matrix_standard">Matrix Standard</string>

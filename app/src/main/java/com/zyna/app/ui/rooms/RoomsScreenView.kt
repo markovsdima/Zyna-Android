@@ -582,7 +582,7 @@ private class RoomRowView(context: Context) : View(context) {
         this.presence = presence
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
-        contentDescription = room.accessibilityText(presence)
+        contentDescription = room.accessibilityText(context, presence)
         bindAvatar(
             avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
             matrixMediaLoader = matrixMediaLoader
@@ -602,7 +602,7 @@ private class RoomRowView(context: Context) : View(context) {
         this.presence = presence
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
-        contentDescription = room.accessibilityText(presence)
+        contentDescription = room.accessibilityText(context, presence)
         if (reloadAvatar) {
             bindAvatar(
                 avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
@@ -616,7 +616,7 @@ private class RoomRowView(context: Context) : View(context) {
         val wasOnline = PresenceText.isOnline(presence)
         val isOnline = PresenceText.isOnline(nextPresence)
         presence = nextPresence
-        room?.let { contentDescription = it.accessibilityText(nextPresence) }
+        room?.let { contentDescription = it.accessibilityText(context, nextPresence) }
         if (wasOnline != isOnline) {
             invalidate()
         }
@@ -681,9 +681,18 @@ private class RoomRowView(context: Context) : View(context) {
         val avatarSize = dp(AVATAR_SIZE_DP).toFloat()
         val avatarCenterX = left + avatarSize / 2f
         val avatarCenterY = height / 2f
-        if (!drawAvatarBitmap(canvas, avatarCenterX, avatarCenterY, avatarSize)) {
+        if (!drawAvatarBitmap(canvas, avatarCenterX, avatarCenterY, avatarSize, room.isSpace)) {
             avatarPaint.color = avatarFillColor
-            canvas.drawCircle(avatarCenterX, avatarCenterY, avatarSize / 2f, avatarPaint)
+            if (room.isSpace) {
+                canvas.drawRoundRect(
+                    avatarRect(avatarCenterX, avatarCenterY, avatarSize),
+                    avatarSize * SPACE_AVATAR_CORNER_RATIO,
+                    avatarSize * SPACE_AVATAR_CORNER_RATIO,
+                    avatarPaint
+                )
+            } else {
+                canvas.drawCircle(avatarCenterX, avatarCenterY, avatarSize / 2f, avatarPaint)
+            }
             canvas.drawText(
                 room.avatarInitial(),
                 avatarCenterX,
@@ -695,13 +704,19 @@ private class RoomRowView(context: Context) : View(context) {
 
         val textLeft = left + avatarSize + dp(12)
         val timeText = room.lastMessageAtMillis
+            ?.takeUnless { room.isSpace }
             ?.formatRoomTimestamp(timeTextFormatter)
             .orEmpty()
-        val statusText = room.lastOwnMessageStatus?.label().orEmpty()
-        val badgeText = room.unreadBadgeText()
+        val statusText = room.lastOwnMessageStatus
+            ?.takeUnless { room.isSpace }
+            ?.label()
+            .orEmpty()
+        val badgeText = room.unreadBadgeText().takeUnless { room.isSpace }
         val rawTrailingWidth = max(
             max(metaPaint.measureText(timeText), metaPaint.measureText(statusText)),
-            badgeText?.let { badgeTextPaint.measureText(it) + dp(14) } ?: room.unreadDotWidth()
+            badgeText?.let { badgeTextPaint.measureText(it) + dp(14) }
+                ?: room.unreadDotWidth().takeUnless { room.isSpace }
+                ?: 0f
         )
         val horizontalGap = dp(12).toFloat()
         val maxTrailingWidth = (right - textLeft - dp(48) - horizontalGap).coerceAtLeast(0f)
@@ -726,7 +741,7 @@ private class RoomRowView(context: Context) : View(context) {
             titlePaint
         )
         canvas.drawText(
-            room.previewText().ellipsize(previewPaint, textRight - textLeft),
+            room.previewText(context).ellipsize(previewPaint, textRight - textLeft),
             textLeft,
             previewBaseline,
             previewPaint
@@ -745,7 +760,9 @@ private class RoomRowView(context: Context) : View(context) {
             }
             canvas.drawText(statusText.ellipsize(metaPaint, trailingWidth), right, previewBaseline, metaPaint)
         }
-        drawUnreadIndicator(canvas, room, right, trailingWidth)
+        if (!room.isSpace) {
+            drawUnreadIndicator(canvas, room, right, trailingWidth)
+        }
         canvas.drawLine(textLeft, height - 0.5f, widthPx.toFloat(), height - 0.5f, dividerPaint)
     }
 
@@ -832,7 +849,8 @@ private class RoomRowView(context: Context) : View(context) {
         canvas: Canvas,
         centerX: Float,
         centerY: Float,
-        size: Float
+        size: Float,
+        isSpace: Boolean
     ): Boolean {
         val bitmap = avatarBitmap?.takeIf { !it.isRecycled } ?: return false
         val shader = avatarShaderFor(bitmap)
@@ -848,9 +866,27 @@ private class RoomRowView(context: Context) : View(context) {
         )
         shader.setLocalMatrix(avatarShaderMatrix)
         avatarPaint.shader = shader
-        canvas.drawCircle(centerX, centerY, size / 2f, avatarPaint)
+        if (isSpace) {
+            canvas.drawRoundRect(
+                avatarRect(centerX, centerY, size),
+                size * SPACE_AVATAR_CORNER_RATIO,
+                size * SPACE_AVATAR_CORNER_RATIO,
+                avatarPaint
+            )
+        } else {
+            canvas.drawCircle(centerX, centerY, size / 2f, avatarPaint)
+        }
         avatarPaint.shader = null
         return true
+    }
+
+    private fun avatarRect(centerX: Float, centerY: Float, size: Float): RectF {
+        return RectF(
+            centerX - size / 2f,
+            centerY - size / 2f,
+            centerX + size / 2f,
+            centerY + size / 2f
+        )
     }
 
     private fun avatarShaderFor(bitmap: Bitmap): BitmapShader {
@@ -1055,7 +1091,8 @@ private data class RoomsPalette(
     }
 }
 
-private fun MatrixRoomSummary.previewText(): String {
+private fun MatrixRoomSummary.previewText(context: Context): String {
+    if (isSpace) return context.getString(R.string.space_storyline)
     return lastMessageText?.takeIf { it.isNotBlank() } ?: "No messages"
 }
 
@@ -1082,10 +1119,16 @@ private fun MatrixRoomSummary.stableAvatarId(): String {
     return directUserId?.takeIf { it.isNotBlank() } ?: id
 }
 
-private fun MatrixRoomSummary.accessibilityText(presence: UserPresenceStatus?): String {
-    val unread = unreadBadgeText()?.let { ", $it unread" }.orEmpty()
+private fun MatrixRoomSummary.accessibilityText(
+    context: Context,
+    presence: UserPresenceStatus?
+): String {
+    val unread = unreadBadgeText()
+        ?.takeUnless { isSpace }
+        ?.let { ", $it unread" }
+        .orEmpty()
     val online = if (PresenceText.isOnline(presence)) ", online" else ""
-    return "$displayName, ${previewText()}$unread$online"
+    return "$displayName, ${previewText(context)}$unread$online"
 }
 
 private fun MatrixLastOwnMessageStatus.label(): String {
@@ -1161,6 +1204,7 @@ private val DARK_IOS_SYSTEM_AVATAR_COLORS = listOf(
     Color.rgb(255, 55, 95)
 )
 private const val AVATAR_SIZE_DP = 46
+private const val SPACE_AVATAR_CORNER_RATIO = 0.28f
 private const val ROW_HEIGHT_DP = 76
 private const val DJB2_OFFSET = 5381L
 private const val DJB2_MULTIPLIER = 33L

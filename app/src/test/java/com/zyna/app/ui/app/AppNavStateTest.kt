@@ -7,6 +7,103 @@ import org.junit.Test
 
 class AppNavStateTest {
     @Test
+    fun spacesKeepContextForNestedTracksAndChats() {
+        val root = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+        val track = root.openSpace(
+            spaceId = "!track:example.org",
+            parentSpaceId = "!story:example.org",
+            displayName = "Track",
+            avatarUrl = null,
+            topic = null
+        )
+        val chat = track.openChatFromSpace(
+            roomId = "!chat:example.org",
+            displayName = "Chat"
+        )
+
+        assertEquals(4, chat.chatsStack.size)
+        assertEquals("!track:example.org", chat.activeSpaceRoute?.spaceId)
+        assertEquals("!chat:example.org", chat.activeChatRoute?.roomId)
+        assertFalse(chat.showsTabs)
+
+        val backToTrack = chat.closeChat()
+        assertEquals(track.chatsStack, backToTrack.chatsStack)
+        assertEquals("!track:example.org", backToTrack.activeSpaceRoute?.spaceId)
+    }
+
+    @Test
+    fun spaceDetailsRemainOwnedByTheSpaceRoute() {
+        val space = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+
+        val details = space.openRoomDetails()
+
+        assertEquals(AppRoute.RoomDetails("!story:example.org"), details.top)
+        assertEquals("!story:example.org", details.activeSpaceRoute?.spaceId)
+        assertEquals("!story:example.org", details.activeRoomDetailsRoute?.roomId)
+    }
+
+    @Test
+    fun childChatDetailsKeepTheirParentSpaceActive() {
+        val state = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+            .openSpace(
+                spaceId = "!track:example.org",
+                parentSpaceId = "!story:example.org",
+                displayName = "Track",
+                avatarUrl = null,
+                topic = null
+            )
+            .openChatFromSpace(
+                roomId = "!chat:example.org",
+                displayName = "Chat"
+            )
+            .openRoomDetails()
+            .openRoomMembers()
+
+        assertEquals("!track:example.org", state.activeSpaceRoute?.spaceId)
+        assertEquals("!chat:example.org", state.activeRoomDetailsRoute?.roomId)
+    }
+
+    @Test
+    fun nestedSpaceCannotBePushedWithoutItsCurrentParent() {
+        val state = AppNavState().enterMain()
+
+        assertEquals(
+            state,
+            state.openSpace(
+                spaceId = "!track:example.org",
+                parentSpaceId = "!missing:example.org",
+                displayName = "Track",
+                avatarUrl = null,
+                topic = null
+            )
+        )
+    }
+
+    @Test
     fun createRoomFlowReplacesEditorWithInvitesAndKeepsTabsHidden() {
         val roomId = "!created:example.org"
         val displayName = "Friends"

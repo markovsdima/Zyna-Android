@@ -80,7 +80,9 @@ data class SpacesFeatureActions(
     val onOpenRoom: (MatrixSpaceRoom) -> Unit,
     val onLoadMore: () -> Unit,
     val onRetry: () -> Unit,
-    val onOpenDetails: () -> Unit
+    val onOpenDetails: () -> Unit,
+    val onPerformJoinAction: () -> Unit,
+    val onRetryJoinPreview: () -> Unit
 )
 
 data class CreateRoomActions(

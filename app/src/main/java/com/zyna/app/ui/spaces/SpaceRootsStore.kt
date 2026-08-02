@@ -5,6 +5,7 @@ import com.zyna.app.data.local.SpaceCacheRepository
 import com.zyna.app.data.matrix.MatrixSpaceListSnapshot
 import com.zyna.app.data.matrix.MatrixSpaceListUpdate
 import com.zyna.app.data.matrix.MatrixSpaceRoom
+import com.zyna.app.data.matrix.MatrixSpaceRoomKind
 import com.zyna.app.data.matrix.MatrixSpaceService
 import com.zyna.app.data.matrix.applyMatrixSpaceListUpdates
 import kotlinx.coroutines.CancellationException
@@ -46,6 +47,8 @@ internal class SpaceRootsStore(
     private var cacheJob: Job? = null
     private var liveJob: Job? = null
     private var latestCachedSnapshot: MatrixSpaceListSnapshot? = null
+    private var latestLiveRootIds: Set<String>? = null
+    private val confirmedJoinedRoots = linkedMapOf<String, MatrixSpaceRoom>()
 
     @MainThread
     fun activate(userId: String) {
@@ -77,18 +80,24 @@ internal class SpaceRootsStore(
 
             suspend fun cacheIfChanged() {
                 if (!isCurrent(session)) return
+                val liveRoomIds = liveRooms.mapTo(HashSet(liveRooms.size)) { it.roomId }
+                latestLiveRootIds = liveRoomIds
                 val content = MatrixSpaceListSnapshot(
                     rooms = liveRooms,
                     isKnown = true,
                     endReached = true
                 )
-                if (content == latestCachedSnapshot?.withoutUpdateTime()) return
+                if (content == latestCachedSnapshot?.withoutUpdateTime()) {
+                    confirmedJoinedRoots.keys.removeAll(liveRoomIds)
+                    return
+                }
                 try {
                     val storedContent = content.copy(
                         updatedAtMillis = System.currentTimeMillis()
                     )
                     driver.cacheSnapshot(userId, storedContent)
                     latestCachedSnapshot = storedContent
+                    confirmedJoinedRoots.keys.removeAll(liveRoomIds)
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -135,6 +144,34 @@ internal class SpaceRootsStore(
         }
     }
 
+    /**
+     * Keeps a newly accepted root invitation visible until the joined-Spaces projection catches
+     * up. The ordinary room list and the Spaces graph are independent SDK projections and may
+     * acknowledge the same successful join in different frames.
+     */
+    @MainThread
+    fun confirmJoinedRoot(userId: String, room: MatrixSpaceRoom) {
+        val session = activeSession?.takeIf { it.userId == userId } ?: return
+        if (
+            !isCurrent(session) ||
+            room.roomId.isBlank() ||
+            room.kind != MatrixSpaceRoomKind.SPACE ||
+            !room.isJoined
+        ) {
+            return
+        }
+        val isAlreadyAcknowledged = room.roomId in latestLiveRootIds.orEmpty() &&
+            latestCachedSnapshot?.rooms?.any { it.roomId == room.roomId } == true
+        if (isAlreadyAcknowledged) {
+            confirmedJoinedRoots.remove(room.roomId)
+            return
+        }
+        confirmedJoinedRoots[room.roomId] = room
+        _state.update { state ->
+            SpaceRootsState(state.snapshot.withConfirmedJoinedRoots(confirmedJoinedRoots))
+        }
+    }
+
     @MainThread
     fun deactivate() {
         generation += 1
@@ -144,6 +181,8 @@ internal class SpaceRootsStore(
         liveJob?.cancel()
         liveJob = null
         latestCachedSnapshot = null
+        latestLiveRootIds = null
+        confirmedJoinedRoots.clear()
         _state.value = SpaceRootsState()
     }
 
@@ -155,7 +194,9 @@ internal class SpaceRootsStore(
                         if (snapshot.isKnown) {
                             latestCachedSnapshot = snapshot
                         }
-                        _state.value = SpaceRootsState(snapshot)
+                        _state.value = SpaceRootsState(
+                            snapshot.withConfirmedJoinedRoots(confirmedJoinedRoots)
+                        )
                     }
                 }
             } catch (error: CancellationException) {
@@ -200,4 +241,13 @@ internal fun createSpaceRootsStore(
 
 private fun MatrixSpaceListSnapshot.withoutUpdateTime(): MatrixSpaceListSnapshot {
     return copy(updatedAtMillis = null)
+}
+
+private fun MatrixSpaceListSnapshot.withConfirmedJoinedRoots(
+    confirmedRoots: Map<String, MatrixSpaceRoom>
+): MatrixSpaceListSnapshot {
+    if (confirmedRoots.isEmpty()) return this
+    val roomIds = rooms.mapTo(HashSet(rooms.size)) { it.roomId }
+    val missingRoots = confirmedRoots.values.filterNot { it.roomId in roomIds }
+    return if (missingRoots.isEmpty()) this else copy(rooms = rooms + missingRoots)
 }

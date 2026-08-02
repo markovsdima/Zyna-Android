@@ -1,5 +1,6 @@
 package com.zyna.app.data.local
 
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -159,6 +160,24 @@ class RoomListCachePolicyTest {
         )
 
         assertEquals(setOf(newRoom.room.id), result)
+    }
+
+    @Test
+    fun unknownSpaceMembershipCannotEraseAKnownInvitationOrJoin() {
+        assertEquals(
+            MatrixSpaceMembership.INVITED.name,
+            cachedSpaceMembership(
+                incoming = MatrixSpaceMembership.UNKNOWN,
+                existing = MatrixSpaceMembership.INVITED.name
+            )
+        )
+        assertEquals(
+            MatrixSpaceMembership.JOINED.name,
+            cachedSpaceMembership(
+                incoming = MatrixSpaceMembership.JOINED,
+                existing = MatrixSpaceMembership.INVITED.name
+            )
+        )
     }
 
     private fun cachedRoom(id: String, position: Long?): CachedRoomListOrder {

@@ -15,6 +15,8 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 
 class SpaceCacheRepository(
@@ -22,6 +24,7 @@ class SpaceCacheRepository(
 ) {
     private val dao = database.cachedSpaceDao()
     private val memoryCache = SpaceSnapshotMemoryCache(MAX_MEMORY_SNAPSHOTS)
+    private val cacheWriteMutex = Mutex()
 
     /**
      * Warms the bounded session cache before a Space route can be opened.
@@ -29,24 +32,26 @@ class SpaceCacheRepository(
      * database gap from a route's first render.
      */
     suspend fun warmSession(userId: String) {
-        val warmedSnapshots = database.withTransaction {
-            val snapshots = dao.recentSnapshots(userId, MAX_MEMORY_SNAPSHOTS)
-            if (snapshots.isEmpty()) return@withTransaction emptyList()
-            val entriesByList = dao.entriesForLists(
-                userId = userId,
-                listIds = snapshots.map(CachedSpaceListSnapshotEntity::listId)
-            ).groupBy(CachedSpaceListEntryEntity::listId)
-            snapshots.map { snapshot ->
-                snapshot.listId to snapshot.toSnapshot(
-                    entriesByList[snapshot.listId].orEmpty()
+        cacheWriteMutex.withLock {
+            val warmedSnapshots = database.withTransaction {
+                val snapshots = dao.recentSnapshots(userId, MAX_MEMORY_SNAPSHOTS)
+                if (snapshots.isEmpty()) return@withTransaction emptyList()
+                val entriesByList = dao.entriesForLists(
+                    userId = userId,
+                    listIds = snapshots.map(CachedSpaceListSnapshotEntity::listId)
+                ).groupBy(CachedSpaceListEntryEntity::listId)
+                snapshots.map { snapshot ->
+                    snapshot.listId to snapshot.toSnapshot(
+                        entriesByList[snapshot.listId].orEmpty()
+                    )
+                }
+            }
+            warmedSnapshots.asReversed().forEach { (listId, snapshot) ->
+                memoryCache.put(
+                    SpaceSnapshotKey(userId = userId, listId = listId),
+                    snapshot
                 )
             }
-        }
-        warmedSnapshots.asReversed().forEach { (listId, snapshot) ->
-            memoryCache.put(
-                SpaceSnapshotKey(userId = userId, listId = listId),
-                snapshot
-            )
         }
     }
 
@@ -87,14 +92,50 @@ class SpaceCacheRepository(
         cacheList(userId = userId, listId = childListId(spaceId), snapshot = snapshot)
     }
 
-    suspend fun clearAll() {
-        database.withTransaction {
-            dao.clearAllEntries()
-            dao.clearAllSnapshots()
+    suspend fun cacheSpaceChildMembership(
+        userId: String,
+        spaceId: String,
+        roomId: String,
+        membership: MatrixSpaceMembership
+    ) {
+        val listId = childListId(spaceId)
+        val key = SpaceSnapshotKey(userId = userId, listId = listId)
+        cacheWriteMutex.withLock {
+            val updated = dao.updateEntryMembership(
+                userId = userId,
+                listId = listId,
+                roomId = roomId,
+                membership = membership.name
+            )
+            if (updated == 0) return@withLock
+            memoryCache.get(key)?.let { snapshot ->
+                memoryCache.put(
+                    key,
+                    snapshot.copy(
+                        rooms = snapshot.rooms.map { room ->
+                            if (room.roomId == roomId) {
+                                room.copy(membership = membership)
+                            } else {
+                                room
+                            }
+                        },
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                )
+            }
         }
-        // Room may still have a pre-transaction value buffered for an active
-        // observer. Clear last so that value cannot revive deleted memory.
-        memoryCache.clear()
+    }
+
+    suspend fun clearAll() {
+        cacheWriteMutex.withLock {
+            database.withTransaction {
+                dao.clearAllEntries()
+                dao.clearAllSnapshots()
+            }
+            // Room may still have a pre-transaction value buffered for an active
+            // observer. Clear last so that value cannot revive deleted memory.
+            memoryCache.clear()
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -133,32 +174,34 @@ class SpaceCacheRepository(
         listId: String,
         snapshot: MatrixSpaceListSnapshot
     ) {
-        val updatedAtMillis = snapshot.updatedAtMillis ?: System.currentTimeMillis()
-        val storedSnapshot = snapshot.copy(updatedAtMillis = updatedAtMillis)
-        database.withTransaction {
-            dao.upsertSnapshot(
-                storedSnapshot.toEntity(
-                    userId = userId,
-                    listId = listId,
-                    updatedAtMillis = updatedAtMillis
+        cacheWriteMutex.withLock {
+            val updatedAtMillis = snapshot.updatedAtMillis ?: System.currentTimeMillis()
+            val storedSnapshot = snapshot.copy(updatedAtMillis = updatedAtMillis)
+            database.withTransaction {
+                dao.upsertSnapshot(
+                    storedSnapshot.toEntity(
+                        userId = userId,
+                        listId = listId,
+                        updatedAtMillis = updatedAtMillis
+                    )
                 )
+                dao.deleteEntries(userId = userId, listId = listId)
+                val entries = storedSnapshot.rooms.mapIndexed { index, room ->
+                    room.toEntryEntity(
+                        userId = userId,
+                        listId = listId,
+                        position = index
+                    )
+                }
+                if (entries.isNotEmpty()) {
+                    dao.upsertEntries(entries)
+                }
+            }
+            memoryCache.put(
+                SpaceSnapshotKey(userId = userId, listId = listId),
+                storedSnapshot
             )
-            dao.deleteEntries(userId = userId, listId = listId)
-            val entries = storedSnapshot.rooms.mapIndexed { index, room ->
-                room.toEntryEntity(
-                    userId = userId,
-                    listId = listId,
-                    position = index
-                )
-            }
-            if (entries.isNotEmpty()) {
-                dao.upsertEntries(entries)
-            }
         }
-        memoryCache.put(
-            SpaceSnapshotKey(userId = userId, listId = listId),
-            storedSnapshot
-        )
     }
 
     private fun childListId(spaceId: String): String = "space:$spaceId"

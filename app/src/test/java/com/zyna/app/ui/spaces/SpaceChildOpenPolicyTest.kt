@@ -23,7 +23,7 @@ class SpaceChildOpenPolicyTest {
         )
         val state = stateWith(currentChild)
 
-        val result = state.joinedChildForOpen(
+        val result = state.childForOpen(
             userId = OPEN_USER,
             spaceId = OPEN_SPACE,
             parentSpaceId = OPEN_PARENT,
@@ -34,7 +34,7 @@ class SpaceChildOpenPolicyTest {
     }
 
     @Test
-    fun rejectsAChildThatIsNoLongerJoinedOrOwnedByTheCurrentRoute() {
+    fun resolvesANonJoinedChildForThePreviewButRejectsAStaleRoute() {
         val leftChild = spaceRoom(
             id = OPEN_CHILD,
             kind = MatrixSpaceRoomKind.ROOM,
@@ -42,8 +42,9 @@ class SpaceChildOpenPolicyTest {
         )
         val state = stateWith(leftChild)
 
-        assertNull(
-            state.joinedChildForOpen(
+        assertEquals(
+            leftChild,
+            state.childForOpen(
                 userId = OPEN_USER,
                 spaceId = OPEN_SPACE,
                 parentSpaceId = OPEN_PARENT,
@@ -53,7 +54,7 @@ class SpaceChildOpenPolicyTest {
         assertNull(
             state.copy(
                 target = state.target?.copy(parentSpaceId = "!other:example.org")
-            ).joinedChildForOpen(
+            ).childForOpen(
                 userId = OPEN_USER,
                 spaceId = OPEN_SPACE,
                 parentSpaceId = OPEN_PARENT,

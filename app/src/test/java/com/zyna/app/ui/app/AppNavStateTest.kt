@@ -104,6 +104,116 @@ class AppNavStateTest {
     }
 
     @Test
+    fun membershipPreviewKeepsItsExactParentSpaceActive() {
+        val parent = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+        val preview = parent.openSpaceJoinPreview(
+            roomId = "!track:example.org",
+            parentSpaceId = "!story:example.org",
+            displayName = "Track",
+            avatarUrl = null,
+            topic = null,
+            isSpace = true
+        )
+
+        assertTrue(preview.top is AppRoute.SpaceJoinPreview)
+        assertEquals("!story:example.org", preview.activeSpaceRoute?.spaceId)
+        assertEquals("!track:example.org", preview.activeSpaceJoinPreviewRoute?.roomId)
+        assertEquals(parent, preview.popActiveStack())
+        assertEquals(
+            parent,
+            parent.openSpaceJoinPreview(
+                roomId = "!track:example.org",
+                parentSpaceId = "!other:example.org",
+                displayName = "Track",
+                avatarUrl = null,
+                topic = null,
+                isSpace = true
+            )
+        )
+    }
+
+    @Test
+    fun rootSpaceInvitationOpensPreviewFromRoomsAndIsReplacedAfterJoin() {
+        val rooms = AppNavState().enterMain()
+        val preview = rooms.openSpaceJoinPreview(
+            roomId = "!story:example.org",
+            parentSpaceId = null,
+            displayName = "Story",
+            avatarUrl = null,
+            topic = null,
+            isSpace = true
+        )
+
+        assertEquals("!story:example.org", preview.activeSpaceJoinPreviewRoute?.roomId)
+        assertEquals(null, preview.activeSpaceRoute)
+        assertEquals(rooms, preview.popActiveStack())
+
+        val joined = preview.openSpace(
+            spaceId = "!story:example.org",
+            parentSpaceId = null,
+            displayName = "Story",
+            avatarUrl = null,
+            topic = null
+        )
+        assertEquals("!story:example.org", (joined.top as AppRoute.Space).spaceId)
+        assertFalse(joined.chatsStack.any { it is AppRoute.SpaceJoinPreview })
+    }
+
+    @Test
+    fun joinedPreviewIsReplacedWithoutLosingSpaceContext() {
+        val preview = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+            .openSpaceJoinPreview(
+                roomId = "!child:example.org",
+                parentSpaceId = "!story:example.org",
+                displayName = "Child",
+                avatarUrl = null,
+                topic = null,
+                isSpace = false
+            )
+
+        val chat = preview.openChatFromSpace("!child:example.org", "Child")
+        assertTrue(chat.top is AppRoute.Chat)
+        assertFalse(chat.chatsStack.any { it is AppRoute.SpaceJoinPreview })
+        assertEquals("!story:example.org", chat.activeSpaceRoute?.spaceId)
+
+        val trackPreview = preview.copy(
+            chatsStack = preview.chatsStack.dropLast(1) + AppRoute.SpaceJoinPreview(
+                roomId = "!track:example.org",
+                parentSpaceId = "!story:example.org",
+                displayName = "Track",
+                avatarUrl = null,
+                topic = null,
+                isSpace = true
+            )
+        )
+        val track = trackPreview.openSpace(
+            spaceId = "!track:example.org",
+            parentSpaceId = "!story:example.org",
+            displayName = "Track",
+            avatarUrl = null,
+            topic = null
+        )
+        assertEquals("!track:example.org", (track.top as AppRoute.Space).spaceId)
+        assertFalse(track.chatsStack.any { it is AppRoute.SpaceJoinPreview })
+    }
+
+    @Test
     fun createRoomFlowReplacesEditorWithInvitesAndKeepsTabsHidden() {
         val roomId = "!created:example.org"
         val displayName = "Friends"

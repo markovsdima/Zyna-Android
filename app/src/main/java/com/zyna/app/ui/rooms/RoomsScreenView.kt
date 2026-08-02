@@ -32,6 +32,7 @@ import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.presence.UserPresenceStatus
 import com.zyna.app.ui.presence.PresenceText
 import com.zyna.app.ui.time.AndroidTimeTextFormatter
@@ -1238,7 +1239,14 @@ private data class RoomsPalette(
 }
 
 private fun MatrixRoomSummary.previewText(context: Context): String {
-    if (isSpace) return context.getString(R.string.space_storyline)
+    if (isSpace) {
+        val storyline = context.getString(R.string.space_storyline)
+        return if (spaceMembership == MatrixSpaceMembership.INVITED) {
+            context.getString(R.string.space_invited_format, storyline)
+        } else {
+            storyline
+        }
+    }
     return lastMessageText?.takeIf { it.isNotBlank() } ?: "No messages"
 }
 

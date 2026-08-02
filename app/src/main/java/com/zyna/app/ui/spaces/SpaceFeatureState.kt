@@ -2,6 +2,7 @@ package com.zyna.app.ui.spaces
 
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixSpaceListSnapshot
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.MatrixSpaceRoom
 
 data class SpaceRootsState(
@@ -9,11 +10,6 @@ data class SpaceRootsState(
 ) {
     val spaces: List<MatrixSpaceRoom>
         get() = snapshot.rooms
-
-    val spaceIds: Set<String> = snapshot.rooms
-        .asSequence()
-        .map(MatrixSpaceRoom::roomId)
-        .toHashSet()
 
     val isKnown: Boolean
         get() = snapshot.isKnown
@@ -45,7 +41,7 @@ data class SpaceChildrenState(
             ?: chats.firstOrNull { it.roomId == roomId }
     }
 
-    fun joinedChildForOpen(
+    fun childForOpen(
         userId: String,
         spaceId: String,
         parentSpaceId: String?,
@@ -59,13 +55,14 @@ data class SpaceChildrenState(
         ) {
             return null
         }
-        return roomForId(childRoomId)?.takeIf(MatrixSpaceRoom::isJoined)
+        return roomForId(childRoomId)
     }
 }
 
 data class SpaceFeatureState(
     val roots: SpaceRootsState = SpaceRootsState(),
-    val children: SpaceChildrenState = SpaceChildrenState()
+    val children: SpaceChildrenState = SpaceChildrenState(),
+    val join: SpaceJoinState = SpaceJoinState()
 )
 
 internal fun visibleChatRootRooms(
@@ -75,11 +72,24 @@ internal fun visibleChatRootRooms(
     if (!roots.isKnown) return rooms
 
     val visible = ArrayList<MatrixRoomSummary>(rooms.size + roots.spaces.size)
+    val rootsById = roots.spaces.associateBy(MatrixSpaceRoom::roomId)
     val visibleRootIds = HashSet<String>(roots.spaces.size)
     rooms.forEach { room ->
-        if (!room.isSpace || room.id in roots.spaceIds) {
-            visible += room
-            if (room.isSpace) visibleRootIds += room.id
+        val joinedRoot = rootsById[room.id]
+        when {
+            !room.isSpace -> visible += room
+            joinedRoot != null -> {
+                visible += room.copy(
+                    displayName = joinedRoot.displayName,
+                    avatarUrl = joinedRoot.avatarUrl ?: room.avatarUrl,
+                    isSpace = true,
+                    spaceMembership = MatrixSpaceMembership.JOINED
+                )
+                visibleRootIds += room.id
+            }
+            room.spaceMembership == MatrixSpaceMembership.INVITED -> {
+                visible += room
+            }
         }
     }
     roots.spaces.forEach { root ->

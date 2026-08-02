@@ -5,6 +5,25 @@ import org.junit.Test
 
 class MatrixSpaceModelsTest {
     @Test
+    fun roomListSpaceInviteKeepsMembershipAcrossPreviewMapping() {
+        val summary = MatrixRoomSummary(
+            id = "!invite:example.org",
+            displayName = "Invited story",
+            avatarUrl = null,
+            isSpace = true,
+            spaceMembership = MatrixSpaceMembership.INVITED
+        )
+
+        val preview = summary.toSpaceRoom()
+
+        assertEquals(MatrixSpaceMembership.INVITED, preview.membership)
+        assertEquals(
+            MatrixSpaceMembership.JOINED,
+            preview.toJoinedRoomSummary().spaceMembership
+        )
+    }
+
+    @Test
     fun vectorUpdatesPreserveSdkOrderAndApplyEveryMutationKind() {
         val a = spaceRoom("a")
         val b = spaceRoom("b")

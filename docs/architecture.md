@@ -262,10 +262,28 @@ an early empty Spaces root update cannot remove cached roots until the SDK room
 list reports `Loaded`; at that transition, read a fresh root snapshot instead
 of promoting a pre-readiness update retroactively.
 
+The Spaces service is authoritative only for joined top-level Spaces. Pending
+Space invitations come from the ordinary room list, following the SDK's
+`Space + Invite` projection, and remain distinct from joined roots. Persist
+their membership so they are cache-first, show them as actionable invitations,
+and let a matching joined-root snapshot override a stale cached invite. Do not
+make every joined nested Space visible at the root merely to surface invites.
+After accepting a root invitation, keep a confirmed joined-root overlay until
+the joined-Spaces projection acknowledges it; the ordinary room list and the
+Spaces graph may publish the successful join in different frames.
+
 Request the first hierarchy page on activation, then paginate on viewport
 demand. A failed page request keeps the live session and cached content owned
 by the store and exposes an inline retry; it must not turn a populated screen
 into a terminal stale state.
+
+Keep the hierarchy observer read-only. Joining, accepting an invite, or
+requesting access belongs to a separate route-scoped command store that loads
+a fresh access context for one selected child immediately before mutation.
+Do not resolve restricted-room authorization for every hierarchy row. After a
+successful command, persist the exact cached child membership and keep a
+confirmed in-memory overlay until the live hierarchy explicitly reflects that
+membership; an older live snapshot must not visually undo a successful write.
 
 This is not a pull-to-refresh contract. Reactive SDK signals and session
 activation drive synchronization.

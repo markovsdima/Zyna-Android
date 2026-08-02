@@ -621,14 +621,8 @@ private class RoomHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
     ) {
         val row = itemView as SpaceRoomRowView
         row.bind(room, palette, matrixMediaLoader)
-        if (room.isJoined) {
-            row.isFocusable = true
-            row.setOnClickListener { onClick(room) }
-        } else {
-            row.setOnClickListener(null)
-            row.isClickable = false
-            row.isFocusable = false
-        }
+        row.isFocusable = true
+        row.setOnClickListener { onClick(room) }
     }
 }
 
@@ -712,8 +706,7 @@ private class SpaceRoomRowView(context: Context) : LinearLayout(context) {
             else -> context.getString(R.string.space_not_joined_format, baseSubtitle)
         }
         alpha = if (room.membership == MatrixSpaceMembership.JOINED) 1f else 0.72f
-        accessory.visibility =
-            if (room.membership == MatrixSpaceMembership.JOINED) View.VISIBLE else View.INVISIBLE
+        accessory.visibility = View.VISIBLE
         avatar.setPaletteBackground(palette.background)
         avatar.render(
             userId = room.roomId,
@@ -756,7 +749,8 @@ data class SpacePalette(
     val primaryText: Int,
     val secondaryText: Int,
     val tertiaryText: Int,
-    val accent: Int
+    val accent: Int,
+    val error: Int
 ) {
     companion object {
         fun from(context: Context): SpacePalette {
@@ -769,7 +763,8 @@ data class SpacePalette(
                     primaryText = Color.WHITE,
                     secondaryText = Color.rgb(0x98, 0x98, 0x9F),
                     tertiaryText = Color.rgb(0x63, 0x63, 0x68),
-                    accent = Color.rgb(0x0A, 0x84, 0xFF)
+                    accent = Color.rgb(0x0A, 0x84, 0xFF),
+                    error = Color.rgb(0xFF, 0x45, 0x3A)
                 )
             } else {
                 SpacePalette(
@@ -778,7 +773,8 @@ data class SpacePalette(
                     primaryText = Color.rgb(0x1C, 0x1C, 0x1E),
                     secondaryText = Color.rgb(0x63, 0x63, 0x68),
                     tertiaryText = Color.rgb(0xC7, 0xC7, 0xCC),
-                    accent = Color.rgb(0x00, 0x7A, 0xFF)
+                    accent = Color.rgb(0x00, 0x7A, 0xFF),
+                    error = Color.rgb(0xD7, 0x00, 0x15)
                 )
             }
         }
@@ -790,7 +786,8 @@ data class SpacePalette(
                 primaryText = Color.BLACK,
                 secondaryText = Color.DKGRAY,
                 tertiaryText = Color.LTGRAY,
-                accent = Color.BLUE
+                accent = Color.BLUE,
+                error = Color.RED
             )
         }
     }

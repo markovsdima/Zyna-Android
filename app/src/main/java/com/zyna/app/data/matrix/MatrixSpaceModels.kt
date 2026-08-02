@@ -56,10 +56,57 @@ data class MatrixSpaceRoom(
             id = roomId,
             displayName = displayName,
             avatarUrl = avatarUrl,
-            isSpace = kind == MatrixSpaceRoomKind.SPACE
+            isSpace = kind == MatrixSpaceRoomKind.SPACE,
+            spaceMembership = if (kind == MatrixSpaceRoomKind.SPACE) {
+                MatrixSpaceMembership.JOINED
+            } else {
+                MatrixSpaceMembership.UNKNOWN
+            }
         )
     }
 }
+
+internal fun MatrixRoomSummary.toSpaceRoom(): MatrixSpaceRoom {
+    check(isSpace) { "Room summary is not a Space" }
+    return MatrixSpaceRoom(
+        roomId = id,
+        displayName = displayName,
+        avatarUrl = avatarUrl,
+        topic = roomDetails?.topic,
+        kind = MatrixSpaceRoomKind.SPACE,
+        membership = spaceMembership,
+        joinedMemberCount = roomDetails?.joinedMemberCount ?: 0L,
+        childrenCount = 0L,
+        canonicalAlias = roomDetails?.canonicalAlias,
+        joinRule = when (roomDetails?.access) {
+            MatrixRoomAccess.PUBLIC -> MatrixSpaceJoinRule.PUBLIC
+            MatrixRoomAccess.PRIVATE -> MatrixSpaceJoinRule.INVITE
+            MatrixRoomAccess.ASK_TO_JOIN -> MatrixSpaceJoinRule.KNOCK
+            MatrixRoomAccess.RESTRICTED -> MatrixSpaceJoinRule.RESTRICTED
+            MatrixRoomAccess.CUSTOM -> MatrixSpaceJoinRule.CUSTOM
+            MatrixRoomAccess.UNKNOWN,
+            null -> MatrixSpaceJoinRule.UNKNOWN
+        },
+        worldReadable = null,
+        guestCanJoin = false,
+        isDirect = false,
+        isDm = false,
+        via = emptyList()
+    )
+}
+
+/**
+ * Fresh protocol metadata used to decide whether a non-joined Space child can be opened,
+ * joined directly, or knocked on.
+ *
+ * Restricted rules are intentionally resolved only for the active preview target. Resolving them
+ * for every hierarchy row would turn each Space list update into multiple FFI calls.
+ */
+data class MatrixSpaceJoinContext(
+    val room: MatrixSpaceRoom,
+    val canJoinRestrictedDirectly: Boolean? = null,
+    val hasUnsupportedRestrictedAllowRules: Boolean = false
+)
 
 /**
  * Cached and live representation of one ordered Space list.

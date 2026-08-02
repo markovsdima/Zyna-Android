@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.matrix.rustcomponents.sdk.AllowRule
 import org.matrix.rustcomponents.sdk.JoinRule
 import org.matrix.rustcomponents.sdk.Membership
 import org.matrix.rustcomponents.sdk.RoomType
@@ -159,6 +160,52 @@ class MatrixSpaceService(
         }
     }
 
+    /** Loads fresh metadata for one preview without expanding hierarchy list mapping work. */
+    suspend fun loadJoinContext(
+        userId: String,
+        roomId: String,
+        fallbackRoom: MatrixSpaceRoom
+    ): MatrixSpaceJoinContext = withContext(Dispatchers.IO) {
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        require(fallbackRoom.roomId == normalizedRoomId) {
+            "Fallback room does not match the requested room"
+        }
+
+        // Pending invitations are part of the client's local room list, but Spaces hierarchy APIs
+        // are allowed to omit them (notably for an invited top-level Space). Membership from the
+        // local Room is authoritative for accepting an invite and also avoids making preview
+        // availability depend on hierarchy pagination. Keep SpaceService below for non-joined
+        // children because it carries the exact restricted-room allow rules.
+        matrixClientService.loadLocalSpaceJoinContext(
+            userId = userId,
+            roomId = normalizedRoomId,
+            fallbackRoom = fallbackRoom
+        )?.let { return@withContext it }
+
+        val sdkRoom = mutex.withLock {
+            val service = activeSession
+                ?.takeIf { it.userId == userId }
+                ?.service
+                ?: error("Spaces are not active for this Matrix session")
+            service.getSpaceRoom(normalizedRoomId)
+                ?: error("Space room is not available")
+        }
+        val restrictedRules = when (val rule = sdkRoom.joinRule) {
+            is JoinRule.Restricted -> rule.rules
+            is JoinRule.KnockRestricted -> rule.rules
+            else -> null
+        }
+        MatrixSpaceJoinContext(
+            room = sdkRoom.toMatrixSpaceRoom(),
+            canJoinRestrictedDirectly = restrictedRules?.restrictedRoomIds()?.let {
+                matrixClientService.isJoinedToAnyRoom(userId, it)
+            },
+            hasUnsupportedRestrictedAllowRules = restrictedRules
+                ?.any { it !is AllowRule.RoomMembership } == true
+        )
+    }
+
     private suspend fun requireActiveService(userId: String): SpaceService {
         return mutex.withLock {
             activeSession
@@ -176,6 +223,12 @@ class MatrixSpaceService(
         activeSession?.service?.destroy()
         activeSession = null
     }
+}
+
+private fun List<AllowRule>.restrictedRoomIds(): List<String> {
+    return mapNotNull { rule ->
+        (rule as? AllowRule.RoomMembership)?.roomId?.takeIf(String::isNotBlank)
+    }.distinct()
 }
 
 private class SdkSpaceRoomListSession(

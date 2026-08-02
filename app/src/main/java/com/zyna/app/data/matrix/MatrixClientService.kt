@@ -184,6 +184,8 @@ data class MatrixRoomSummary(
     val avatarUrl: String?,
     val directUserId: String? = null,
     val isSpace: Boolean = false,
+    /** Current membership is retained only for Space invitation presentation. */
+    val spaceMembership: MatrixSpaceMembership = MatrixSpaceMembership.UNKNOWN,
     val lastMessageText: String? = null,
     val lastMessageSenderName: String? = null,
     val lastMessageAtMillis: Long? = null,
@@ -839,9 +841,134 @@ class MatrixClientService(
         )
     }
 
+    internal suspend fun isJoinedToAnyRoom(
+        userId: String,
+        roomIds: List<String>
+    ): Boolean = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        roomIds.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+            .any { roomId ->
+                knownRoomOrNull(userId, activeClient, roomId)?.use { room ->
+                    room.membership() == Membership.JOINED
+                } == true
+            }
+    }
+
+    /**
+     * Resolves membership for a Space already represented by the local Room API.
+     *
+     * Invited and joined Spaces are authoritative here even when SpaceService does not expose
+     * them through its hierarchy lookup. The fallback keeps cache-first presentation stable if
+     * optional room metadata is temporarily unreadable; only the fresh membership is required for
+     * the command preflight.
+     */
+    internal suspend fun loadLocalSpaceJoinContext(
+        userId: String,
+        roomId: String,
+        fallbackRoom: MatrixSpaceRoom
+    ): MatrixSpaceJoinContext? = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        require(fallbackRoom.roomId == normalizedRoomId) {
+            "Fallback room does not match the requested room"
+        }
+        val localRoom = knownRoomOrNull(userId, activeClient, normalizedRoomId)
+            ?: return@withContext null
+        localRoom.use { room ->
+            val membership = when (room.membership()) {
+                Membership.INVITED -> MatrixSpaceMembership.INVITED
+                Membership.JOINED -> MatrixSpaceMembership.JOINED
+                else -> return@withContext null
+            }
+            val refreshedRoom = runCatching { room.toRoomSummary() }
+                .getOrNull()
+                ?.takeIf { it.isSpace }
+                ?.toSpaceRoom()
+            MatrixSpaceJoinContext(
+                room = (refreshedRoom ?: fallbackRoom).copy(membership = membership)
+            )
+        }
+    }
+
+    suspend fun joinRoomFromSpace(
+        userId: String,
+        roomId: String,
+        serverNames: List<String>
+    ): MatrixRoomSummary = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        val normalizedServerNames = serverNames
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .distinct()
+        val joinedRoom = if (normalizedServerNames.isEmpty()) {
+            // Invites are already known to the homeserver. This path does not depend on the
+            // invited room being exposed by Client.getRoom(), which the SDK does not guarantee.
+            activeClient.joinRoomById(normalizedRoomId)
+        } else {
+            activeClient.joinRoomByIdOrAlias(
+                roomIdOrAlias = normalizedRoomId,
+                serverNames = normalizedServerNames
+            )
+        }
+        joinedRoom.use { room ->
+            room.toRoomSummary()
+        }
+    }
+
+    suspend fun knockRoomFromSpace(
+        userId: String,
+        roomId: String,
+        serverNames: List<String>
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        activeClient.knock(
+            roomIdOrAlias = normalizedRoomId,
+            reason = null,
+            serverNames = serverNames.map(String::trim).filter(String::isNotEmpty).distinct()
+        ).use { }
+    }
+
     suspend fun setOwnDisplayName(displayName: String) = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         activeClient.setDisplayName(displayName)
+    }
+
+    private fun requireActiveClient(userId: String): Client {
+        val activeClient = client ?: error("Matrix client is not ready")
+        val activeUserId = when (val current = state.value) {
+            is MatrixClientState.LoggedIn -> current.userId
+            is MatrixClientState.Syncing -> current.userId
+            else -> null
+        }
+        check(activeUserId == userId) { "Matrix session changed" }
+        return activeClient
+    }
+
+    /**
+     * Resolves rooms from the SDK room-list projection before falling back to Client.getRoom().
+     *
+     * Invited rooms are visible in the room list but are not guaranteed to be returned by
+     * Client.getRoom(). The room-list service is therefore the authoritative lookup boundary for
+     * membership commands, matching the ownership model used by Element's Rust room factory.
+     */
+    private fun knownRoomOrNull(userId: String, activeClient: Client, roomId: String): Room? {
+        val roomListRoom = synchronized(roomListSessionsLock) {
+            val service = roomListService
+            if (service == null || activeMatrixUserId() != userId) {
+                null
+            } else {
+                runCatching { service.room(roomId) }.getOrNull()
+            }
+        }
+        return roomListRoom ?: activeClient.getRoom(roomId)
     }
 
     suspend fun uploadOwnAvatar(
@@ -2746,6 +2873,17 @@ class MatrixClientService(
             avatarUrl = sdkAvatarUrl ?: roomInfo?.avatarUrl,
             directUserId = roomInfo?.directUserId(),
             isSpace = roomInfo?.isSpace == true,
+            spaceMembership = if (roomInfo?.isSpace == true) {
+                when (roomInfo.membership) {
+                    Membership.INVITED -> MatrixSpaceMembership.INVITED
+                    Membership.JOINED -> MatrixSpaceMembership.JOINED
+                    Membership.LEFT -> MatrixSpaceMembership.LEFT
+                    Membership.KNOCKED -> MatrixSpaceMembership.KNOCKED
+                    Membership.BANNED -> MatrixSpaceMembership.BANNED
+                }
+            } else {
+                MatrixSpaceMembership.UNKNOWN
+            },
             lastMessageText = latestPreview.body,
             lastMessageSenderName = latestPreview.senderName,
             lastMessageAtMillis = latestPreview.timestampMillis,

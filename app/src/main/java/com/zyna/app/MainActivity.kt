@@ -411,9 +411,10 @@ class MainActivity : AppCompatActivity() {
                             },
                             combine(
                                 appViewModel.spaceRootsState,
-                                appViewModel.spaceChildrenState
-                            ) { roots, children ->
-                                SpaceFeatureState(roots = roots, children = children)
+                                appViewModel.spaceChildrenState,
+                                appViewModel.spaceJoinState
+                            ) { roots, children, join ->
+                                SpaceFeatureState(roots = roots, children = children, join = join)
                             }
                         ) { state, roomList, room, spaces ->
                             AppFeatureInput(
@@ -559,7 +560,9 @@ class MainActivity : AppCompatActivity() {
                 onOpenRoom = appViewModel::openSpaceChild,
                 onLoadMore = appViewModel::loadMoreSpaceChildren,
                 onRetry = appViewModel::retrySpaceChildren,
-                onOpenDetails = appViewModel::openRoomDetails
+                onOpenDetails = appViewModel::openRoomDetails,
+                onPerformJoinAction = appViewModel::performSpaceJoinAction,
+                onRetryJoinPreview = appViewModel::retrySpaceJoinPreview
             ),
             createRoom = CreateRoomActions(
                 onNameChanged = appViewModel::setCreateRoomName,
@@ -1518,6 +1521,8 @@ private fun AppRoute.perfName(): String {
             "InviteCreatedRoomMembers(${roomId.takeLast(10)})"
         is AppRoute.Space ->
             "Space(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+        is AppRoute.SpaceJoinPreview ->
+            "SpaceJoinPreview(${roomId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
         AppRoute.CreateRoom -> "CreateRoom"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"

@@ -28,6 +28,7 @@ import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
 import com.zyna.app.data.matrix.MatrixRoomKind
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixRtcCallEventDetails
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.toMatrixChatMessage
 import com.zyna.app.data.messaging.ZynaHtmlCodec
 import com.zyna.app.data.messaging.ZynaMessageAttributes
@@ -196,7 +197,11 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         displayName = displayName,
         avatarUrl = avatarUrl,
         directUserId = directUserId ?: existingRoom?.directUserId,
-        isSpace = isSpace,
+        isSpace = isSpace || existingRoom?.isSpace == true,
+        spaceMembership = cachedSpaceMembership(
+            incoming = spaceMembership,
+            existing = existingRoom?.spaceMembership
+        ),
         lastMessageText = preview.text,
         lastMessageSenderName = preview.senderName,
         lastMessageAtMillis = preview.timestampMillis,
@@ -238,6 +243,16 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
             existingRoom?.detailsUpdatedAtMillis
         }
     )
+}
+
+internal fun cachedSpaceMembership(
+    incoming: MatrixSpaceMembership,
+    existing: String?
+): String? {
+    return incoming
+        .takeUnless { membership -> membership == MatrixSpaceMembership.UNKNOWN }
+        ?.name
+        ?: existing
 }
 
 private fun CachedRoomEntity.hasSameCachedContent(existing: CachedRoomEntity): Boolean {
@@ -2476,6 +2491,9 @@ class LocalCacheRepository(
             avatarUrl = avatarUrl,
             directUserId = directUserId,
             isSpace = isSpace,
+            spaceMembership = spaceMembership.toCachedEnumOrDefault(
+                MatrixSpaceMembership.UNKNOWN
+            ),
             lastMessageText = lastMessageText,
             lastMessageSenderName = lastMessageSenderName,
             lastMessageAtMillis = lastMessageAtMillis,

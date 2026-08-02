@@ -25,6 +25,7 @@ import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.MatrixSpaceRoom
 import com.zyna.app.data.matrix.MatrixSpaceRoomKind
 import com.zyna.app.ui.app.AppRoute
+import com.zyna.app.ui.app.toSpaceRoomSeed
 import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.app.AppUiState
 import com.zyna.app.ui.auth.LoginScreen
@@ -105,6 +106,10 @@ import com.zyna.app.ui.settings.SettingsScreenView
 import com.zyna.app.ui.settings.SettingsScreenViewActions
 import com.zyna.app.ui.settings.SettingsScreenViewState
 import com.zyna.app.ui.spaces.SpaceFeatureState
+import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenActions
+import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenState
+import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenView
+import com.zyna.app.ui.spaces.SpaceJoinState
 import com.zyna.app.ui.spaces.SpacePresentationKind
 import com.zyna.app.ui.spaces.SpaceScreenView
 import com.zyna.app.ui.spaces.SpaceScreenViewActions
@@ -227,6 +232,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     private var fullscreenBackStartY = 0f
     private var fullscreenBackProgress = 0f
     private var fullscreenBackVelocityTracker: VelocityTracker? = null
+    private var ownsFullscreenBackTouchSequence = false
     private var systemBackInProgress = false
     private var navigationTouchSuppressionUntilUptimeMs = 0L
     private var isSuppressingNavigationTouchSequence = false
@@ -320,13 +326,28 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        if (
-            fullscreenBackGesturePhase != FullscreenBackGesturePhase.Idle &&
-            handleFullscreenBackGesture(event, fromIntercept = false)
-        ) {
-            return true
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            // Keep an unclaimed stream alive so the watcher can inspect later MOVE events.
+            ownsFullscreenBackTouchSequence =
+                fullscreenBackGesturePhase == FullscreenBackGesturePhase.Watching
+            if (ownsFullscreenBackTouchSequence) {
+                return true
+            }
         }
-        return super.onTouchEvent(event)
+
+        val handledByBackGesture =
+            fullscreenBackGesturePhase != FullscreenBackGesturePhase.Idle &&
+                handleFullscreenBackGesture(event, fromIntercept = false)
+        val shouldConsume = ownsFullscreenBackTouchSequence || handledByBackGesture
+
+        if (
+            event.actionMasked == MotionEvent.ACTION_UP ||
+            event.actionMasked == MotionEvent.ACTION_CANCEL
+        ) {
+            ownsFullscreenBackTouchSequence = false
+        }
+
+        return shouldConsume || super.onTouchEvent(event)
     }
 
     fun render(
@@ -993,6 +1014,12 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     dependencies = dependencies,
                     route = route
                 )
+                is AppRoute.SpaceJoinPreview -> spaceJoinPreviewEntry(
+                    spaces = spaces,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
+                )
                 is AppRoute.Chat -> chatEntry(
                     state,
                     roomList,
@@ -1286,6 +1313,40 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         "known=${routeOwnedState?.isKnown == true} " +
                         "rooms=${routeOwnedState?.let { it.tracks.size + it.chats.size } ?: 0}"
                 }
+            }
+        )
+    }
+
+    private fun spaceJoinPreviewEntry(
+        spaces: SpaceFeatureState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.SpaceJoinPreview
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "space-join:${route.parentSpaceId.orEmpty()}:${route.roomId}",
+            createView = { context -> SpaceJoinPreviewScreenView(context) },
+            updateView = { view ->
+                val routeState = spaces.join.takeIf { state ->
+                    state.target?.let { target ->
+                        target.parentSpaceId == route.parentSpaceId &&
+                            target.roomId == route.roomId
+                    } == true
+                } ?: SpaceJoinState()
+                val fallback = route.toSpaceRoomSeed()
+                (view as SpaceJoinPreviewScreenView).render(
+                    state = SpaceJoinPreviewScreenState(
+                        join = routeState,
+                        fallbackRoom = fallback,
+                        isRootSpace = route.parentSpaceId == null,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = SpaceJoinPreviewScreenActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onPrimaryAction = actions.spaces.onPerformJoinAction,
+                        onRetry = actions.spaces.onRetryJoinPreview
+                    )
+                )
             }
         )
     }
@@ -2204,6 +2265,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "InviteCreatedRoomMembers(${roomId.takeLast(10)})"
             is AppRoute.Space ->
                 "Space(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+            is AppRoute.SpaceJoinPreview ->
+                "SpaceJoinPreview(${roomId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

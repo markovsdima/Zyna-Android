@@ -1,6 +1,7 @@
 package com.zyna.app.ui.spaces
 
 import com.zyna.app.data.matrix.MatrixSpaceListSnapshot
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.MatrixSpaceRemoteSnapshot
 import com.zyna.app.data.matrix.MatrixSpaceRoom
 import com.zyna.app.data.matrix.MatrixSpaceRoomListSession
@@ -306,6 +307,111 @@ class SpaceChildrenStoreTest {
             assertFalse(fixture.writes.any { (spaceId, _, snapshot) ->
                 spaceId == SPACE_A && snapshot.rooms.any { it.roomId == "stale" }
             })
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun confirmedMembershipStaysVisibleUntilLiveGraphReflectsIt() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val child = spaceRoom(
+            id = "child",
+            kind = MatrixSpaceRoomKind.ROOM,
+            membership = MatrixSpaceMembership.LEFT
+        )
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(child),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.session(SPACE_A).paginateCount == 1 }
+
+            fixture.store.confirmChildMembership(
+                userId = CHILDREN_USER,
+                spaceId = SPACE_A,
+                roomId = child.roomId,
+                membership = MatrixSpaceMembership.JOINED
+            )
+            awaitSpaceCondition {
+                fixture.store.state.value.chats.singleOrNull()?.membership ==
+                    MatrixSpaceMembership.JOINED
+            }
+
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                rooms = listOf(child),
+                isKnown = true,
+                endReached = false
+            )
+            yield()
+            assertEquals(
+                MatrixSpaceMembership.JOINED,
+                fixture.store.state.value.chats.single().membership
+            )
+
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                rooms = listOf(child.copy(membership = MatrixSpaceMembership.JOINED)),
+                isKnown = true,
+                endReached = true
+            )
+            yield()
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                rooms = listOf(child),
+                isKnown = true,
+                endReached = true
+            )
+            awaitSpaceCondition {
+                fixture.store.state.value.chats.singleOrNull()?.membership ==
+                    MatrixSpaceMembership.LEFT
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun confirmedMembershipYieldsToANewerConcreteLiveTransition() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val child = spaceRoom(
+            id = "child",
+            kind = MatrixSpaceRoomKind.ROOM,
+            membership = MatrixSpaceMembership.LEFT
+        )
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(child),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.session(SPACE_A).paginateCount == 1 }
+
+            fixture.store.confirmChildMembership(
+                userId = CHILDREN_USER,
+                spaceId = SPACE_A,
+                roomId = child.roomId,
+                membership = MatrixSpaceMembership.KNOCKED
+            )
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                rooms = listOf(child.copy(membership = MatrixSpaceMembership.INVITED)),
+                isKnown = true,
+                endReached = true
+            )
+
+            awaitSpaceCondition {
+                fixture.store.state.value.chats.singleOrNull()?.membership ==
+                    MatrixSpaceMembership.INVITED
+            }
+            assertEquals(
+                MatrixSpaceMembership.INVITED,
+                fixture.writes.last().third.rooms.single().membership
+            )
         } finally {
             fixture.close()
         }

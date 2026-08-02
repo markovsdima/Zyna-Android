@@ -2,6 +2,7 @@ package com.zyna.app.ui.spaces
 
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixSpaceListSnapshot
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.spaceRoom
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
@@ -45,6 +46,45 @@ class SpaceRootPresentationTest {
     }
 
     @Test
+    fun invitedSpaceIsVisibleWithoutBeingAJoinedRoot() {
+        val invitation = room(
+            id = "invite",
+            isSpace = true,
+            membership = MatrixSpaceMembership.INVITED
+        )
+
+        val result = visibleChatRootRooms(
+            rooms = listOf(invitation, room("nested", isSpace = true)),
+            roots = SpaceRootsState(
+                MatrixSpaceListSnapshot(isKnown = true, endReached = true)
+            )
+        )
+
+        assertEquals(listOf(invitation), result)
+    }
+
+    @Test
+    fun joinedRootSnapshotOverridesAStaleCachedInvitation() {
+        val staleInvite = room(
+            id = "root",
+            isSpace = true,
+            membership = MatrixSpaceMembership.INVITED
+        )
+        val roots = SpaceRootsState(
+            MatrixSpaceListSnapshot(
+                rooms = listOf(spaceRoom("root", displayName = "Joined")),
+                isKnown = true,
+                endReached = true
+            )
+        )
+
+        val result = visibleChatRootRooms(listOf(staleInvite), roots)
+
+        assertEquals("Joined", result.single().displayName)
+        assertEquals(MatrixSpaceMembership.JOINED, result.single().spaceMembership)
+    }
+
+    @Test
     fun unknownRootsPreserveExistingFirstFrame() {
         val rooms = listOf(room("nested", isSpace = true))
 
@@ -69,12 +109,21 @@ class SpaceRootPresentationTest {
         assertNotSame(first, projection.project(rooms.toList(), roots))
     }
 
-    private fun room(id: String, isSpace: Boolean = false): MatrixRoomSummary {
+    private fun room(
+        id: String,
+        isSpace: Boolean = false,
+        membership: MatrixSpaceMembership = if (isSpace) {
+            MatrixSpaceMembership.JOINED
+        } else {
+            MatrixSpaceMembership.UNKNOWN
+        }
+    ): MatrixRoomSummary {
         return MatrixRoomSummary(
             id = id,
             displayName = id,
             avatarUrl = null,
-            isSpace = isSpace
+            isSpace = isSpace,
+            spaceMembership = membership
         )
     }
 }

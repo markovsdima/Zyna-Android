@@ -211,6 +211,64 @@ class SpaceRootsStoreTest {
             fixture.close()
         }
     }
+
+    @Test
+    fun confirmedRootJoinSurvivesStaleRootsUntilTheLiveGraphAcknowledgesIt() = runBlocking {
+        val fixture = SpaceRootsFixture(coroutineContext)
+        val joined = spaceRoom("accepted")
+        fixture.cache(ROOTS_USER_A).value = MatrixSpaceListSnapshot(
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(ROOTS_USER_A)
+            fixture.store.confirmJoinedRoot(ROOTS_USER_A, joined)
+
+            assertEquals(listOf("accepted"), fixture.store.state.value.spaces.map { it.roomId })
+
+            fixture.store.enableLive(ROOTS_USER_A)
+            fixture.readiness.value = true
+            awaitSpaceCondition { fixture.live(ROOTS_USER_A).subscriptionCount.value > 0 }
+
+            assertEquals(listOf("accepted"), fixture.store.state.value.spaces.map { it.roomId })
+
+            fixture.live(ROOTS_USER_A).emit(
+                listOf(MatrixSpaceListUpdate.Reset(listOf(joined)))
+            )
+            awaitSpaceCondition {
+                fixture.writes.lastOrNull()?.second?.rooms?.singleOrNull()?.roomId == "accepted"
+            }
+            fixture.live(ROOTS_USER_A).emit(listOf(MatrixSpaceListUpdate.Reset(emptyList())))
+            awaitSpaceCondition { fixture.store.state.value.spaces.isEmpty() }
+
+            assertTrue(fixture.writes.last().second.rooms.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun rootAlreadyAcknowledgedByLiveDoesNotCreateAStickyConfirmation() = runBlocking {
+        val fixture = SpaceRootsFixture(coroutineContext)
+        val joined = spaceRoom("accepted")
+        fixture.currentRooms[ROOTS_USER_A] = listOf(joined)
+        try {
+            fixture.store.activate(ROOTS_USER_A)
+            fixture.store.enableLive(ROOTS_USER_A)
+            fixture.readiness.value = true
+            awaitSpaceCondition {
+                fixture.store.state.value.spaces.singleOrNull()?.roomId == "accepted"
+            }
+
+            fixture.store.confirmJoinedRoot(ROOTS_USER_A, joined)
+            fixture.live(ROOTS_USER_A).emit(listOf(MatrixSpaceListUpdate.Reset(emptyList())))
+            awaitSpaceCondition { fixture.store.state.value.spaces.isEmpty() }
+
+            assertTrue(fixture.writes.last().second.rooms.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
 }
 
 private class SpaceRootsFixture(parentContext: CoroutineContext) {

@@ -101,6 +101,20 @@ interface CachedSpaceDao {
 
     @Query(
         """
+        UPDATE space_list_entries
+        SET membership = :membership
+        WHERE userId = :userId AND listId = :listId AND roomId = :roomId
+        """
+    )
+    suspend fun updateEntryMembership(
+        userId: String,
+        listId: String,
+        roomId: String,
+        membership: String
+    ): Int
+
+    @Query(
+        """
         DELETE FROM space_list_entries
         WHERE userId = :userId AND listId = :listId
         """

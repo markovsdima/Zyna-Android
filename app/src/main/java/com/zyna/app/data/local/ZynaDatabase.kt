@@ -21,7 +21,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         CachedSpaceListSnapshotEntity::class,
         CachedSpaceListEntryEntity::class
     ],
-    version = 27,
+    version = 28,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -83,7 +83,8 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_23_24,
                     MIGRATION_24_25,
                     MIGRATION_25_26,
-                    MIGRATION_26_27
+                    MIGRATION_26_27,
+                    MIGRATION_27_28
                 )
                 .build()
         }
@@ -592,6 +593,12 @@ abstract class ZynaDatabase : RoomDatabase() {
         private val MIGRATION_26_27 = object : Migration(26, 27) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE rooms ADD COLUMN listPosition INTEGER")
+            }
+        }
+
+        private val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN spaceMembership TEXT")
             }
         }
     }

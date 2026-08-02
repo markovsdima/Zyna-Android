@@ -3,6 +3,7 @@ package com.zyna.app.ui.spaces
 import androidx.annotation.MainThread
 import com.zyna.app.data.local.SpaceCacheRepository
 import com.zyna.app.data.matrix.MatrixSpaceListSnapshot
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.MatrixSpaceRemoteSnapshot
 import com.zyna.app.data.matrix.MatrixSpaceRoom
 import com.zyna.app.data.matrix.MatrixSpaceRoomKind
@@ -59,6 +60,7 @@ internal class SpaceChildrenStore(
     private var liveSession: MatrixSpaceRoomListSession? = null
     private var latestCachedSnapshot: MatrixSpaceListSnapshot? = null
     private var isRequestingPagination = false
+    private val confirmedMemberships = mutableMapOf<String, ConfirmedMembershipOverlay>()
 
     @MainThread
     fun activate(target: SpaceTarget) {
@@ -110,6 +112,42 @@ internal class SpaceChildrenStore(
         liveJob = launchLiveObservation(current)
     }
 
+    /**
+     * Keeps a successful user mutation visible until the hierarchy stream reflects it.
+     * The command store persists the same membership before delivering this confirmation.
+     */
+    @MainThread
+    fun confirmChildMembership(
+        userId: String,
+        spaceId: String,
+        roomId: String,
+        membership: MatrixSpaceMembership
+    ) {
+        val current = activation ?: return
+        if (
+            current.target.userId != userId ||
+            current.target.spaceId != spaceId ||
+            roomId.isBlank()
+        ) {
+            return
+        }
+        val currentRoom = _state.value.roomForId(roomId) ?: return
+        if (
+            currentRoom.membership == membership &&
+            confirmedMemberships[roomId]?.membership == membership
+        ) {
+            return
+        }
+        confirmedMemberships[roomId] = ConfirmedMembershipOverlay(
+            membership = membership,
+            replacedMembership = currentRoom.membership
+        )
+        _state.update { state -> state.withConfirmedMembership(roomId, membership) }
+
+        latestCachedSnapshot = latestCachedSnapshot
+            ?.withConfirmedMemberships(confirmedMemberships)
+    }
+
     @MainThread
     fun deactivate() {
         generation += 1
@@ -124,6 +162,7 @@ internal class SpaceChildrenStore(
         liveSession = null
         latestCachedSnapshot = null
         isRequestingPagination = false
+        confirmedMemberships.clear()
         _state.value = SpaceChildrenState()
     }
 
@@ -135,13 +174,14 @@ internal class SpaceChildrenStore(
                     current.target.spaceId
                 ).collect { snapshot ->
                     if (!isCurrent(current)) return@collect
+                    val visibleSnapshot = snapshot.withConfirmedMemberships(confirmedMemberships)
                     val latest = latestCachedSnapshot
-                    if (snapshot.isKnown) {
-                        latestCachedSnapshot = snapshot
+                    if (visibleSnapshot.isKnown) {
+                        latestCachedSnapshot = visibleSnapshot
                     } else if (latest?.isKnown == true) {
                         return@collect
                     }
-                    _state.value = snapshot.toChildrenState(
+                    _state.value = visibleSnapshot.toChildrenState(
                         target = current.target,
                         transient = _state.value
                     )
@@ -169,6 +209,12 @@ internal class SpaceChildrenStore(
                 requestPagination(current, openedSession, ignoreCachedEnd = true)
                 openedSession.snapshots.collect { remote ->
                     if (!isCurrent(current)) return@collect
+                    confirmedMemberships.entries.removeAll { (roomId, confirmation) ->
+                        remote.rooms
+                            .firstOrNull { it.roomId == roomId }
+                            ?.membership
+                            ?.let(confirmation::isSupersededBy) == true
+                    }
                     _state.update { state ->
                         state.copy(
                             isPaginating = remote.isPaginating,
@@ -183,7 +229,7 @@ internal class SpaceChildrenStore(
                         cached = latestCachedSnapshot,
                         remote = remote,
                         fallbackSpace = _state.value.space ?: current.target.seed
-                    )
+                    )?.withConfirmedMemberships(confirmedMemberships)
                     if (
                         content != null &&
                         content != latestCachedSnapshot?.withoutUpdateTime()
@@ -282,6 +328,47 @@ internal class SpaceChildrenStore(
     private fun isCurrent(current: Activation): Boolean {
         return activation === current && generation == current.generation
     }
+}
+
+private fun SpaceChildrenState.withConfirmedMembership(
+    roomId: String,
+    membership: MatrixSpaceMembership
+): SpaceChildrenState {
+    fun List<MatrixSpaceRoom>.patched(): List<MatrixSpaceRoom> {
+        return map { room ->
+            if (room.roomId == roomId) room.copy(membership = membership) else room
+        }
+    }
+    return copy(tracks = tracks.patched(), chats = chats.patched())
+}
+
+private data class ConfirmedMembershipOverlay(
+    val membership: MatrixSpaceMembership,
+    val replacedMembership: MatrixSpaceMembership
+) {
+    /**
+     * The expected value acknowledges the command. A different concrete value represents a newer
+     * membership transition that may have skipped the expected state in a conflated SDK stream.
+     * UNKNOWN carries no ordering information and cannot supersede a successful local command.
+     */
+    fun isSupersededBy(remoteMembership: MatrixSpaceMembership): Boolean {
+        return remoteMembership == membership ||
+            (remoteMembership != MatrixSpaceMembership.UNKNOWN &&
+                remoteMembership != replacedMembership)
+    }
+}
+
+private fun MatrixSpaceListSnapshot.withConfirmedMemberships(
+    memberships: Map<String, ConfirmedMembershipOverlay>
+): MatrixSpaceListSnapshot {
+    if (memberships.isEmpty()) return this
+    return copy(
+        rooms = rooms.map { room ->
+            memberships[room.roomId]
+                ?.let { confirmation -> room.copy(membership = confirmation.membership) }
+                ?: room
+        }
+    )
 }
 
 internal fun createSpaceChildrenStore(

@@ -30,6 +30,7 @@ import com.zyna.app.data.matrix.MatrixSpaceRoom
 import com.zyna.app.data.matrix.MatrixSpaceRoomKind
 import com.zyna.app.data.matrix.MatrixSpaceService
 import com.zyna.app.data.matrix.MatrixUserProfile
+import com.zyna.app.data.matrix.toSpaceRoom
 import com.zyna.app.data.outgoing.OutgoingOutboxService
 import com.zyna.app.data.outgoing.OutgoingPhotoDraft
 import com.zyna.app.data.outgoing.OutgoingVoiceDraft
@@ -101,9 +102,13 @@ import com.zyna.app.ui.roomprofile.createRoomProfileEditorStore
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
 import com.zyna.app.ui.spaces.SpaceChildrenState
+import com.zyna.app.ui.spaces.SpaceJoinError
+import com.zyna.app.ui.spaces.SpaceJoinState
+import com.zyna.app.ui.spaces.SpaceJoinTarget
 import com.zyna.app.ui.spaces.SpaceTarget
 import com.zyna.app.ui.spaces.SpaceRootsState
 import com.zyna.app.ui.spaces.createSpaceChildrenStore
+import com.zyna.app.ui.spaces.createSpaceJoinStore
 import com.zyna.app.ui.spaces.createSpaceRootsStore
 import com.zyna.app.util.ZynaPerfLog
 import kotlinx.coroutines.CancellationException
@@ -278,6 +283,17 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val spaceChildrenState: StateFlow<SpaceChildrenState> = spaceChildrenStore.state
+    private val spaceJoinStore = createSpaceJoinStore(
+        scope = viewModelScope,
+        matrixSpaceService = matrixSpaceService,
+        matrixClientService = matrixClientService,
+        localCacheRepository = localCacheRepository,
+        spaceCacheRepository = spaceCacheRepository,
+        onMembershipChanged = ::handleSpaceMembershipChanged,
+        onJoined = ::handleSpaceJoined,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val spaceJoinState: StateFlow<SpaceJoinState> = spaceJoinStore.state
     private val createRoomStore = createCreateRoomStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -408,6 +424,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeSpaceJoinRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeRoomProfileEditorOwner()
         }
 
@@ -524,6 +544,7 @@ class AppViewModel(
                     roomListStore.deactivate()
                     spaceRootsStore.deactivate()
                     spaceChildrenStore.deactivate()
+                    spaceJoinStore.deactivate()
                     matrixSpaceService.deactivate()
                     roomDetailsStore.deactivate()
                     roomProfileEditorStore.deactivate()
@@ -778,26 +799,15 @@ class AppViewModel(
 
     fun openRoom(room: MatrixRoomSummary) {
         if (room.kind == MatrixRoomKind.SPACE) {
-            openSpace(
-                MatrixSpaceRoom(
-                    roomId = room.id,
-                    displayName = room.displayName,
-                    avatarUrl = room.avatarUrl,
-                    topic = room.roomDetails?.topic,
-                    kind = MatrixSpaceRoomKind.SPACE,
-                    membership = MatrixSpaceMembership.JOINED,
-                    joinedMemberCount = room.roomDetails?.joinedMemberCount ?: 0L,
-                    childrenCount = 0L,
-                    canonicalAlias = room.roomDetails?.canonicalAlias,
-                    joinRule = MatrixSpaceJoinRule.UNKNOWN,
-                    worldReadable = null,
-                    guestCanJoin = false,
-                    isDirect = false,
-                    isDm = false,
-                    via = emptyList()
-                ),
-                parentSpaceId = null
-            )
+            val space = room.toSpaceRoom()
+            if (space.membership == MatrixSpaceMembership.INVITED) {
+                openSpaceJoinPreview(space, parentSpaceId = null)
+            } else {
+                openSpace(
+                    space.copy(membership = MatrixSpaceMembership.JOINED),
+                    parentSpaceId = null
+                )
+            }
             return
         }
         openRoom(room, forwardTarget = null)
@@ -807,13 +817,16 @@ class AppViewModel(
         val current = _uiState.value
         val route = current.route as? AppRoute.Space ?: return
         val userId = current.matrixState.userIdOrNull() ?: return
-        val children = spaceChildrenStore.state.value
-        val currentChild = children.joinedChildForOpen(
+        val currentChild = spaceChildrenStore.state.value.childForOpen(
             userId = userId,
             spaceId = route.spaceId,
             parentSpaceId = route.parentSpaceId,
             childRoomId = room.roomId
         ) ?: return
+        if (!currentChild.isJoined) {
+            openSpaceJoinPreview(currentChild, parentSpaceId = route.spaceId)
+            return
+        }
         if (currentChild.kind == MatrixSpaceRoomKind.SPACE) {
             openSpace(currentChild, parentSpaceId = route.spaceId)
         } else {
@@ -843,6 +856,14 @@ class AppViewModel(
 
     fun retrySpaceChildren() {
         spaceChildrenStore.retry()
+    }
+
+    fun performSpaceJoinAction() {
+        spaceJoinStore.performPrimaryAction()
+    }
+
+    fun retrySpaceJoinPreview() {
+        spaceJoinStore.retry()
     }
 
     fun handleExternalRoute(command: ExternalRouteCommand) {
@@ -2288,6 +2309,102 @@ class AppViewModel(
             }
     }
 
+    private suspend fun observeSpaceJoinRouteInputs() {
+        combine(_uiState, spaceChildrenStore.state) { state, children ->
+            val userId = state.matrixState.userIdOrNull() ?: return@combine null
+            val route = state.navState.activeSpaceJoinPreviewRoute ?: return@combine null
+            val currentChild = route.parentSpaceId?.let { parentSpaceId ->
+                val activeParent = state.navState.activeSpaceRoute
+                    ?.takeIf { it.spaceId == parentSpaceId }
+                    ?: return@combine null
+                children.takeIf { childState ->
+                    childState.target?.userId == userId &&
+                        childState.target.spaceId == activeParent.spaceId &&
+                        childState.target.parentSpaceId == activeParent.parentSpaceId
+                }?.roomForId(route.roomId)
+            }
+            SpaceJoinTarget(
+                userId = userId,
+                parentSpaceId = route.parentSpaceId,
+                roomId = route.roomId,
+                seed = currentChild ?: route.toSpaceRoomSeed()
+            )
+        }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    spaceJoinStore.deactivate()
+                } else {
+                    spaceJoinStore.activate(target)
+                }
+            }
+    }
+
+    private fun handleSpaceMembershipChanged(
+        target: SpaceJoinTarget,
+        room: MatrixSpaceRoom
+    ) {
+        val parentSpaceId = target.parentSpaceId
+        if (parentSpaceId == null) {
+            if (room.kind == MatrixSpaceRoomKind.SPACE && room.isJoined) {
+                spaceRootsStore.confirmJoinedRoot(target.userId, room)
+            }
+            return
+        }
+        spaceChildrenStore.confirmChildMembership(
+            userId = target.userId,
+            spaceId = parentSpaceId,
+            roomId = target.roomId,
+            membership = room.membership
+        )
+    }
+
+    private fun handleSpaceJoined(target: SpaceJoinTarget, room: MatrixSpaceRoom) {
+        val current = _uiState.value
+        val route = current.navState.activeSpaceJoinPreviewRoute ?: return
+        if (
+            current.matrixState.userIdOrNull() != target.userId ||
+            route.roomId != target.roomId ||
+            route.parentSpaceId != target.parentSpaceId
+        ) {
+            return
+        }
+        if (room.kind == MatrixSpaceRoomKind.SPACE) {
+            openSpace(room, parentSpaceId = target.parentSpaceId)
+        } else {
+            openRoom(
+                room = room.toJoinedRoomSummary(),
+                forwardTarget = null,
+                preserveSpaceContext = true
+            )
+        }
+    }
+
+    private fun openSpaceJoinPreview(room: MatrixSpaceRoom, parentSpaceId: String?) {
+        val current = _uiState.value
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val nextNavState = current.navState.openSpaceJoinPreview(
+            roomId = room.roomId,
+            parentSpaceId = parentSpaceId,
+            displayName = room.displayName,
+            avatarUrl = room.avatarUrl,
+            topic = room.topic,
+            isSpace = room.kind == MatrixSpaceRoomKind.SPACE,
+            membership = room.membership,
+            joinRule = room.joinRule
+        )
+        if (nextNavState == current.navState) return
+        if (!_uiState.compareAndSet(current, current.withNavigationState(nextNavState))) return
+        spaceJoinStore.activate(
+            SpaceJoinTarget(
+                userId = userId,
+                parentSpaceId = parentSpaceId,
+                roomId = room.roomId,
+                seed = room
+            )
+        )
+    }
+
     private fun prepareSpaceRoute(route: AppRoute.Space?, userId: String?) {
         if (route == null || userId == null) return
         spaceChildrenStore.activate(route.toSpaceTarget(userId))
@@ -2305,6 +2422,12 @@ class AppViewModel(
                     spaceChildrenStore.state.value.error != null
                 ) {
                     spaceChildrenStore.retry()
+                }
+                if (
+                    spaceJoinStore.state.value.target?.userId == userId &&
+                    spaceJoinStore.state.value.error == SpaceJoinError.LOAD
+                ) {
+                    spaceJoinStore.retry()
                 }
             }
         } catch (error: CancellationException) {
@@ -2734,6 +2857,8 @@ class AppViewModel(
                 "InviteCreatedRoomMembers(${roomId.shortLogId()})"
             is AppRoute.Space ->
                 "Space(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
+            is AppRoute.SpaceJoinPreview ->
+                "SpaceJoinPreview(${roomId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

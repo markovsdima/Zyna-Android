@@ -1,5 +1,10 @@
 package com.zyna.app.ui.app
 
+import com.zyna.app.data.matrix.MatrixSpaceJoinRule
+import com.zyna.app.data.matrix.MatrixSpaceMembership
+import com.zyna.app.data.matrix.MatrixSpaceRoom
+import com.zyna.app.data.matrix.MatrixSpaceRoomKind
+
 enum class AppTab {
     CONTACTS,
     CALLS,
@@ -93,10 +98,40 @@ sealed interface AppRoute {
         val avatarUrl: String?,
         val topic: String?
     ) : AppRoute
+    data class SpaceJoinPreview(
+        val roomId: String,
+        val parentSpaceId: String?,
+        val displayName: String,
+        val avatarUrl: String?,
+        val topic: String?,
+        val isSpace: Boolean,
+        val membership: MatrixSpaceMembership = MatrixSpaceMembership.UNKNOWN,
+        val joinRule: MatrixSpaceJoinRule = MatrixSpaceJoinRule.UNKNOWN
+    ) : AppRoute
     data class Chat(
         val roomId: String,
         val displayName: String
     ) : AppRoute
+}
+
+internal fun AppRoute.SpaceJoinPreview.toSpaceRoomSeed(): MatrixSpaceRoom {
+    return MatrixSpaceRoom(
+        roomId = roomId,
+        displayName = displayName,
+        avatarUrl = avatarUrl,
+        topic = topic,
+        kind = if (isSpace) MatrixSpaceRoomKind.SPACE else MatrixSpaceRoomKind.ROOM,
+        membership = membership,
+        joinedMemberCount = 0L,
+        childrenCount = 0L,
+        canonicalAlias = null,
+        joinRule = joinRule,
+        worldReadable = null,
+        guestCanJoin = false,
+        isDirect = false,
+        isDm = false,
+        via = emptyList()
+    )
 }
 
 data class AppNavState(
@@ -157,6 +192,11 @@ data class AppNavState(
             if (topRoute is AppRoute.Space) {
                 return spaceRoute.takeIf { route -> route.spaceId == topRoute.spaceId }
             }
+            if (topRoute is AppRoute.SpaceJoinPreview) {
+                return topRoute.parentSpaceId?.let { parentSpaceId ->
+                    spaceRoute.takeIf { route -> route.spaceId == parentSpaceId }
+                }
+            }
             if (topRoute is AppRoute.Chat) {
                 return spaceRoute
             }
@@ -177,6 +217,12 @@ data class AppNavState(
                 route is AppRoute.Chat && route.roomId == ownerRoomId
             }
             return spaceRoute.takeIf { childChatIndex > spaceIndex }
+        }
+
+    val activeSpaceJoinPreviewRoute: AppRoute.SpaceJoinPreview?
+        get() {
+            if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
+            return chatsStack.lastOrNull() as? AppRoute.SpaceJoinPreview
         }
 
     val activeRoomPermissionsRoute: AppRoute.RoomPermissions?
@@ -259,13 +305,24 @@ data class AppNavState(
     fun openChatFromSpace(roomId: String, displayName: String): AppNavState {
         if (
             mode != AppNavMode.Main ||
-            selectedTab != AppTab.CHATS ||
-            chatsStack.lastOrNull() !is AppRoute.Space
+            selectedTab != AppTab.CHATS
         ) {
             return this
         }
+        val baseStack = when (val topRoute = chatsStack.lastOrNull()) {
+            is AppRoute.Space -> chatsStack
+            is AppRoute.SpaceJoinPreview -> {
+                val parent = chatsStack.getOrNull(chatsStack.lastIndex - 1) as? AppRoute.Space
+                    ?: return this
+                if (parent.spaceId != topRoute.parentSpaceId || topRoute.roomId != roomId) {
+                    return this
+                }
+                chatsStack.dropLast(1)
+            }
+            else -> return this
+        }
         return copy(
-            chatsStack = chatsStack + AppRoute.Chat(
+            chatsStack = baseStack + AppRoute.Chat(
                 roomId = roomId,
                 displayName = displayName
             )
@@ -296,9 +353,57 @@ data class AppNavState(
         if (parentSpaceId == null) {
             return copy(chatsStack = listOf(AppRoute.Rooms, route))
         }
-        val currentParent = chatsStack.lastOrNull() as? AppRoute.Space ?: return this
+        val baseStack = when (val topRoute = chatsStack.lastOrNull()) {
+            is AppRoute.Space -> chatsStack
+            is AppRoute.SpaceJoinPreview -> {
+                if (topRoute.parentSpaceId != parentSpaceId || topRoute.roomId != spaceId) {
+                    return this
+                }
+                chatsStack.dropLast(1)
+            }
+            else -> return this
+        }
+        val currentParent = baseStack.lastOrNull() as? AppRoute.Space ?: return this
         if (currentParent.spaceId != parentSpaceId) return this
-        return copy(chatsStack = chatsStack + route)
+        return copy(chatsStack = baseStack + route)
+    }
+
+    fun openSpaceJoinPreview(
+        roomId: String,
+        parentSpaceId: String?,
+        displayName: String,
+        avatarUrl: String?,
+        topic: String?,
+        isSpace: Boolean,
+        membership: MatrixSpaceMembership = MatrixSpaceMembership.UNKNOWN,
+        joinRule: MatrixSpaceJoinRule = MatrixSpaceJoinRule.UNKNOWN
+    ): AppNavState {
+        if (
+            mode != AppNavMode.Main ||
+            selectedTab != AppTab.CHATS ||
+            roomId.isBlank()
+        ) {
+            return this
+        }
+        val topRoute = chatsStack.lastOrNull()
+        if (parentSpaceId == null) {
+            if (topRoute != AppRoute.Rooms) return this
+        } else {
+            val parent = topRoute as? AppRoute.Space ?: return this
+            if (parent.spaceId != parentSpaceId) return this
+        }
+        return copy(
+            chatsStack = chatsStack + AppRoute.SpaceJoinPreview(
+                roomId = roomId,
+                parentSpaceId = parentSpaceId,
+                displayName = displayName,
+                avatarUrl = avatarUrl,
+                topic = topic,
+                isSpace = isSpace,
+                membership = membership,
+                joinRule = joinRule
+            )
+        )
     }
 
     fun closeChat(): AppNavState {

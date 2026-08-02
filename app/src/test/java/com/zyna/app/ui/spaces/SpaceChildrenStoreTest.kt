@@ -418,6 +418,169 @@ class SpaceChildrenStoreTest {
     }
 
     @Test
+    fun confirmedAdditionStaysVisibleUntilLiveGraphAcknowledgesIt() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val child = spaceRoom("added", kind = MatrixSpaceRoomKind.ROOM)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = emptyList(),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.session(SPACE_A).paginateCount == 1 }
+
+            fixture.store.confirmChildrenAdded(CHILDREN_USER, SPACE_A, listOf(child))
+            assertEquals(listOf(child), fixture.store.state.value.chats)
+
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                space = seed,
+                rooms = emptyList(),
+                isKnown = true,
+                endReached = true
+            )
+            yield()
+            assertEquals(listOf(child), fixture.store.state.value.chats)
+
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                space = seed,
+                rooms = listOf(child.copy(displayName = "Remote")),
+                isKnown = true,
+                endReached = true
+            )
+            awaitSpaceCondition {
+                fixture.store.state.value.chats.singleOrNull()?.displayName == "Remote"
+            }
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                space = seed,
+                rooms = emptyList(),
+                isKnown = true,
+                endReached = true
+            )
+            awaitSpaceCondition { fixture.store.state.value.chats.isEmpty() }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun mutationRefreshStopsWhenEveryRequestedRoomIsFound() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val first = spaceRoom("first", kind = MatrixSpaceRoomKind.ROOM)
+        val second = spaceRoom("second", kind = MatrixSpaceRoomKind.ROOM)
+        val session = fixture.session(SPACE_A)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(first, second),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { session.paginateCount == 1 }
+            session.resetBehavior = {
+                session.snapshots.value = MatrixSpaceRemoteSnapshot(
+                    space = seed,
+                    isKnown = false,
+                    endReached = false
+                )
+            }
+            session.paginateBehavior = { count ->
+                session.snapshots.value = if (count == 2) {
+                    MatrixSpaceRemoteSnapshot(
+                        space = seed,
+                        rooms = listOf(first),
+                        isKnown = true,
+                        endReached = false
+                    )
+                } else {
+                    MatrixSpaceRemoteSnapshot(
+                        space = seed,
+                        rooms = listOf(first, second),
+                        isKnown = true,
+                        endReached = true
+                    )
+                }
+            }
+
+            val roomIds = fixture.store.refreshAfterChildMutation(
+                CHILDREN_USER,
+                SPACE_A,
+                setOf(first.roomId)
+            )
+
+            assertEquals(setOf(first.roomId), roomIds)
+            assertEquals(2, session.paginateCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun mutationRefreshReachesTerminalPageToProveRequestedRoomIsAbsent() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val first = spaceRoom("first", kind = MatrixSpaceRoomKind.ROOM)
+        val session = fixture.session(SPACE_A)
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { session.paginateCount == 1 }
+            session.resetBehavior = {
+                session.snapshots.value = MatrixSpaceRemoteSnapshot(isKnown = false)
+            }
+            session.paginateBehavior = { count ->
+                session.snapshots.value = MatrixSpaceRemoteSnapshot(
+                    space = seed,
+                    rooms = listOf(first),
+                    isKnown = true,
+                    endReached = count >= 3
+                )
+            }
+
+            val roomIds = fixture.store.refreshAfterChildMutation(
+                CHILDREN_USER,
+                SPACE_A,
+                setOf("missing")
+            )
+
+            assertEquals(emptySet<String>(), roomIds)
+            assertEquals(3, session.paginateCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun mutationRefreshReturnsQuietlyWhenActivationChangesDuringReset() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val firstSeed = spaceRoom(SPACE_A)
+        val secondSeed = spaceRoom(SPACE_B)
+        val firstSession = fixture.session(SPACE_A)
+        try {
+            fixture.store.activate(target(SPACE_A, firstSeed))
+            awaitSpaceCondition { firstSession.paginateCount == 1 }
+            firstSession.resetBehavior = {
+                fixture.store.activate(target(SPACE_B, secondSeed))
+            }
+
+            val roomIds = fixture.store.refreshAfterChildMutation(
+                CHILDREN_USER,
+                SPACE_A,
+                setOf("missing")
+            )
+
+            assertEquals(null, roomIds)
+            assertEquals(SPACE_B, fixture.store.state.value.target?.spaceId)
+            assertEquals(null, fixture.store.state.value.error)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun partialRemovalHidesSuccessAndKeepsOnlyFailureSelected() = runBlocking {
         val fixture = SpaceChildrenFixture(coroutineContext)
         val seed = spaceRoom(SPACE_A)
@@ -659,7 +822,19 @@ private class SpaceChildrenFixture(parentContext: CoroutineContext) {
     }
 
     fun session(spaceId: String): FakeSpaceRoomListSession {
-        return sessions.getOrPut(spaceId) { FakeSpaceRoomListSession() }
+        return sessions.getOrPut(spaceId) {
+            FakeSpaceRoomListSession().also { session ->
+                session.resetBehavior = {
+                    val snapshot = cache(CHILDREN_USER, spaceId).value
+                    session.snapshots.value = MatrixSpaceRemoteSnapshot(
+                        space = snapshot.space,
+                        rooms = snapshot.rooms,
+                        isKnown = snapshot.isKnown,
+                        endReached = snapshot.endReached
+                    )
+                }
+            }
+        }
     }
 
     suspend fun close() {
@@ -679,6 +854,10 @@ private class FakeSpaceRoomListSession : MatrixSpaceRoomListSession {
     override val snapshots = MutableStateFlow(MatrixSpaceRemoteSnapshot())
     var paginateCount = 0
     var paginateError: Throwable? = null
+    var paginateBehavior: suspend (Int) -> Unit = {
+        snapshots.value = snapshots.value.copy(isPaginating = true)
+        snapshots.value = snapshots.value.copy(isPaginating = false)
+    }
     var resetCount = 0
     var resetBehavior: suspend () -> Unit = {}
     var closed = false
@@ -686,6 +865,7 @@ private class FakeSpaceRoomListSession : MatrixSpaceRoomListSession {
     override suspend fun paginate() {
         paginateCount += 1
         paginateError?.let { throw it }
+        paginateBehavior(paginateCount)
     }
 
     override suspend fun reset() {

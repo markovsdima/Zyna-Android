@@ -27,7 +27,7 @@ class MatrixSpaceModelsTest {
             displayName = "Invited story",
             avatarUrl = null,
             isSpace = true,
-            spaceMembership = MatrixSpaceMembership.INVITED
+            membership = MatrixSpaceMembership.INVITED
         )
 
         val preview = summary.toSpaceRoom()
@@ -35,8 +35,39 @@ class MatrixSpaceModelsTest {
         assertEquals(MatrixSpaceMembership.INVITED, preview.membership)
         assertEquals(
             MatrixSpaceMembership.JOINED,
-            preview.toJoinedRoomSummary().spaceMembership
+            preview.toJoinedRoomSummary().membership
         )
+    }
+
+    @Test
+    fun joinedGroupSummaryBecomesAnOptimisticSpaceChild() {
+        val summary = MatrixRoomSummary(
+            id = "!chat:example.org",
+            displayName = "Chat",
+            avatarUrl = "mxc://example.org/avatar",
+            membership = MatrixSpaceMembership.JOINED,
+            roomDetails = MatrixRoomDetails(
+                roomId = "!chat:example.org",
+                displayName = "Chat",
+                avatarUrl = null,
+                directUserId = null,
+                kind = MatrixRoomKind.GROUP,
+                topic = "Topic",
+                joinedMemberCount = 7L,
+                encryption = MatrixRoomEncryption.ENCRYPTED,
+                access = MatrixRoomAccess.RESTRICTED,
+                historyVisibility = MatrixRoomHistoryVisibility.SHARED,
+                pinnedEventCount = 0,
+                canonicalAlias = "#chat:example.org"
+            )
+        )
+
+        val child = summary.toJoinedSpaceChild()
+
+        assertEquals(MatrixSpaceRoomKind.ROOM, child.kind)
+        assertEquals(MatrixSpaceMembership.JOINED, child.membership)
+        assertEquals(MatrixSpaceJoinRule.RESTRICTED, child.joinRule)
+        assertEquals(7L, child.joinedMemberCount)
     }
 
     @Test

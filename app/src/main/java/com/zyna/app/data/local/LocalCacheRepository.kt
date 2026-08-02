@@ -198,9 +198,9 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
         avatarUrl = avatarUrl,
         directUserId = directUserId ?: existingRoom?.directUserId,
         isSpace = isSpace || existingRoom?.isSpace == true,
-        spaceMembership = cachedSpaceMembership(
-            incoming = spaceMembership,
-            existing = existingRoom?.spaceMembership
+        membership = cachedMembership(
+            incoming = membership,
+            existing = existingRoom?.membership
         ),
         lastMessageText = preview.text,
         lastMessageSenderName = preview.senderName,
@@ -245,7 +245,7 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
     )
 }
 
-internal fun cachedSpaceMembership(
+internal fun cachedMembership(
     incoming: MatrixSpaceMembership,
     existing: String?
 ): String? {
@@ -2491,7 +2491,7 @@ class LocalCacheRepository(
             avatarUrl = avatarUrl,
             directUserId = directUserId,
             isSpace = isSpace,
-            spaceMembership = spaceMembership.toCachedEnumOrDefault(
+            membership = membership.toCachedEnumOrDefault(
                 MatrixSpaceMembership.UNKNOWN
             ),
             lastMessageText = lastMessageText,

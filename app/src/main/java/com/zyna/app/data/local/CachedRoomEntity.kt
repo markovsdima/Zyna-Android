@@ -1,5 +1,6 @@
 package com.zyna.app.data.local
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 
 @Entity(
@@ -13,7 +14,8 @@ data class CachedRoomEntity(
     val avatarUrl: String?,
     val directUserId: String?,
     val isSpace: Boolean = false,
-    val spaceMembership: String? = null,
+    @ColumnInfo(name = "spaceMembership")
+    val membership: String? = null,
     val lastMessageText: String?,
     val lastMessageSenderName: String?,
     val lastMessageAtMillis: Long?,

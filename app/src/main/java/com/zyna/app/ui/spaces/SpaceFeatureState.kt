@@ -82,7 +82,8 @@ data class SpaceFeatureState(
     val roots: SpaceRootsState = SpaceRootsState(),
     val children: SpaceChildrenState = SpaceChildrenState(),
     val join: SpaceJoinState = SpaceJoinState(),
-    val leave: SpaceLeaveState = SpaceLeaveState()
+    val leave: SpaceLeaveState = SpaceLeaveState(),
+    val addRooms: SpaceAddRoomsState = SpaceAddRoomsState()
 )
 
 internal fun visibleChatRootRooms(
@@ -103,11 +104,11 @@ internal fun visibleChatRootRooms(
                     displayName = joinedRoot.displayName,
                     avatarUrl = joinedRoot.avatarUrl ?: room.avatarUrl,
                     isSpace = true,
-                    spaceMembership = MatrixSpaceMembership.JOINED
+                    membership = MatrixSpaceMembership.JOINED
                 )
                 visibleRootIds += room.id
             }
-            room.spaceMembership == MatrixSpaceMembership.INVITED -> {
+            room.membership == MatrixSpaceMembership.INVITED -> {
                 visible += room
             }
         }

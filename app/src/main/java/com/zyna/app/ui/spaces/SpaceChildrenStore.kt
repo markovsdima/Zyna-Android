@@ -22,11 +22,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal class SpaceChildrenDriver(
     val peekCache: (
@@ -80,6 +82,7 @@ internal class SpaceChildrenStore(
     private var isRequestingPagination = false
     private val confirmedMemberships = mutableMapOf<String, ConfirmedMembershipOverlay>()
     private val confirmedRemovedRoomIds = mutableSetOf<String>()
+    private val confirmedAddedRooms = linkedMapOf<String, MatrixSpaceRoom>()
 
     @MainThread
     fun activate(target: SpaceTarget) {
@@ -310,6 +313,58 @@ internal class SpaceChildrenStore(
             ?.withConfirmedMemberships(confirmedMemberships)
     }
 
+    /** Keeps successful additions visible until the restarted hierarchy acknowledges them. */
+    @MainThread
+    suspend fun confirmChildrenAdded(
+        userId: String,
+        spaceId: String,
+        rooms: Collection<MatrixSpaceRoom>
+    ) {
+        val current = activation ?: return
+        if (current.target.userId != userId || current.target.spaceId != spaceId) return
+        val additions = rooms
+            .asSequence()
+            .filter { room -> room.roomId.isNotBlank() }
+            .distinctBy(MatrixSpaceRoom::roomId)
+            .toList()
+        if (additions.isEmpty()) return
+
+        additions.forEach { room ->
+            confirmedRemovedRoomIds.remove(room.roomId)
+            confirmedAddedRooms[room.roomId] = room
+        }
+        _state.update { state -> state.withConfirmedAdditions(confirmedAddedRooms) }
+        val snapshot = latestCachedSnapshot
+            ?.withoutConfirmedRemovals(confirmedRemovedRoomIds)
+            ?.withConfirmedAdditions(confirmedAddedRooms)
+            ?: return
+        latestCachedSnapshot = snapshot
+        try {
+            driver.cacheSnapshot(
+                current.target.userId,
+                current.target.spaceId,
+                snapshot.copy(updatedAtMillis = System.currentTimeMillis())
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (isCurrent(current)) {
+                onWarning("Failed to cache added Space children", error)
+            }
+        }
+    }
+
+    @MainThread
+    suspend fun refreshAfterChildMutation(
+        userId: String,
+        spaceId: String,
+        roomIdsToFind: Set<String>
+    ): Set<String>? {
+        val current = activation ?: return null
+        if (current.target.userId != userId || current.target.spaceId != spaceId) return null
+        return refreshHierarchy(current, roomIdsToFind)
+    }
+
     @MainThread
     fun deactivate() {
         generation += 1
@@ -330,6 +385,7 @@ internal class SpaceChildrenStore(
         isRequestingPagination = false
         confirmedMemberships.clear()
         confirmedRemovedRoomIds.clear()
+        confirmedAddedRooms.clear()
         _state.value = SpaceChildrenState()
     }
 
@@ -344,6 +400,7 @@ internal class SpaceChildrenStore(
                     val visibleSnapshot = snapshot
                         .withConfirmedMemberships(confirmedMemberships)
                         .withoutConfirmedRemovals(confirmedRemovedRoomIds)
+                        .withConfirmedAdditions(confirmedAddedRooms)
                     val latest = latestCachedSnapshot
                     if (visibleSnapshot.isKnown) {
                         latestCachedSnapshot = visibleSnapshot
@@ -421,6 +478,9 @@ internal class SpaceChildrenStore(
                             ?.membership
                             ?.let(confirmation::isSupersededBy) == true
                     }
+                    confirmedAddedRooms.keys.removeAll { roomId ->
+                        remote.rooms.any { room -> room.roomId == roomId }
+                    }
                     if (remote.isKnown && remote.endReached) {
                         val remoteRoomIds = remote.rooms
                             .asSequence()
@@ -445,6 +505,7 @@ internal class SpaceChildrenStore(
                     )
                         ?.withConfirmedMemberships(confirmedMemberships)
                         ?.withoutConfirmedRemovals(confirmedRemovedRoomIds)
+                        ?.withConfirmedAdditions(confirmedAddedRooms)
                     if (
                         content != null &&
                         content != latestCachedSnapshot?.withoutUpdateTime()
@@ -527,28 +588,38 @@ internal class SpaceChildrenStore(
             }
             if (!isCurrent(current)) return
 
-            val removedRoomIds = outcomes
+            val reportedRemovedRoomIds = outcomes
                 .asSequence()
                 .filter(RoomRemovalOutcome::succeeded)
                 .mapTo(linkedSetOf(), RoomRemovalOutcome::roomId)
-            val failedRoomIds = selectedRoomIds - removedRoomIds
-            if (removedRoomIds.isNotEmpty()) {
-                confirmChildrenRemoved(current, removedRoomIds)
+            var removedRoomIds: Set<String> = reportedRemovedRoomIds
+            var remainingFailedRoomIds = selectedRoomIds - reportedRemovedRoomIds
+            if (reportedRemovedRoomIds.isNotEmpty()) {
+                confirmChildrenRemoved(current, reportedRemovedRoomIds)
             }
-            try {
-                refreshHierarchy(current)
+            val refreshedRoomIds = try {
+                refreshHierarchy(current, remainingFailedRoomIds)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                _state.update { it.copy(error = SpaceLoadError.LOAD) }
-                onWarning("Failed to refresh Space hierarchy after removal", error)
+                if (isCurrent(current)) {
+                    _state.update { it.copy(error = SpaceLoadError.LOAD) }
+                    onWarning("Failed to refresh Space hierarchy after removal", error)
+                }
+                null
             }
             if (!isCurrent(current)) return
 
+            if (refreshedRoomIds != null) {
+                val reconciledRemovedRoomIds = remainingFailedRoomIds - refreshedRoomIds
+                if (reconciledRemovedRoomIds.isNotEmpty()) {
+                    confirmChildrenRemoved(current, reconciledRemovedRoomIds)
+                    removedRoomIds = removedRoomIds + reconciledRemovedRoomIds
+                }
+                remainingFailedRoomIds = remainingFailedRoomIds.intersect(refreshedRoomIds)
+            }
+
             _state.update { state ->
-                val visibleChatIds = state.chats
-                    .mapTo(hashSetOf(), MatrixSpaceRoom::roomId)
-                val remainingFailedRoomIds = failedRoomIds.intersect(visibleChatIds)
                 val permissionChanged = !state.management.canManage
                 state.copy(
                     management = if (permissionChanged) {
@@ -594,6 +665,7 @@ internal class SpaceChildrenStore(
         current: Activation,
         roomIds: Set<String>
     ) {
+        confirmedAddedRooms.keys.removeAll(roomIds)
         confirmedRemovedRoomIds += roomIds
         _state.update { state -> state.withConfirmedRemovals(roomIds) }
         val snapshot = latestCachedSnapshot
@@ -615,18 +687,63 @@ internal class SpaceChildrenStore(
         }
     }
 
-    private suspend fun refreshHierarchy(current: Activation) {
+    private suspend fun refreshHierarchy(
+        current: Activation,
+        roomIdsToFind: Set<String>
+    ): Set<String>? {
         paginationJob?.join()
-        val session = liveSession ?: return
-        if (!isCurrent(current) || isRequestingPagination) return
+        val session = liveSession ?: return null
+        if (!isCurrent(current) || isRequestingPagination) return null
         isRequestingPagination = true
         try {
-            session.reset()
-            if (!isCurrent(current) || liveSession !== session) return
-            _state.update { it.copy(endReached = false, error = null) }
-            session.paginate()
+            val result = withTimeoutOrNull(HIERARCHY_RECONCILIATION_TIMEOUT_MILLIS) {
+                session.reset()
+                if (!isCurrent(current) || liveSession !== session) {
+                    return@withTimeoutOrNull HierarchyReconciliationResult.Stale
+                }
+                _state.update { it.copy(endReached = false, error = null) }
+                val foundRoomIds = linkedSetOf<String>()
+                var pageCount = 0
+                var refreshed: MatrixSpaceRemoteSnapshot
+                do {
+                    check(pageCount < MAX_RECONCILIATION_PAGES) {
+                        "Space hierarchy reconciliation exceeded $MAX_RECONCILIATION_PAGES pages"
+                    }
+                    pageCount += 1
+                    refreshed = paginateAndAwaitSettledSnapshot(current, session)
+                        ?: return@withTimeoutOrNull HierarchyReconciliationResult.Stale
+                    refreshed.rooms.forEach { room ->
+                        if (room.roomId in roomIdsToFind) foundRoomIds += room.roomId
+                    }
+                } while (
+                    roomIdsToFind.isNotEmpty() &&
+                    !foundRoomIds.containsAll(roomIdsToFind) &&
+                    !refreshed.endReached
+                )
+                HierarchyReconciliationResult.Completed(foundRoomIds)
+            } ?: error("Timed out while reconciling the Space hierarchy")
+            return when (result) {
+                is HierarchyReconciliationResult.Completed -> result.foundRoomIds
+                HierarchyReconciliationResult.Stale -> null
+            }
         } finally {
             isRequestingPagination = false
+        }
+    }
+
+    private suspend fun paginateAndAwaitSettledSnapshot(
+        current: Activation,
+        session: MatrixSpaceRoomListSession
+    ): MatrixSpaceRemoteSnapshot? {
+        val before = session.snapshots.value
+        session.paginate()
+        if (!isCurrent(current) || liveSession !== session) return null
+        val immediate = session.snapshots.value
+        if (immediate !== before && immediate.isKnown && !immediate.isPaginating) {
+            return immediate
+        }
+        return session.snapshots.first { snapshot ->
+            snapshot !== before && snapshot.isKnown && !snapshot.isPaginating
         }
     }
 
@@ -692,6 +809,8 @@ internal class SpaceChildrenStore(
 
     private companion object {
         const val MAX_CONCURRENT_REMOVALS = 4
+        const val MAX_RECONCILIATION_PAGES = 256
+        const val HIERARCHY_RECONCILIATION_TIMEOUT_MILLIS = 30_000L
     }
 }
 
@@ -699,6 +818,11 @@ private data class RoomRemovalOutcome(
     val roomId: String,
     val succeeded: Boolean
 )
+
+private sealed interface HierarchyReconciliationResult {
+    data class Completed(val foundRoomIds: Set<String>) : HierarchyReconciliationResult
+    data object Stale : HierarchyReconciliationResult
+}
 
 private fun SpaceChildrenState.withConfirmedMembership(
     roomId: String,
@@ -724,6 +848,26 @@ private fun SpaceChildrenState.withConfirmedRemovals(
                 .filterNot { it.roomId in roomIds }
                 .map(MatrixSpaceRoom::roomId)
                 .toSet()
+        )
+    )
+}
+
+private fun SpaceChildrenState.withConfirmedAdditions(
+    roomsById: Map<String, MatrixSpaceRoom>
+): SpaceChildrenState {
+    if (roomsById.isEmpty()) return this
+    val existingRoomIds = (tracks.asSequence() + chats.asSequence())
+        .map(MatrixSpaceRoom::roomId)
+        .toHashSet()
+    val additions = roomsById.values.filterNot { room -> room.roomId in existingRoomIds }
+    if (additions.isEmpty()) return this
+    val nextTracks = tracks + additions.filter { room -> room.kind == MatrixSpaceRoomKind.SPACE }
+    val nextChats = chats + additions.filter { room -> room.kind == MatrixSpaceRoomKind.ROOM }
+    return copy(
+        tracks = nextTracks,
+        chats = nextChats,
+        management = management.withAvailableChats(
+            nextChats.mapTo(hashSetOf(), MatrixSpaceRoom::roomId)
         )
     )
 }
@@ -762,6 +906,15 @@ private fun MatrixSpaceListSnapshot.withoutConfirmedRemovals(
 ): MatrixSpaceListSnapshot {
     if (roomIds.isEmpty()) return this
     return copy(rooms = rooms.filterNot { it.roomId in roomIds })
+}
+
+private fun MatrixSpaceListSnapshot.withConfirmedAdditions(
+    roomsById: Map<String, MatrixSpaceRoom>
+): MatrixSpaceListSnapshot {
+    if (roomsById.isEmpty()) return this
+    val existingRoomIds = rooms.mapTo(hashSetOf(), MatrixSpaceRoom::roomId)
+    val additions = roomsById.values.filterNot { room -> room.roomId in existingRoomIds }
+    return if (additions.isEmpty()) this else copy(rooms = rooms + additions)
 }
 
 internal fun createSpaceChildrenStore(

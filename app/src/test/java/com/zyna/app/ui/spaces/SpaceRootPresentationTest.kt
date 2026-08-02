@@ -81,7 +81,7 @@ class SpaceRootPresentationTest {
         val result = visibleChatRootRooms(listOf(staleInvite), roots)
 
         assertEquals("Joined", result.single().displayName)
-        assertEquals(MatrixSpaceMembership.JOINED, result.single().spaceMembership)
+        assertEquals(MatrixSpaceMembership.JOINED, result.single().membership)
     }
 
     @Test
@@ -123,7 +123,7 @@ class SpaceRootPresentationTest {
             displayName = id,
             avatarUrl = null,
             isSpace = isSpace,
-            spaceMembership = membership
+            membership = membership
         )
     }
 }

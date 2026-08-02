@@ -55,6 +55,7 @@ data class SpaceScreenViewState(
 data class SpaceScreenViewActions(
     val onBack: () -> Unit,
     val onOpenDetails: () -> Unit,
+    val onAddRooms: () -> Unit,
     val onOpenRoom: (MatrixSpaceRoom) -> Unit,
     val onLoadMore: () -> Unit,
     val onRetry: () -> Unit,
@@ -503,6 +504,7 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         backButton.alpha = if (management.isRemoving) 0.45f else 1f
         overflowButton.setOnClickListener {
             showOverflowMenu(
+                canAddChats = management.canManage,
                 canManageChats = management.canManage && state.chats.isNotEmpty(),
                 actions = actions
             )
@@ -644,17 +646,22 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     }
 
     private fun showOverflowMenu(
+        canAddChats: Boolean,
         canManageChats: Boolean,
         actions: SpaceScreenViewActions
     ) {
         PopupMenu(context, overflowButton, Gravity.END).apply {
             menu.add(0, MENU_DETAILS, 0, R.string.space_details)
+            if (canAddChats) {
+                menu.add(0, MENU_ADD_CHATS, 1, R.string.space_add_existing_chats)
+            }
             if (canManageChats) {
-                menu.add(0, MENU_MANAGE_CHATS, 1, R.string.space_manage_chats)
+                menu.add(0, MENU_MANAGE_CHATS, 2, R.string.space_manage_chats)
             }
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     MENU_DETAILS -> actions.onOpenDetails()
+                    MENU_ADD_CHATS -> actions.onAddRooms()
                     MENU_MANAGE_CHATS -> actions.onEnterManagement()
                     else -> return@setOnMenuItemClickListener false
                 }
@@ -747,6 +754,7 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         const val CACHED_ERROR_TEXT_TAG = "cached-space-error"
         const val MENU_DETAILS = 1
         const val MENU_MANAGE_CHATS = 2
+        const val MENU_ADD_CHATS = 3
     }
 }
 

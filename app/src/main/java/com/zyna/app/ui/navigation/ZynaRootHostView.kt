@@ -106,6 +106,10 @@ import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewState
 import com.zyna.app.ui.settings.SettingsScreenView
 import com.zyna.app.ui.settings.SettingsScreenViewActions
 import com.zyna.app.ui.settings.SettingsScreenViewState
+import com.zyna.app.ui.spaces.SpaceAddRoomsScreenActions
+import com.zyna.app.ui.spaces.SpaceAddRoomsScreenState
+import com.zyna.app.ui.spaces.SpaceAddRoomsScreenView
+import com.zyna.app.ui.spaces.SpaceAddRoomsState
 import com.zyna.app.ui.spaces.SpaceChildManagementState
 import com.zyna.app.ui.spaces.SpaceFeatureState
 import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenActions
@@ -1021,6 +1025,13 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     dependencies = dependencies,
                     route = route
                 )
+                is AppRoute.SpaceAddRooms -> spaceAddRoomsEntry(
+                    spaces = spaces,
+                    roomList = roomList,
+                    actions = actions,
+                    dependencies = dependencies,
+                    route = route
+                )
                 is AppRoute.SpaceJoinPreview -> spaceJoinPreviewEntry(
                     spaces = spaces,
                     actions = actions,
@@ -1317,6 +1328,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions = SpaceScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onOpenDetails = actions.spaces.onOpenDetails,
+                        onAddRooms = actions.spaces.onOpenAddRooms,
                         onOpenRoom = actions.spaces.onOpenRoom,
                         onLoadMore = actions.spaces.onLoadMore,
                         onRetry = actions.spaces.onRetry,
@@ -1337,6 +1349,44 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         "known=${routeOwnedState?.isKnown == true} " +
                         "rooms=${routeOwnedState?.let { it.tracks.size + it.chats.size } ?: 0}"
                 }
+            }
+        )
+    }
+
+    private fun spaceAddRoomsEntry(
+        spaces: SpaceFeatureState,
+        roomList: RoomListState,
+        actions: ZynaRootActions,
+        dependencies: ZynaRenderDependencies,
+        route: AppRoute.SpaceAddRooms
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "space-add-rooms:${route.parentSpaceId.orEmpty()}:${route.spaceId}",
+            createView = { context -> SpaceAddRoomsScreenView(context) },
+            updateView = { view ->
+                val routeState = spaces.addRooms.takeIf { state ->
+                    state.target?.let { target ->
+                        target.spaceId == route.spaceId &&
+                            target.parentSpaceId == route.parentSpaceId
+                    } == true
+                } ?: SpaceAddRoomsState()
+                (view as SpaceAddRoomsScreenView).render(
+                    state = SpaceAddRoomsScreenState(
+                        addRooms = routeState,
+                        isRoomListSynchronizing =
+                            roomList.isSynchronizing || roomList.isLoadingFullCoverage,
+                        isLoadingFullCoverage = roomList.isLoadingFullCoverage,
+                        hasRoomListError = roomList.hasSynchronizationError,
+                        matrixMediaLoader = dependencies.matrixMediaLoader
+                    ),
+                    actions = SpaceAddRoomsScreenActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetryRoomList = actions.rooms.onRetrySynchronization,
+                        onSearchQueryChanged = actions.spaces.onSetAddRoomsSearchQuery,
+                        onToggleRoom = actions.spaces.onToggleAddRoom,
+                        onSave = actions.spaces.onSaveAddedRooms
+                    )
+                )
             }
         )
     }
@@ -2336,6 +2386,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "SpaceJoinPreview(${roomId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             is AppRoute.SpaceLeave ->
                 "SpaceLeave(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+            is AppRoute.SpaceAddRooms ->
+                "SpaceAddRooms(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

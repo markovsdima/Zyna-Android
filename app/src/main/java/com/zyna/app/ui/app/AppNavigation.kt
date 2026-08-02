@@ -98,6 +98,11 @@ sealed interface AppRoute {
         val avatarUrl: String?,
         val topic: String?
     ) : AppRoute
+    data class SpaceAddRooms(
+        val spaceId: String,
+        val parentSpaceId: String?,
+        val displayName: String
+    ) : AppRoute
     data class SpaceJoinPreview(
         val roomId: String,
         val parentSpaceId: String?,
@@ -208,6 +213,12 @@ data class AppNavState(
                         route.parentSpaceId == topRoute.parentSpaceId
                 }
             }
+            if (topRoute is AppRoute.SpaceAddRooms) {
+                return spaceRoute.takeIf { route ->
+                    route.spaceId == topRoute.spaceId &&
+                        route.parentSpaceId == topRoute.parentSpaceId
+                }
+            }
             if (topRoute is AppRoute.Chat) {
                 return spaceRoute
             }
@@ -240,6 +251,12 @@ data class AppNavState(
         get() {
             if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
             return chatsStack.lastOrNull() as? AppRoute.SpaceLeave
+        }
+
+    val activeSpaceAddRoomsRoute: AppRoute.SpaceAddRooms?
+        get() {
+            if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
+            return chatsStack.lastOrNull() as? AppRoute.SpaceAddRooms
         }
 
     val activeRoomPermissionsRoute: AppRoute.RoomPermissions?
@@ -549,6 +566,18 @@ data class AppNavState(
             ?: return this
         return copy(
             chatsStack = chatsStack + AppRoute.SpaceLeave(
+                spaceId = space.spaceId,
+                parentSpaceId = space.parentSpaceId,
+                displayName = space.displayName
+            )
+        )
+    }
+
+    fun openSpaceAddRooms(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return this
+        val space = chatsStack.lastOrNull() as? AppRoute.Space ?: return this
+        return copy(
+            chatsStack = chatsStack + AppRoute.SpaceAddRooms(
                 spaceId = space.spaceId,
                 parentSpaceId = space.parentSpaceId,
                 displayName = space.displayName

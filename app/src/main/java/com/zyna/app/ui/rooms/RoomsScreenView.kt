@@ -1241,7 +1241,7 @@ private data class RoomsPalette(
 private fun MatrixRoomSummary.previewText(context: Context): String {
     if (isSpace) {
         val storyline = context.getString(R.string.space_storyline)
-        return if (spaceMembership == MatrixSpaceMembership.INVITED) {
+        return if (membership == MatrixSpaceMembership.INVITED) {
             context.getString(R.string.space_invited_format, storyline)
         } else {
             storyline

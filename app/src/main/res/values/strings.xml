@@ -332,6 +332,21 @@
     <string name="space_manage_permission_changed">Your permission to manage this Space changed.</string>
     <string name="space_manage_room_selected">Selected</string>
     <string name="space_manage_room_not_selected">Not selected</string>
+    <string name="space_add_existing_chats">Add existing chats</string>
+    <string name="space_add_rooms_title">Add chats</string>
+    <string name="space_add_rooms_search_hint">Search your chats</string>
+    <string name="space_add_rooms_action">Add</string>
+    <string name="space_add_rooms_adding">Adding…</string>
+    <string name="space_add_rooms_prompt">Select chats to add to this Space.</string>
+    <string name="space_add_rooms_syncing">Updating your chats…</string>
+    <string name="space_add_rooms_retry_update">Couldn’t update chats. Tap to retry.</string>
+    <string name="space_add_rooms_empty">All your available chats are already here.</string>
+    <string name="space_add_rooms_no_results">No chats match your search.</string>
+    <string name="space_add_rooms_permission_changed">Your permission to manage this Space changed.</string>
+    <string name="space_add_rooms_error">Couldn’t add the selected chats. Try again.</string>
+    <string name="space_add_rooms_partial_error">Some chats were added. The remaining chats are still selected.</string>
+    <string name="space_add_rooms_room_selected">Selected</string>
+    <string name="space_add_rooms_room_not_selected">Not selected</string>
     <string name="space_update_error">Couldn’t update this list.</string>
     <string name="space_load_error">Couldn’t load this Space.</string>
     <string name="space_invited_format">Invited · %1$s</string>
@@ -427,6 +442,10 @@
     <plurals name="space_manage_confirm_title">
         <item quantity="one">Remove %1$d chat?</item>
         <item quantity="other">Remove %1$d chats?</item>
+    </plurals>
+    <plurals name="space_add_rooms_action_count">
+        <item quantity="one">Add %1$d</item>
+        <item quantity="other">Add %1$d</item>
     </plurals>
     <string name="settings_presence">Presence</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>

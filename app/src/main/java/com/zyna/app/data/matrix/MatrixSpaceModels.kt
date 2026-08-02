@@ -57,11 +57,7 @@ data class MatrixSpaceRoom(
             displayName = displayName,
             avatarUrl = avatarUrl,
             isSpace = kind == MatrixSpaceRoomKind.SPACE,
-            spaceMembership = if (kind == MatrixSpaceRoomKind.SPACE) {
-                MatrixSpaceMembership.JOINED
-            } else {
-                MatrixSpaceMembership.UNKNOWN
-            }
+            membership = MatrixSpaceMembership.JOINED
         )
     }
 }
@@ -74,25 +70,51 @@ internal fun MatrixRoomSummary.toSpaceRoom(): MatrixSpaceRoom {
         avatarUrl = avatarUrl,
         topic = roomDetails?.topic,
         kind = MatrixSpaceRoomKind.SPACE,
-        membership = spaceMembership,
+        membership = membership,
         joinedMemberCount = roomDetails?.joinedMemberCount ?: 0L,
         childrenCount = 0L,
         canonicalAlias = roomDetails?.canonicalAlias,
-        joinRule = when (roomDetails?.access) {
-            MatrixRoomAccess.PUBLIC -> MatrixSpaceJoinRule.PUBLIC
-            MatrixRoomAccess.PRIVATE -> MatrixSpaceJoinRule.INVITE
-            MatrixRoomAccess.ASK_TO_JOIN -> MatrixSpaceJoinRule.KNOCK
-            MatrixRoomAccess.RESTRICTED -> MatrixSpaceJoinRule.RESTRICTED
-            MatrixRoomAccess.CUSTOM -> MatrixSpaceJoinRule.CUSTOM
-            MatrixRoomAccess.UNKNOWN,
-            null -> MatrixSpaceJoinRule.UNKNOWN
-        },
+        joinRule = roomDetails?.access.toSpaceJoinRule(),
         worldReadable = null,
         guestCanJoin = false,
         isDirect = false,
         isDm = false,
         via = emptyList()
     )
+}
+
+internal fun MatrixRoomSummary.toJoinedSpaceChild(): MatrixSpaceRoom {
+    check(kind == MatrixRoomKind.GROUP) { "Only group chats can be added as Space children" }
+    check(isJoined) { "Space child candidate is not joined" }
+    return MatrixSpaceRoom(
+        roomId = id,
+        displayName = displayName,
+        avatarUrl = avatarUrl,
+        topic = roomDetails?.topic,
+        kind = MatrixSpaceRoomKind.ROOM,
+        membership = MatrixSpaceMembership.JOINED,
+        joinedMemberCount = roomDetails?.joinedMemberCount ?: 0L,
+        childrenCount = 0L,
+        canonicalAlias = roomDetails?.canonicalAlias,
+        joinRule = roomDetails?.access.toSpaceJoinRule(),
+        worldReadable = null,
+        guestCanJoin = false,
+        isDirect = false,
+        isDm = false,
+        via = emptyList()
+    )
+}
+
+private fun MatrixRoomAccess?.toSpaceJoinRule(): MatrixSpaceJoinRule {
+    return when (this) {
+        MatrixRoomAccess.PUBLIC -> MatrixSpaceJoinRule.PUBLIC
+        MatrixRoomAccess.PRIVATE -> MatrixSpaceJoinRule.INVITE
+        MatrixRoomAccess.ASK_TO_JOIN -> MatrixSpaceJoinRule.KNOCK
+        MatrixRoomAccess.RESTRICTED -> MatrixSpaceJoinRule.RESTRICTED
+        MatrixRoomAccess.CUSTOM -> MatrixSpaceJoinRule.CUSTOM
+        MatrixRoomAccess.UNKNOWN,
+        null -> MatrixSpaceJoinRule.UNKNOWN
+    }
 }
 
 /**

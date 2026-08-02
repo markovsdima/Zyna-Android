@@ -184,8 +184,7 @@ data class MatrixRoomSummary(
     val avatarUrl: String?,
     val directUserId: String? = null,
     val isSpace: Boolean = false,
-    /** Current membership is retained only for Space invitation presentation. */
-    val spaceMembership: MatrixSpaceMembership = MatrixSpaceMembership.UNKNOWN,
+    val membership: MatrixSpaceMembership = MatrixSpaceMembership.UNKNOWN,
     val lastMessageText: String? = null,
     val lastMessageSenderName: String? = null,
     val lastMessageAtMillis: Long? = null,
@@ -201,6 +200,9 @@ data class MatrixRoomSummary(
             !directUserId.isNullOrBlank() -> MatrixRoomKind.DIRECT
             else -> MatrixRoomKind.GROUP
         }
+
+    val isJoined: Boolean
+        get() = membership == MatrixSpaceMembership.JOINED
 }
 
 internal data class MatrixRoomPreview(
@@ -2957,16 +2959,13 @@ class MatrixClientService(
             avatarUrl = sdkAvatarUrl ?: roomInfo?.avatarUrl,
             directUserId = roomInfo?.directUserId(),
             isSpace = roomInfo?.isSpace == true,
-            spaceMembership = if (roomInfo?.isSpace == true) {
-                when (roomInfo.membership) {
-                    Membership.INVITED -> MatrixSpaceMembership.INVITED
-                    Membership.JOINED -> MatrixSpaceMembership.JOINED
-                    Membership.LEFT -> MatrixSpaceMembership.LEFT
-                    Membership.KNOCKED -> MatrixSpaceMembership.KNOCKED
-                    Membership.BANNED -> MatrixSpaceMembership.BANNED
-                }
-            } else {
-                MatrixSpaceMembership.UNKNOWN
+            membership = when (roomInfo?.membership) {
+                Membership.INVITED -> MatrixSpaceMembership.INVITED
+                Membership.JOINED -> MatrixSpaceMembership.JOINED
+                Membership.LEFT -> MatrixSpaceMembership.LEFT
+                Membership.KNOCKED -> MatrixSpaceMembership.KNOCKED
+                Membership.BANNED -> MatrixSpaceMembership.BANNED
+                null -> MatrixSpaceMembership.UNKNOWN
             },
             lastMessageText = latestPreview.body,
             lastMessageSenderName = latestPreview.senderName,

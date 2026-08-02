@@ -104,6 +104,8 @@ import com.zyna.app.ui.roomprofile.RoomProfileEditorTarget
 import com.zyna.app.ui.roomprofile.createRoomProfileEditorStore
 import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
+import com.zyna.app.ui.spaces.SpaceAddRoomsState
+import com.zyna.app.ui.spaces.SpaceAddRoomsTarget
 import com.zyna.app.ui.spaces.SpaceChildrenState
 import com.zyna.app.ui.spaces.SpaceJoinError
 import com.zyna.app.ui.spaces.SpaceJoinState
@@ -113,6 +115,7 @@ import com.zyna.app.ui.spaces.SpaceLeaveTarget
 import com.zyna.app.ui.spaces.SpaceTarget
 import com.zyna.app.ui.spaces.SpaceRootsState
 import com.zyna.app.ui.spaces.createSpaceChildrenStore
+import com.zyna.app.ui.spaces.createSpaceAddRoomsStore
 import com.zyna.app.ui.spaces.createSpaceJoinStore
 import com.zyna.app.ui.spaces.createSpaceLeaveStore
 import com.zyna.app.ui.spaces.createSpaceRootsStore
@@ -290,6 +293,16 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val spaceChildrenState: StateFlow<SpaceChildrenState> = spaceChildrenStore.state
+    private val spaceAddRoomsStore = createSpaceAddRoomsStore(
+        scope = viewModelScope,
+        roomListStore = roomListStore,
+        spaceChildrenStore = spaceChildrenStore,
+        matrixClientService = matrixClientService,
+        matrixSpaceService = matrixSpaceService,
+        onAdded = ::handleSpaceRoomsAdded,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val spaceAddRoomsState: StateFlow<SpaceAddRoomsState> = spaceAddRoomsStore.state
     private val spaceJoinStore = createSpaceJoinStore(
         scope = viewModelScope,
         matrixSpaceService = matrixSpaceService,
@@ -458,6 +471,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeSpaceAddRoomsRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeRoomProfileEditorOwner()
         }
 
@@ -574,6 +591,7 @@ class AppViewModel(
                     roomListStore.deactivate()
                     spaceRootsStore.deactivate()
                     spaceChildrenStore.deactivate()
+                    spaceAddRoomsStore.deactivate()
                     spaceJoinStore.deactivate()
                     spaceLeaveStore.deactivate()
                     matrixSpaceService.deactivate()
@@ -890,6 +908,44 @@ class AppViewModel(
         spaceChildrenStore.retry()
     }
 
+    fun openSpaceAddRooms() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.Space ?: return
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val children = spaceChildrenStore.state.value
+        if (
+            children.target?.userId != userId ||
+            children.target.spaceId != route.spaceId ||
+            !children.management.canManage
+        ) {
+            return
+        }
+        val nextNavState = current.navState.openSpaceAddRooms()
+        if (nextNavState == current.navState) return
+        if (!_uiState.compareAndSet(current, current.withNavigationState(nextNavState))) return
+        spaceAddRoomsStore.activate(
+            SpaceAddRoomsTarget(
+                userId = userId,
+                spaceId = route.spaceId,
+                parentSpaceId = route.parentSpaceId,
+                displayName = route.displayName
+            )
+        )
+    }
+
+    fun setSpaceAddRoomsSearchQuery(query: String) {
+        spaceAddRoomsStore.setSearchQuery(query)
+    }
+
+    fun toggleSpaceRoomToAdd(roomId: String) {
+        spaceAddRoomsStore.toggleRoom(roomId)
+    }
+
+    fun saveSpaceRoomsToAdd() {
+        if (roomListStore.state.value.isLoadingFullCoverage) return
+        spaceAddRoomsStore.save()
+    }
+
     fun enterSpaceManagement() {
         spaceChildrenStore.enterManagement()
     }
@@ -1070,6 +1126,7 @@ class AppViewModel(
     }
 
     fun selectTab(tab: AppTab) {
+        if (spaceAddRoomsStore.state.value.isSaving) return
         val spaceManagement = spaceChildrenStore.state.value.management
         if (spaceManagement.isRemoving) return
         if (spaceManagement.isManaging) {
@@ -1097,6 +1154,9 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
+        if (route is AppRoute.SpaceAddRooms && spaceAddRoomsStore.state.value.isSaving) {
+            return true
+        }
         if (route is AppRoute.Space && spaceChildrenStore.state.value.management.isManaging) {
             if (!spaceChildrenStore.state.value.management.isRemoving) {
                 spaceChildrenStore.exitManagement()
@@ -2539,6 +2599,50 @@ class AppViewModel(
             }
     }
 
+    private suspend fun observeSpaceAddRoomsRouteInputs() {
+        _uiState
+            .map { state ->
+                val route = state.navState.activeSpaceAddRoomsRoute ?: return@map null
+                val userId = state.matrixState.userIdOrNull() ?: return@map null
+                SpaceAddRoomsTarget(
+                    userId = userId,
+                    spaceId = route.spaceId,
+                    parentSpaceId = route.parentSpaceId,
+                    displayName = route.displayName
+                )
+            }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    spaceAddRoomsStore.deactivate()
+                    roomListStore.clearFullCoverage(SPACE_ADD_ROOMS_COVERAGE_OWNER)
+                } else {
+                    roomListStore.requestFullCoverage(SPACE_ADD_ROOMS_COVERAGE_OWNER)
+                    spaceAddRoomsStore.activate(target)
+                }
+            }
+    }
+
+    private fun handleSpaceRoomsAdded(
+        target: SpaceAddRoomsTarget,
+        roomIds: Set<String>
+    ) {
+        if (roomIds.isEmpty()) return
+        _uiState.update { state ->
+            val route = state.route as? AppRoute.SpaceAddRooms ?: return@update state
+            if (
+                state.matrixState.userIdOrNull() != target.userId ||
+                route.spaceId != target.spaceId ||
+                route.parentSpaceId != target.parentSpaceId
+            ) {
+                state
+            } else {
+                val next = state.navState.popActiveStack() ?: return@update state
+                state.withNavigationState(next)
+            }
+        }
+    }
+
     private fun handleRoomLeft(target: RoomLeaveTarget) {
         val current = _uiState.value
         if (current.matrixState.userIdOrNull() != target.userId) return
@@ -3176,6 +3280,8 @@ class AppViewModel(
                 "SpaceJoinPreview(${roomId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             is AppRoute.SpaceLeave ->
                 "SpaceLeave(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
+            is AppRoute.SpaceAddRooms ->
+                "SpaceAddRooms(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"
@@ -3211,6 +3317,7 @@ class AppViewModel(
         const val PRESENCE_TAG_ROOMS = "rooms"
         const val PRESENCE_TAG_CHAT = "chat"
         const val PRESENCE_TAG_PROFILE = "profile"
+        const val SPACE_ADD_ROOMS_COVERAGE_OWNER = "space-add-rooms"
     }
 }
 

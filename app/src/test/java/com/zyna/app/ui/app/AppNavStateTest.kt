@@ -7,6 +7,26 @@ import org.junit.Test
 
 class AppNavStateTest {
     @Test
+    fun addRoomsRouteKeepsItsExactSpaceActive() {
+        val space = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+
+        val picker = space.openSpaceAddRooms()
+
+        assertEquals("!story:example.org", picker.activeSpaceRoute?.spaceId)
+        assertEquals("!story:example.org", picker.activeSpaceAddRoomsRoute?.spaceId)
+        assertFalse(picker.showsTabs)
+        assertEquals(space, picker.popActiveStack())
+    }
+
+    @Test
     fun leavingNestedSpaceClosesItsOwnedStackAndReturnsToParent() {
         val parent = AppNavState()
             .enterMain()

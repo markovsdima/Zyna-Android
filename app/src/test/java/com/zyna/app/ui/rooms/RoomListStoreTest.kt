@@ -333,6 +333,57 @@ class RoomListStoreTest {
     }
 
     @Test
+    fun fullCoverageLoadsEveryPageWithoutSubscribingEveryRoom() = runBlocking {
+        val fixture = RoomListStoreFixture(coroutineContext)
+        val firstPage = (0 until 40).map { index -> room("!room-$index:example.org") }
+        try {
+            fixture.store.activate(FIRST_USER_ID)
+            fixture.store.enableReactiveSynchronization(FIRST_USER_ID)
+            val session = fixture.awaitSession(FIRST_USER_ID)
+            session.snapshotsState.value = MatrixRoomListSnapshot(
+                rooms = firstPage,
+                isKnown = true,
+                maximumNumberOfRooms = 100,
+                loadedEntryCount = 40,
+                revision = 1
+            )
+            awaitRoomListCondition { fixture.cachedWrites.isNotEmpty() }
+
+            fixture.store.requestFullCoverage("space-picker")
+            awaitRoomListCondition { session.loadMoreCount == 1 }
+            assertTrue(fixture.store.state.value.isLoadingFullCoverage)
+
+            val secondPage = firstPage +
+                (40 until 80).map { index -> room("!room-$index:example.org") }
+            session.snapshotsState.value = MatrixRoomListSnapshot(
+                rooms = secondPage,
+                isKnown = true,
+                maximumNumberOfRooms = 100,
+                loadedEntryCount = 80,
+                revision = 2
+            )
+            awaitRoomListCondition { session.loadMoreCount == 2 }
+
+            val complete = secondPage +
+                (80 until 100).map { index -> room("!room-$index:example.org") }
+            session.snapshotsState.value = MatrixRoomListSnapshot(
+                rooms = complete,
+                isKnown = true,
+                maximumNumberOfRooms = 100,
+                loadedEntryCount = 100,
+                revision = 3
+            )
+            awaitRoomListCondition { !fixture.store.state.value.isLoadingFullCoverage }
+
+            assertTrue(session.subscriptions.all(List<String>::isEmpty))
+            fixture.store.clearFullCoverage("space-picker")
+            assertEquals(1, session.resetToOnePageCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun switchingAccountsClosesOldLiveOwnerAndRejectsItsLateSnapshot() = runBlocking {
         val fixture = RoomListStoreFixture(coroutineContext)
         try {
@@ -422,10 +473,15 @@ private class FakeRoomListSession : MatrixRoomListSession {
     val subscriptions = mutableListOf<List<String>>()
     val acknowledgedRevisions = mutableListOf<Long>()
     var loadMoreCount = 0
+    var resetToOnePageCount = 0
     var closed = false
 
     override suspend fun loadMore() {
         loadMoreCount += 1
+    }
+
+    override suspend fun resetToOnePage() {
+        resetToOnePageCount += 1
     }
 
     override suspend fun subscribeToRooms(roomIds: List<String>) {

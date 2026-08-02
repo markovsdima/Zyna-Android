@@ -186,7 +186,7 @@ class SpaceJoinStoreTest {
             awaitJoinCondition { fixture.joined.isNotEmpty() }
 
             assertEquals(MatrixSpaceMembership.JOINED, fixture.joined.single().membership)
-            assertEquals(MatrixSpaceMembership.JOINED, fixture.cachedRooms.single().spaceMembership)
+            assertEquals(MatrixSpaceMembership.JOINED, fixture.cachedRooms.single().membership)
             assertTrue(fixture.cachedMemberships.isEmpty())
         } finally {
             fixture.close()

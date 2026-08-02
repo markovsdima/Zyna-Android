@@ -26,7 +26,8 @@ import kotlinx.coroutines.withContext
 data class RoomListState(
     val rooms: List<MatrixRoomSummary> = emptyList(),
     val isSynchronizing: Boolean = false,
-    val hasSynchronizationError: Boolean = false
+    val hasSynchronizationError: Boolean = false,
+    val isLoadingFullCoverage: Boolean = false
 ) {
     fun roomForId(roomId: String): MatrixRoomSummary? {
         return rooms.firstOrNull { it.id == roomId }
@@ -88,6 +89,7 @@ internal class RoomListStore(
     private var liveSession: MatrixRoomListSession? = null
     private var latestLiveSnapshot = MatrixRoomListSnapshot()
     private var visibleRoomsOwnerId: String? = null
+    private var fullCoverageOwnerId: String? = null
     private var visibleRoomIds: List<String> = emptyList()
     private var subscribedRoomIds: List<String>? = null
     private var paginationRequestedForEntryCount: Int? = null
@@ -156,6 +158,35 @@ internal class RoomListStore(
         updateVisibleRoomIds(emptyList())
     }
 
+    /** Expands the SDK window to its terminal page without subscribing every room for updates. */
+    @MainThread
+    fun requestFullCoverage(ownerId: String) {
+        val normalizedOwnerId = ownerId.trim().takeIf { it.isNotEmpty() } ?: return
+        fullCoverageOwnerId = normalizedOwnerId
+        _state.update { current ->
+            current.copy(isLoadingFullCoverage = !latestLiveSnapshot.endReached)
+        }
+        requestMoreIfNeeded()
+    }
+
+    @MainThread
+    suspend fun clearFullCoverage(ownerId: String) {
+        val normalizedOwnerId = ownerId.trim().takeIf { it.isNotEmpty() } ?: return
+        if (fullCoverageOwnerId != normalizedOwnerId) return
+        fullCoverageOwnerId = null
+        _state.update { current -> current.copy(isLoadingFullCoverage = false) }
+        val openedSession = liveSession ?: return
+        try {
+            openedSession.resetToOnePage()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (liveSession === openedSession) {
+                onWarning("Failed to shrink the Matrix room-list window", error)
+            }
+        }
+    }
+
     /** Hides successful leaves until the independent SDK room-list projection catches up. */
     @MainThread
     fun confirmRoomsLeft(userId: String, roomIds: Collection<String>) {
@@ -216,6 +247,7 @@ internal class RoomListStore(
         liveSession = null
         latestLiveSnapshot = MatrixRoomListSnapshot()
         visibleRoomsOwnerId = null
+        fullCoverageOwnerId = null
         visibleRoomIds = emptyList()
         subscribedRoomIds = null
         paginationRequestedForEntryCount = null
@@ -315,7 +347,8 @@ internal class RoomListStore(
                         _state.update { current ->
                             current.copy(
                                 isSynchronizing = false,
-                                hasSynchronizationError = true
+                                hasSynchronizationError = true,
+                                isLoadingFullCoverage = false
                             )
                         }
                         break
@@ -354,7 +387,9 @@ internal class RoomListStore(
             _state.update { current ->
                 current.copy(
                     isSynchronizing = false,
-                    hasSynchronizationError = false
+                    hasSynchronizationError = false,
+                    isLoadingFullCoverage =
+                        fullCoverageOwnerId != null && !snapshot.endReached
                 )
             }
         }
@@ -431,7 +466,11 @@ internal class RoomListStore(
 
         val needsInitialChatFill = snapshot.renderableChatCount <
             MINIMUM_LOADED_CHAT_ROOMS
-        if (visibleRoomIds.isEmpty() && !needsInitialChatFill) return
+        if (
+            fullCoverageOwnerId == null &&
+            visibleRoomIds.isEmpty() &&
+            !needsInitialChatFill
+        ) return
         val loadedIndexes = snapshot.roomIndexById
         val hasVisibleCachedTail = visibleRoomIds.any { roomId -> roomId !in loadedIndexes }
         val lastVisibleLoadedIndex = visibleRoomIds.maxOfOrNull { roomId ->
@@ -439,7 +478,12 @@ internal class RoomListStore(
         } ?: -1
         val isNearLoadedEnd = lastVisibleLoadedIndex >=
             (snapshot.rooms.size - PAGINATION_THRESHOLD).coerceAtLeast(0)
-        if (!needsInitialChatFill && !hasVisibleCachedTail && !isNearLoadedEnd) return
+        if (
+            fullCoverageOwnerId == null &&
+            !needsInitialChatFill &&
+            !hasVisibleCachedTail &&
+            !isNearLoadedEnd
+        ) return
         // addOnePage expands the SDK's desired window synchronously; returning without an
         // immediate diff does not mean that request failed. Keep the guard until the source
         // entry count advances instead of repeatedly expanding farther while the server catches up.

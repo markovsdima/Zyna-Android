@@ -163,17 +163,17 @@ class RoomListCachePolicyTest {
     }
 
     @Test
-    fun unknownSpaceMembershipCannotEraseAKnownInvitationOrJoin() {
+    fun unknownMembershipCannotEraseAKnownInvitationOrJoin() {
         assertEquals(
             MatrixSpaceMembership.INVITED.name,
-            cachedSpaceMembership(
+            cachedMembership(
                 incoming = MatrixSpaceMembership.UNKNOWN,
                 existing = MatrixSpaceMembership.INVITED.name
             )
         )
         assertEquals(
             MatrixSpaceMembership.JOINED.name,
-            cachedSpaceMembership(
+            cachedMembership(
                 incoming = MatrixSpaceMembership.JOINED,
                 existing = MatrixSpaceMembership.INVITED.name
             )

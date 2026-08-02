@@ -236,6 +236,22 @@ class MatrixSpaceService(
         )
     }
 
+    suspend fun addChildToSpace(
+        userId: String,
+        spaceId: String,
+        childId: String
+    ) = withContext(Dispatchers.IO) {
+        val normalizedSpaceId = spaceId.trim().takeIf(String::isNotEmpty)
+            ?: error("Space id is empty")
+        val normalizedChildId = childId.trim().takeIf(String::isNotEmpty)
+            ?: error("Child id is empty")
+        val service = requireActiveService(userId)
+        service.addChildToSpace(
+            childId = normalizedChildId,
+            spaceId = normalizedSpaceId
+        )
+    }
+
     /** Loads fresh metadata for one preview without expanding hierarchy list mapping work. */
     suspend fun loadJoinContext(
         userId: String,

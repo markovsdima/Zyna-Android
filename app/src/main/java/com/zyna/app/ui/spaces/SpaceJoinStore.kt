@@ -328,11 +328,7 @@ internal class SpaceJoinStore(
             displayName = joinedRoom.displayName,
             avatarUrl = joinedRoom.avatarUrl,
             isSpace = joinedRoom.kind == MatrixSpaceRoomKind.SPACE,
-            spaceMembership = if (joinedRoom.kind == MatrixSpaceRoomKind.SPACE) {
-                MatrixSpaceMembership.JOINED
-            } else {
-                MatrixSpaceMembership.UNKNOWN
-            }
+            membership = MatrixSpaceMembership.JOINED
         )
         try {
             driver.cacheJoinedRoom(target.userId, joinedSummary)

@@ -134,6 +134,8 @@ internal interface MatrixRoomListSession {
 
     suspend fun loadMore()
 
+    suspend fun resetToOnePage()
+
     suspend fun subscribeToRooms(roomIds: List<String>)
 
     suspend fun acknowledgeCached(revision: Long)
@@ -234,6 +236,15 @@ internal class SdkMatrixRoomListSession(
                 repeat(ROOM_LIST_PAGES_PER_REQUEST) {
                     entriesController?.addOnePage()
                 }
+            }
+        }
+    }
+
+    override suspend fun resetToOnePage() {
+        operationMutex.withLock {
+            if (closed.get()) return
+            withContext(Dispatchers.IO) {
+                entriesController?.resetToOnePage()
             }
         }
     }

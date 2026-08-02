@@ -295,6 +295,21 @@
     <string name="space_manage_permission_changed">Ваши права на управление этим пространством изменились.</string>
     <string name="space_manage_room_selected">Выбрано</string>
     <string name="space_manage_room_not_selected">Не выбрано</string>
+    <string name="space_add_existing_chats">Добавить существующие чаты</string>
+    <string name="space_add_rooms_title">Добавить чаты</string>
+    <string name="space_add_rooms_search_hint">Поиск по вашим чатам</string>
+    <string name="space_add_rooms_action">Добавить</string>
+    <string name="space_add_rooms_adding">Добавляем…</string>
+    <string name="space_add_rooms_prompt">Выберите чаты, которые нужно добавить в пространство.</string>
+    <string name="space_add_rooms_syncing">Обновляем список ваших чатов…</string>
+    <string name="space_add_rooms_retry_update">Не удалось обновить чаты. Нажмите, чтобы повторить.</string>
+    <string name="space_add_rooms_empty">Все доступные чаты уже здесь.</string>
+    <string name="space_add_rooms_no_results">По вашему запросу чаты не найдены.</string>
+    <string name="space_add_rooms_permission_changed">Ваши права на управление этим пространством изменились.</string>
+    <string name="space_add_rooms_error">Не удалось добавить выбранные чаты. Попробуйте снова.</string>
+    <string name="space_add_rooms_partial_error">Часть чатов добавлена. Остальные по-прежнему выбраны.</string>
+    <string name="space_add_rooms_room_selected">Выбрано</string>
+    <string name="space_add_rooms_room_not_selected">Не выбрано</string>
     <string name="space_update_error">Не удалось обновить список.</string>
     <string name="space_load_error">Не удалось загрузить пространство.</string>
     <string name="space_invited_format">Приглашение · %1$s</string>
@@ -402,6 +417,12 @@
         <item quantity="few">Убрать %1$d чата?</item>
         <item quantity="many">Убрать %1$d чатов?</item>
         <item quantity="other">Убрать %1$d чата?</item>
+    </plurals>
+    <plurals name="space_add_rooms_action_count">
+        <item quantity="one">Добавить %1$d</item>
+        <item quantity="few">Добавить %1$d</item>
+        <item quantity="many">Добавить %1$d</item>
+        <item quantity="other">Добавить %1$d</item>
     </plurals>
     <string name="settings_presence">Статус онлайн</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>

@@ -285,6 +285,7 @@ class AppViewModel(
     private val spaceChildrenStore = createSpaceChildrenStore(
         scope = viewModelScope,
         matrixSpaceService = matrixSpaceService,
+        matrixClientService = matrixClientService,
         cacheRepository = spaceCacheRepository,
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
@@ -889,6 +890,34 @@ class AppViewModel(
         spaceChildrenStore.retry()
     }
 
+    fun enterSpaceManagement() {
+        spaceChildrenStore.enterManagement()
+    }
+
+    fun exitSpaceManagement() {
+        spaceChildrenStore.exitManagement()
+    }
+
+    fun toggleManagedSpaceRoom(roomId: String) {
+        spaceChildrenStore.toggleManagedRoom(roomId)
+    }
+
+    fun toggleAllManagedSpaceRooms() {
+        spaceChildrenStore.toggleAllManagedRooms()
+    }
+
+    fun requestManagedSpaceRoomsRemoval() {
+        spaceChildrenStore.requestSelectedRoomsRemoval()
+    }
+
+    fun confirmManagedSpaceRoomsRemoval() {
+        spaceChildrenStore.confirmSelectedRoomsRemoval()
+    }
+
+    fun cancelManagedSpaceRoomsRemoval() {
+        spaceChildrenStore.cancelSelectedRoomsRemoval()
+    }
+
     fun performSpaceJoinAction() {
         spaceJoinStore.performPrimaryAction()
     }
@@ -1041,6 +1070,11 @@ class AppViewModel(
     }
 
     fun selectTab(tab: AppTab) {
+        val spaceManagement = spaceChildrenStore.state.value.management
+        if (spaceManagement.isRemoving) return
+        if (spaceManagement.isManaging) {
+            spaceChildrenStore.exitManagement()
+        }
         if (requestEditProfileExit(EditProfileExitDestination.Tab(tab))) {
             return
         }
@@ -1063,6 +1097,12 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
+        if (route is AppRoute.Space && spaceChildrenStore.state.value.management.isManaging) {
+            if (!spaceChildrenStore.state.value.management.isRemoving) {
+                spaceChildrenStore.exitManagement()
+            }
+            return true
+        }
         if (route is AppRoute.SpaceLeave && spaceLeaveStore.state.value.isLeaving) {
             return true
         }

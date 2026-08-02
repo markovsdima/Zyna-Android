@@ -2,6 +2,8 @@ package com.zyna.app.ui.spaces
 
 import androidx.annotation.MainThread
 import com.zyna.app.data.local.SpaceCacheRepository
+import com.zyna.app.data.matrix.MatrixClientService
+import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixSpaceListSnapshot
 import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.matrix.MatrixSpaceRemoteSnapshot
@@ -12,12 +14,19 @@ import com.zyna.app.data.matrix.MatrixSpaceService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 internal class SpaceChildrenDriver(
     val peekCache: (
@@ -36,6 +45,13 @@ internal class SpaceChildrenDriver(
         userId: String,
         spaceId: String,
         snapshot: MatrixSpaceListSnapshot
+    ) -> Unit,
+    val observeCanManage: (spaceId: String) -> Flow<Boolean>,
+    val loadCanManage: suspend (spaceId: String) -> Boolean,
+    val removeChild: suspend (
+        userId: String,
+        spaceId: String,
+        childId: String
     ) -> Unit
 )
 
@@ -55,12 +71,15 @@ internal class SpaceChildrenStore(
     private var generation = 0L
     private var activation: Activation? = null
     private var cacheJob: Job? = null
+    private var permissionJob: Job? = null
     private var liveJob: Job? = null
     private var paginationJob: Job? = null
+    private var removalJob: Job? = null
     private var liveSession: MatrixSpaceRoomListSession? = null
     private var latestCachedSnapshot: MatrixSpaceListSnapshot? = null
     private var isRequestingPagination = false
     private val confirmedMemberships = mutableMapOf<String, ConfirmedMembershipOverlay>()
+    private val confirmedRemovedRoomIds = mutableSetOf<String>()
 
     @MainThread
     fun activate(target: SpaceTarget) {
@@ -89,11 +108,13 @@ internal class SpaceChildrenStore(
             ?.toChildrenState(target = target)
             ?: SpaceChildrenState(target = target, space = target.seed)
         cacheJob = launchCacheObservation(next)
+        permissionJob = launchPermissionObservation(next)
         liveJob = launchLiveObservation(next)
     }
 
     @MainThread
     fun loadMore() {
+        if (_state.value.management.isRemoving) return
         val current = activation ?: return
         val session = liveSession ?: return
         requestPagination(current, session, ignoreCachedEnd = false)
@@ -110,6 +131,147 @@ internal class SpaceChildrenStore(
         if (liveJob?.isActive == true) return
         _state.update { it.copy(error = null) }
         liveJob = launchLiveObservation(current)
+    }
+
+    @MainThread
+    fun enterManagement() {
+        _state.update { state ->
+            if (
+                !state.management.canManage ||
+                state.management.isRemoving ||
+                state.chats.isEmpty()
+            ) {
+                state
+            } else {
+                state.copy(
+                    management = state.management.copy(
+                        isManaging = true,
+                        selectedRoomIds = emptySet(),
+                        pendingRemovalRoomIds = emptySet(),
+                        error = null
+                    )
+                )
+            }
+        }
+    }
+
+    @MainThread
+    fun exitManagement() {
+        _state.update { state ->
+            if (state.management.isRemoving) {
+                state
+            } else {
+                state.copy(
+                    management = state.management.copy(
+                        isManaging = false,
+                        selectedRoomIds = emptySet(),
+                        pendingRemovalRoomIds = emptySet(),
+                        error = null
+                    )
+                )
+            }
+        }
+    }
+
+    @MainThread
+    fun toggleManagedRoom(roomId: String) {
+        _state.update { state ->
+            val management = state.management
+            if (
+                !management.isManaging ||
+                management.isRemoving ||
+                state.chats.none { it.roomId == roomId }
+            ) {
+                state
+            } else {
+                val selected = if (roomId in management.selectedRoomIds) {
+                    management.selectedRoomIds - roomId
+                } else {
+                    management.selectedRoomIds + roomId
+                }
+                state.copy(
+                    management = management.copy(
+                        selectedRoomIds = selected,
+                        pendingRemovalRoomIds = emptySet(),
+                        error = null
+                    )
+                )
+            }
+        }
+    }
+
+    @MainThread
+    fun toggleAllManagedRooms() {
+        _state.update { state ->
+            val management = state.management
+            if (!management.isManaging || management.isRemoving || state.chats.isEmpty()) {
+                state
+            } else {
+                val allRoomIds = state.chats.mapTo(linkedSetOf(), MatrixSpaceRoom::roomId)
+                state.copy(
+                    management = management.copy(
+                        selectedRoomIds = if (management.selectedRoomIds == allRoomIds) {
+                            emptySet()
+                        } else {
+                            allRoomIds
+                        },
+                        pendingRemovalRoomIds = emptySet(),
+                        error = null
+                    )
+                )
+            }
+        }
+    }
+
+    @MainThread
+    fun requestSelectedRoomsRemoval() {
+        _state.update { state ->
+            if (!state.management.canRequestRemoval) {
+                state
+            } else {
+                state.copy(
+                    management = state.management.copy(
+                        pendingRemovalRoomIds = state.management.selectedRoomIds,
+                        error = null
+                    )
+                )
+            }
+        }
+    }
+
+    @MainThread
+    fun cancelSelectedRoomsRemoval() {
+        _state.update { state ->
+            if (state.management.isRemoving) state else state.copy(
+                management = state.management.copy(pendingRemovalRoomIds = emptySet())
+            )
+        }
+    }
+
+    @MainThread
+    fun confirmSelectedRoomsRemoval() {
+        val current = activation ?: return
+        val management = _state.value.management
+        val selectedRoomIds = management.pendingRemovalRoomIds
+        if (
+            selectedRoomIds.isEmpty() ||
+            management.isRemoving ||
+            removalJob?.isActive == true
+        ) {
+            return
+        }
+        _state.update { state ->
+            state.copy(
+                management = state.management.copy(
+                    pendingRemovalRoomIds = emptySet(),
+                    isRemoving = true,
+                    error = null
+                )
+            )
+        }
+        removalJob = scope.launch {
+            removeSelectedRooms(current, selectedRoomIds)
+        }
     }
 
     /**
@@ -154,15 +316,20 @@ internal class SpaceChildrenStore(
         activation = null
         cacheJob?.cancel()
         cacheJob = null
+        permissionJob?.cancel()
+        permissionJob = null
         liveJob?.cancel()
         liveJob = null
         paginationJob?.cancel()
         paginationJob = null
+        removalJob?.cancel()
+        removalJob = null
         liveSession?.close()
         liveSession = null
         latestCachedSnapshot = null
         isRequestingPagination = false
         confirmedMemberships.clear()
+        confirmedRemovedRoomIds.clear()
         _state.value = SpaceChildrenState()
     }
 
@@ -174,7 +341,9 @@ internal class SpaceChildrenStore(
                     current.target.spaceId
                 ).collect { snapshot ->
                     if (!isCurrent(current)) return@collect
-                    val visibleSnapshot = snapshot.withConfirmedMemberships(confirmedMemberships)
+                    val visibleSnapshot = snapshot
+                        .withConfirmedMemberships(confirmedMemberships)
+                        .withoutConfirmedRemovals(confirmedRemovedRoomIds)
                     val latest = latestCachedSnapshot
                     if (visibleSnapshot.isKnown) {
                         latestCachedSnapshot = visibleSnapshot
@@ -191,6 +360,43 @@ internal class SpaceChildrenStore(
             } catch (error: Throwable) {
                 if (isCurrent(current)) {
                     onWarning("Failed to observe cached Space children", error)
+                }
+            }
+        }
+    }
+
+    private fun launchPermissionObservation(current: Activation): Job {
+        return scope.launch {
+            try {
+                driver.observeCanManage(current.target.spaceId).collect { canManage ->
+                    if (!isCurrent(current)) return@collect
+                    _state.update { state ->
+                        val management = state.management
+                        state.copy(
+                            management = when {
+                                canManage -> management.copy(
+                                    canManage = true,
+                                    error = management.error.takeUnless {
+                                        it == SpaceChildManagementError.PERMISSION_CHANGED
+                                    }
+                                )
+                                management.isRemoving -> management.copy(canManage = false)
+                                else -> SpaceChildManagementState(
+                                    canManage = false,
+                                    error = SpaceChildManagementError.PERMISSION_CHANGED.takeIf {
+                                        management.isManaging || management.error ==
+                                            SpaceChildManagementError.PERMISSION_CHANGED
+                                    }
+                                )
+                            }
+                        )
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (isCurrent(current)) {
+                    onWarning("Failed to observe Space management permission", error)
                 }
             }
         }
@@ -215,6 +421,13 @@ internal class SpaceChildrenStore(
                             ?.membership
                             ?.let(confirmation::isSupersededBy) == true
                     }
+                    if (remote.isKnown && remote.endReached) {
+                        val remoteRoomIds = remote.rooms
+                            .asSequence()
+                            .map(MatrixSpaceRoom::roomId)
+                            .toHashSet()
+                        confirmedRemovedRoomIds.removeAll { it !in remoteRoomIds }
+                    }
                     _state.update { state ->
                         state.copy(
                             isPaginating = remote.isPaginating,
@@ -229,7 +442,9 @@ internal class SpaceChildrenStore(
                         cached = latestCachedSnapshot,
                         remote = remote,
                         fallbackSpace = _state.value.space ?: current.target.seed
-                    )?.withConfirmedMemberships(confirmedMemberships)
+                    )
+                        ?.withConfirmedMemberships(confirmedMemberships)
+                        ?.withoutConfirmedRemovals(confirmedRemovedRoomIds)
                     if (
                         content != null &&
                         content != latestCachedSnapshot?.withoutUpdateTime()
@@ -266,6 +481,152 @@ internal class SpaceChildrenStore(
                 }
                 openedSession?.close()
             }
+        }
+    }
+
+    private suspend fun removeSelectedRooms(
+        current: Activation,
+        selectedRoomIds: Set<String>
+    ) {
+        try {
+            val canManage = driver.loadCanManage(current.target.spaceId)
+            if (!isCurrent(current)) return
+            if (!canManage) {
+                _state.update { state ->
+                    state.copy(
+                        management = SpaceChildManagementState(
+                            canManage = false,
+                            error = SpaceChildManagementError.PERMISSION_CHANGED
+                        )
+                    )
+                }
+                return
+            }
+
+            val removalSemaphore = Semaphore(MAX_CONCURRENT_REMOVALS)
+            val outcomes = coroutineScope {
+                selectedRoomIds.map { roomId ->
+                    async {
+                        removalSemaphore.withPermit {
+                            try {
+                                driver.removeChild(
+                                    current.target.userId,
+                                    current.target.spaceId,
+                                    roomId
+                                )
+                                RoomRemovalOutcome(roomId, succeeded = true)
+                            } catch (error: CancellationException) {
+                                throw error
+                            } catch (error: Throwable) {
+                                onWarning("Failed to remove a room from Space", error)
+                                RoomRemovalOutcome(roomId, succeeded = false)
+                            }
+                        }
+                    }
+                }.awaitAll()
+            }
+            if (!isCurrent(current)) return
+
+            val removedRoomIds = outcomes
+                .asSequence()
+                .filter(RoomRemovalOutcome::succeeded)
+                .mapTo(linkedSetOf(), RoomRemovalOutcome::roomId)
+            val failedRoomIds = selectedRoomIds - removedRoomIds
+            if (removedRoomIds.isNotEmpty()) {
+                confirmChildrenRemoved(current, removedRoomIds)
+            }
+            try {
+                refreshHierarchy(current)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                _state.update { it.copy(error = SpaceLoadError.LOAD) }
+                onWarning("Failed to refresh Space hierarchy after removal", error)
+            }
+            if (!isCurrent(current)) return
+
+            _state.update { state ->
+                val visibleChatIds = state.chats
+                    .mapTo(hashSetOf(), MatrixSpaceRoom::roomId)
+                val remainingFailedRoomIds = failedRoomIds.intersect(visibleChatIds)
+                val permissionChanged = !state.management.canManage
+                state.copy(
+                    management = if (permissionChanged) {
+                        SpaceChildManagementState(
+                            canManage = false,
+                            error = SpaceChildManagementError.PERMISSION_CHANGED
+                        )
+                    } else {
+                        state.management.copy(
+                            isManaging = remainingFailedRoomIds.isNotEmpty(),
+                            selectedRoomIds = remainingFailedRoomIds,
+                            pendingRemovalRoomIds = emptySet(),
+                            isRemoving = false,
+                            error = when {
+                                remainingFailedRoomIds.isEmpty() -> null
+                                removedRoomIds.isEmpty() ->
+                                    SpaceChildManagementError.REMOVE
+                                else -> SpaceChildManagementError.PARTIAL_REMOVE
+                            }
+                        )
+                    }
+                )
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (isCurrent(current)) {
+                _state.update { state ->
+                    state.copy(
+                        management = state.management.copy(
+                            pendingRemovalRoomIds = emptySet(),
+                            isRemoving = false,
+                            error = SpaceChildManagementError.REMOVE
+                        )
+                    )
+                }
+                onWarning("Failed to update Space children", error)
+            }
+        }
+    }
+
+    private suspend fun confirmChildrenRemoved(
+        current: Activation,
+        roomIds: Set<String>
+    ) {
+        confirmedRemovedRoomIds += roomIds
+        _state.update { state -> state.withConfirmedRemovals(roomIds) }
+        val snapshot = latestCachedSnapshot
+            ?.withoutConfirmedRemovals(confirmedRemovedRoomIds)
+            ?: return
+        latestCachedSnapshot = snapshot
+        try {
+            driver.cacheSnapshot(
+                current.target.userId,
+                current.target.spaceId,
+                snapshot.copy(updatedAtMillis = System.currentTimeMillis())
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (isCurrent(current)) {
+                onWarning("Failed to cache removed Space children", error)
+            }
+        }
+    }
+
+    private suspend fun refreshHierarchy(current: Activation) {
+        paginationJob?.join()
+        val session = liveSession ?: return
+        if (!isCurrent(current) || isRequestingPagination) return
+        isRequestingPagination = true
+        try {
+            session.reset()
+            if (!isCurrent(current) || liveSession !== session) return
+            _state.update { it.copy(endReached = false, error = null) }
+            session.paginate()
+        } finally {
+            isRequestingPagination = false
         }
     }
 
@@ -328,7 +689,16 @@ internal class SpaceChildrenStore(
     private fun isCurrent(current: Activation): Boolean {
         return activation === current && generation == current.generation
     }
+
+    private companion object {
+        const val MAX_CONCURRENT_REMOVALS = 4
+    }
 }
+
+private data class RoomRemovalOutcome(
+    val roomId: String,
+    val succeeded: Boolean
+)
 
 private fun SpaceChildrenState.withConfirmedMembership(
     roomId: String,
@@ -340,6 +710,22 @@ private fun SpaceChildrenState.withConfirmedMembership(
         }
     }
     return copy(tracks = tracks.patched(), chats = chats.patched())
+}
+
+private fun SpaceChildrenState.withConfirmedRemovals(
+    roomIds: Set<String>
+): SpaceChildrenState {
+    if (roomIds.isEmpty()) return this
+    return copy(
+        tracks = tracks.filterNot { it.roomId in roomIds },
+        chats = chats.filterNot { it.roomId in roomIds },
+        management = management.withAvailableChats(
+            chats.asSequence()
+                .filterNot { it.roomId in roomIds }
+                .map(MatrixSpaceRoom::roomId)
+                .toSet()
+        )
+    )
 }
 
 private data class ConfirmedMembershipOverlay(
@@ -371,9 +757,17 @@ private fun MatrixSpaceListSnapshot.withConfirmedMemberships(
     )
 }
 
+private fun MatrixSpaceListSnapshot.withoutConfirmedRemovals(
+    roomIds: Set<String>
+): MatrixSpaceListSnapshot {
+    if (roomIds.isEmpty()) return this
+    return copy(rooms = rooms.filterNot { it.roomId in roomIds })
+}
+
 internal fun createSpaceChildrenStore(
     scope: CoroutineScope,
     matrixSpaceService: MatrixSpaceService,
+    matrixClientService: MatrixClientService,
     cacheRepository: SpaceCacheRepository,
     onWarning: (String, Throwable) -> Unit
 ): SpaceChildrenStore {
@@ -383,7 +777,18 @@ internal fun createSpaceChildrenStore(
             peekCache = cacheRepository::peekSpaceChildren,
             observeCache = cacheRepository::observeSpaceChildren,
             openLive = matrixSpaceService::openRoomList,
-            cacheSnapshot = cacheRepository::cacheSpaceChildren
+            cacheSnapshot = cacheRepository::cacheSpaceChildren,
+            observeCanManage = { spaceId ->
+                matrixClientService.roomPermissionsUpdates(spaceId)
+                    .map { permissions ->
+                        permissions.canPerform(MatrixRoomPermission.MANAGE_SPACE_CHILDREN)
+                    }
+                    .distinctUntilChanged()
+            },
+            loadCanManage = { spaceId ->
+                matrixClientService.canManageSpaceChildren(spaceId)
+            },
+            removeChild = matrixSpaceService::removeChildFromSpace
         ),
         onWarning = onWarning
     )
@@ -422,15 +827,45 @@ private fun MatrixSpaceListSnapshot.toChildrenState(
     target: SpaceTarget,
     transient: SpaceChildrenState = SpaceChildrenState()
 ): SpaceChildrenState {
+    val chats = rooms.filter { it.kind == MatrixSpaceRoomKind.ROOM }
     return SpaceChildrenState(
         target = target,
         space = space ?: transient.space ?: target.seed,
         tracks = rooms.filter { it.kind == MatrixSpaceRoomKind.SPACE },
-        chats = rooms.filter { it.kind == MatrixSpaceRoomKind.ROOM },
+        chats = chats,
         isKnown = isKnown,
         endReached = endReached,
         isPaginating = transient.isPaginating,
-        error = transient.error
+        error = transient.error,
+        management = transient.management.withAvailableChats(
+            chats.mapTo(hashSetOf(), MatrixSpaceRoom::roomId)
+        )
+    )
+}
+
+private fun SpaceChildManagementState.withAvailableChats(
+    availableRoomIds: Set<String>
+): SpaceChildManagementState {
+    val selected = selectedRoomIds.intersect(availableRoomIds)
+    val pending = pendingRemovalRoomIds.intersect(availableRoomIds)
+    if (
+        error in setOf(
+            SpaceChildManagementError.REMOVE,
+            SpaceChildManagementError.PARTIAL_REMOVE
+        ) &&
+        selected.isEmpty() &&
+        !isRemoving
+    ) {
+        return copy(
+            isManaging = false,
+            selectedRoomIds = emptySet(),
+            pendingRemovalRoomIds = emptySet(),
+            error = null
+        )
+    }
+    return copy(
+        selectedRoomIds = selected,
+        pendingRemovalRoomIds = pending
     )
 }
 

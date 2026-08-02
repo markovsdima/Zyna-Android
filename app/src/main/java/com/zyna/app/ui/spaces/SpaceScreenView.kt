@@ -1,5 +1,6 @@
 package com.zyna.app.ui.spaces
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Canvas
@@ -12,10 +13,12 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.isVisible
 import androidx.core.view.updatePadding
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -45,6 +48,7 @@ data class SpaceScreenViewState(
     val isPaginating: Boolean,
     val endReached: Boolean,
     val error: SpaceLoadError?,
+    val management: SpaceChildManagementState,
     val matrixMediaLoader: MatrixMediaLoader?
 )
 
@@ -53,7 +57,14 @@ data class SpaceScreenViewActions(
     val onOpenDetails: () -> Unit,
     val onOpenRoom: (MatrixSpaceRoom) -> Unit,
     val onLoadMore: () -> Unit,
-    val onRetry: () -> Unit
+    val onRetry: () -> Unit,
+    val onEnterManagement: () -> Unit,
+    val onExitManagement: () -> Unit,
+    val onToggleManagedRoom: (String) -> Unit,
+    val onToggleAllManagedRooms: () -> Unit,
+    val onRequestManagedRoomsRemoval: () -> Unit,
+    val onConfirmManagedRoomsRemoval: () -> Unit,
+    val onCancelManagedRoomsRemoval: () -> Unit
 )
 
 class SpaceScreenView(context: Context) : FrameLayout(context) {
@@ -65,6 +76,10 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     private var latestPaginationStatus: SpacePaginationStatus? = null
     private var renderedTracks: List<MatrixSpaceRoom>? = null
     private var renderedChats: List<MatrixSpaceRoom>? = null
+    private var renderedIsManaging: Boolean? = null
+    private var renderedSelectedRoomIds: Set<String>? = null
+    private var removalConfirmationDialog: AlertDialog? = null
+    private var removalConfirmationKey: Set<String>? = null
     private val autoPaginationGate = SpaceAutoPaginationGate()
 
     private val root = LinearLayout(context).apply {
@@ -90,14 +105,14 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
     }
-    private val detailsButton = TextView(context).apply {
+    private val overflowButton = TextView(context).apply {
         gravity = Gravity.CENTER
-        text = "•••"
-        textSize = 18f
+        text = "⋮"
+        textSize = 24f
         typeface = Typeface.DEFAULT_BOLD
         isClickable = true
         isFocusable = true
-        contentDescription = context.getString(R.string.space_details)
+        contentDescription = context.getString(R.string.common_more_options)
     }
     private val header = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -122,6 +137,30 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         textSize = 15f
         maxLines = 3
         ellipsize = TextUtils.TruncateAt.END
+    }
+    private val managementBar = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        updatePadding(left = dp(20), right = dp(8), top = dp(8), bottom = dp(8))
+    }
+    private val managementHint = TextView(context).apply {
+        textSize = 14f
+        maxLines = 2
+    }
+    private val selectAllButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+        isClickable = true
+        isFocusable = true
+        updatePadding(left = dp(12), right = dp(12), top = dp(8), bottom = dp(8))
+    }
+    private val managementErrorBar = TextView(context).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        textSize = 14f
+        visibility = View.GONE
+        updatePadding(left = dp(20), right = dp(20), top = dp(10), bottom = dp(10))
     }
     private val contentFrame = FrameLayout(context)
     private val recyclerView = RecyclerView(context).apply {
@@ -201,6 +240,18 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
             ).apply { topMargin = dp(8) }
         )
     }
+    private val removeBar = FrameLayout(context).apply {
+        visibility = View.GONE
+        updatePadding(left = dp(16), right = dp(16), top = dp(10), bottom = dp(10))
+    }
+    private val removeButton = TextView(context).apply {
+        gravity = Gravity.CENTER
+        textSize = 16f
+        typeface = Typeface.DEFAULT_BOLD
+        isClickable = true
+        isFocusable = true
+        minHeight = dp(48)
+    }
     private val adapter = SpaceItemsAdapter()
 
     init {
@@ -227,7 +278,7 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
             LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
         )
         topBar.addView(
-            detailsButton,
+            overflowButton,
             LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.MATCH_PARENT)
         )
         root.addView(
@@ -261,6 +312,31 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6) }
+        )
+        managementBar.addView(
+            managementHint,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        managementBar.addView(
+            selectAllButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(
+            managementBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(
+            managementErrorBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         )
         root.addView(
             cachedErrorBar,
@@ -306,6 +382,20 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        removeBar.addView(
+            removeButton,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(
+            removeBar,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
 
         recyclerView.addOnScrollListener(
             object : RecyclerView.OnScrollListener() {
@@ -335,7 +425,19 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
             }
             if (bottomInset != systemBars.bottom) {
                 bottomInset = systemBars.bottom
-                recyclerView.updatePadding(bottom = bottomInset + dp(20))
+                recyclerView.updatePadding(
+                    bottom = if (removeBar.isVisible) {
+                        dp(20)
+                    } else {
+                        bottomInset + dp(20)
+                    }
+                )
+                removeBar.updatePadding(
+                    left = dp(16),
+                    right = dp(16),
+                    top = dp(10),
+                    bottom = bottomInset + dp(10)
+                )
             }
             insets
         }
@@ -344,6 +446,14 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         ViewCompat.requestApplyInsets(this)
+    }
+
+    override fun onDetachedFromWindow() {
+        removalConfirmationDialog?.setOnDismissListener(null)
+        removalConfirmationDialog?.dismiss()
+        removalConfirmationDialog = null
+        removalConfirmationKey = null
+        super.onDetachedFromWindow()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration?) {
@@ -355,12 +465,20 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     fun render(state: SpaceScreenViewState, actions: SpaceScreenViewActions) {
         latestActions = actions
         latestPaginationStatus = state.paginationStatus()
-        topTitle.text = when (state.presentationKind) {
+        val management = state.management
+        topTitle.text = if (management.isManaging) {
+            context.getString(R.string.space_manage_title)
+        } else {
+            when (state.presentationKind) {
+                SpacePresentationKind.STORYLINE -> context.getString(R.string.space_storyline)
+                SpacePresentationKind.TRACK -> context.getString(R.string.space_track)
+            }
+        }
+        nameText.text = state.space.displayName
+        kindText.text = when (state.presentationKind) {
             SpacePresentationKind.STORYLINE -> context.getString(R.string.space_storyline)
             SpacePresentationKind.TRACK -> context.getString(R.string.space_track)
         }
-        nameText.text = state.space.displayName
-        kindText.text = topTitle.text
         topicText.text = state.space.topic.orEmpty()
         topicText.visibility = if (state.space.topic.isNullOrBlank()) View.GONE else View.VISIBLE
         avatarView.render(
@@ -373,30 +491,104 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
             shape = MatrixAvatarShape.ROUNDED_RECT
         )
 
-        backButton.setOnClickListener { actions.onBack() }
-        detailsButton.setOnClickListener { actions.onOpenDetails() }
+        backButton.text = if (management.isManaging) {
+            context.getString(R.string.common_cancel)
+        } else {
+            context.getString(R.string.common_back)
+        }
+        backButton.setOnClickListener {
+            if (management.isManaging) actions.onExitManagement() else actions.onBack()
+        }
+        backButton.isEnabled = !management.isRemoving
+        backButton.alpha = if (management.isRemoving) 0.45f else 1f
+        overflowButton.setOnClickListener {
+            showOverflowMenu(
+                canManageChats = management.canManage && state.chats.isNotEmpty(),
+                actions = actions
+            )
+        }
+        overflowButton.visibility = if (management.isManaging) View.INVISIBLE else View.VISIBLE
         retryButton.setOnClickListener { actions.onRetry() }
         inlineRetryButton.setOnClickListener { actions.onRetry() }
+        selectAllButton.setOnClickListener { actions.onToggleAllManagedRooms() }
+        removeButton.setOnClickListener { actions.onRequestManagedRoomsRemoval() }
         adapter.matrixMediaLoader = state.matrixMediaLoader
         adapter.onRoomClicked = actions.onOpenRoom
+        adapter.onRoomSelected = actions.onToggleManagedRoom
 
-        if (renderedTracks !== state.tracks || renderedChats !== state.chats) {
+        header.visibility = if (management.isManaging) View.GONE else View.VISIBLE
+        managementBar.visibility = if (management.isManaging) View.VISIBLE else View.GONE
+        managementHint.text = if (management.selectedRoomIds.isEmpty()) {
+            context.getString(R.string.space_manage_select_hint)
+        } else {
+            resources.getQuantityString(
+                R.plurals.space_manage_selected_count,
+                management.selectedRoomIds.size,
+                management.selectedRoomIds.size
+            )
+        }
+        val allChatsSelected = state.chats.isNotEmpty() &&
+            management.selectedRoomIds.size == state.chats.size
+        selectAllButton.text = context.getString(
+            if (allChatsSelected) {
+                R.string.space_manage_deselect_all
+            } else {
+                R.string.space_manage_select_all
+            }
+        )
+        selectAllButton.isEnabled = !management.isRemoving
+        selectAllButton.alpha = if (management.isRemoving) 0.45f else 1f
+
+        val managementError = management.error?.let { error ->
+            context.getString(
+                when (error) {
+                    SpaceChildManagementError.REMOVE -> R.string.space_manage_remove_error
+                    SpaceChildManagementError.PARTIAL_REMOVE ->
+                        R.string.space_manage_partial_remove_error
+                    SpaceChildManagementError.PERMISSION_CHANGED ->
+                        R.string.space_manage_permission_changed
+                }
+            )
+        }
+        managementErrorBar.text = managementError.orEmpty()
+        managementErrorBar.visibility = if (managementError == null) View.GONE else View.VISIBLE
+
+        if (
+            renderedTracks !== state.tracks ||
+            renderedChats !== state.chats ||
+            renderedIsManaging != management.isManaging ||
+            renderedSelectedRoomIds != management.selectedRoomIds
+        ) {
             renderedTracks = state.tracks
             renderedChats = state.chats
+            renderedIsManaging = management.isManaging
+            renderedSelectedRoomIds = management.selectedRoomIds
             adapter.submitList(
                 buildList {
-                    if (state.tracks.isNotEmpty()) {
+                    if (!management.isManaging && state.tracks.isNotEmpty()) {
                         add(SpaceListItem.Section(context.getString(R.string.space_tracks)))
                         state.tracks.forEach { add(SpaceListItem.Room(it)) }
                     }
                     if (state.chats.isNotEmpty()) {
                         add(SpaceListItem.Section(context.getString(R.string.space_chats)))
-                        state.chats.forEach { add(SpaceListItem.Room(it)) }
+                        state.chats.forEach { room ->
+                            add(
+                                SpaceListItem.Room(
+                                    room = room,
+                                    isSelectable = management.isManaging,
+                                    isSelected = room.roomId in management.selectedRoomIds
+                                )
+                            )
+                        }
                     }
                 }
             )
         }
-        val hasItems = state.tracks.isNotEmpty() || state.chats.isNotEmpty()
+        val hasItems = if (management.isManaging) {
+            state.chats.isNotEmpty()
+        } else {
+            state.tracks.isNotEmpty() || state.chats.isNotEmpty()
+        }
 
         val showError = !state.isKnown && state.error != null
         val showCachedError = state.isKnown && state.error != null
@@ -406,8 +598,34 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         cachedErrorBar.visibility = if (showCachedError) View.VISIBLE else View.GONE
         loadingSkeleton.visibility = if (showLoading) View.VISIBLE else View.GONE
         emptyText.visibility = if (showEmpty) View.VISIBLE else View.GONE
-        emptyText.text = context.getString(R.string.space_empty)
+        emptyText.text = context.getString(
+            if (management.isManaging) R.string.space_manage_empty else R.string.space_empty
+        )
         recyclerView.visibility = if (hasItems) View.VISIBLE else View.INVISIBLE
+
+        removeBar.visibility = if (management.isManaging) View.VISIBLE else View.GONE
+        removeButton.text = when {
+            management.isRemoving -> context.getString(R.string.space_manage_removing)
+            management.selectedRoomIds.isEmpty() ->
+                context.getString(R.string.space_manage_remove)
+            else -> resources.getQuantityString(
+                R.plurals.space_manage_remove_count,
+                management.selectedRoomIds.size,
+                management.selectedRoomIds.size
+            )
+        }
+        removeButton.isEnabled = management.canRequestRemoval
+        removeButton.alpha = if (management.canRequestRemoval) 1f else 0.45f
+        recyclerView.updatePadding(
+            bottom = if (management.isManaging) dp(20) else bottomInset + dp(20)
+        )
+        removeBar.updatePadding(
+            left = dp(16),
+            right = dp(16),
+            top = dp(10),
+            bottom = bottomInset + dp(10)
+        )
+        renderRemovalConfirmation(management, actions)
 
         // If the first page fits without scrolling, continue paginating automatically.
         if (autoPaginationGate.shouldSchedule(state.paginationStatus())) {
@@ -425,15 +643,88 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         }
     }
 
+    private fun showOverflowMenu(
+        canManageChats: Boolean,
+        actions: SpaceScreenViewActions
+    ) {
+        PopupMenu(context, overflowButton, Gravity.END).apply {
+            menu.add(0, MENU_DETAILS, 0, R.string.space_details)
+            if (canManageChats) {
+                menu.add(0, MENU_MANAGE_CHATS, 1, R.string.space_manage_chats)
+            }
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    MENU_DETAILS -> actions.onOpenDetails()
+                    MENU_MANAGE_CHATS -> actions.onEnterManagement()
+                    else -> return@setOnMenuItemClickListener false
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    private fun renderRemovalConfirmation(
+        management: SpaceChildManagementState,
+        actions: SpaceScreenViewActions
+    ) {
+        val pendingRoomIds = management.pendingRemovalRoomIds
+        if (pendingRoomIds.isEmpty()) {
+            removalConfirmationDialog?.setOnDismissListener(null)
+            removalConfirmationDialog?.dismiss()
+            removalConfirmationDialog = null
+            removalConfirmationKey = null
+            return
+        }
+        if (
+            removalConfirmationDialog?.isShowing == true &&
+            removalConfirmationKey == pendingRoomIds
+        ) {
+            return
+        }
+        removalConfirmationDialog?.setOnDismissListener(null)
+        removalConfirmationDialog?.dismiss()
+        removalConfirmationKey = pendingRoomIds
+        removalConfirmationDialog = AlertDialog.Builder(context)
+            .setTitle(
+                resources.getQuantityString(
+                    R.plurals.space_manage_confirm_title,
+                    pendingRoomIds.size,
+                    pendingRoomIds.size
+                )
+            )
+            .setMessage(R.string.space_manage_confirm_message)
+            .setOnCancelListener { actions.onCancelManagedRoomsRemoval() }
+            .setNegativeButton(R.string.common_cancel) { _, _ ->
+                actions.onCancelManagedRoomsRemoval()
+            }
+            .setPositiveButton(R.string.space_manage_remove) { _, _ ->
+                actions.onConfirmManagedRoomsRemoval()
+            }
+            .create()
+            .also { dialog ->
+                dialog.show()
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(palette.error)
+            }
+    }
+
     private fun applyPalette() {
         setBackgroundColor(palette.background)
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         header.setBackgroundColor(palette.background)
+        managementBar.setBackgroundColor(palette.secondaryBackground)
+        managementErrorBar.setBackgroundColor(palette.secondaryBackground)
         contentFrame.setBackgroundColor(palette.background)
         recyclerView.setBackgroundColor(palette.background)
+        removeBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.accent)
-        detailsButton.setTextColor(palette.accent)
+        overflowButton.setTextColor(palette.accent)
+        managementHint.setTextColor(palette.secondaryText)
+        selectAllButton.setTextColor(palette.accent)
+        managementErrorBar.setTextColor(palette.error)
+        removeButton.setTextColor(palette.error)
+        removeButton.setBackgroundColor(palette.secondaryBackground)
         retryButton.setTextColor(palette.accent)
         inlineRetryButton.setTextColor(palette.accent)
         cachedErrorBar.setBackgroundColor(palette.secondaryBackground)
@@ -454,6 +745,8 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     private companion object {
         const val TOP_BAR_HEIGHT_DP = 56
         const val CACHED_ERROR_TEXT_TAG = "cached-space-error"
+        const val MENU_DETAILS = 1
+        const val MENU_MANAGE_CHATS = 2
     }
 }
 
@@ -521,7 +814,11 @@ private fun SpaceScreenViewState.paginationStatus(): SpacePaginationStatus {
 
 private sealed interface SpaceListItem {
     data class Section(val title: String) : SpaceListItem
-    data class Room(val room: MatrixSpaceRoom) : SpaceListItem
+    data class Room(
+        val room: MatrixSpaceRoom,
+        val isSelectable: Boolean = false,
+        val isSelected: Boolean = false
+    ) : SpaceListItem
 }
 
 private class SpaceItemsAdapter : ListAdapter<SpaceListItem, RecyclerView.ViewHolder>(
@@ -535,6 +832,7 @@ private class SpaceItemsAdapter : ListAdapter<SpaceListItem, RecyclerView.ViewHo
         }
     var matrixMediaLoader: MatrixMediaLoader? = null
     var onRoomClicked: (MatrixSpaceRoom) -> Unit = {}
+    var onRoomSelected: (String) -> Unit = {}
 
     init {
         setHasStableIds(true)
@@ -565,10 +863,11 @@ private class SpaceItemsAdapter : ListAdapter<SpaceListItem, RecyclerView.ViewHo
         when (val item = getItem(position)) {
             is SpaceListItem.Section -> (holder as SectionHolder).bind(item.title, palette)
             is SpaceListItem.Room -> (holder as RoomHolder).bind(
-                room = item.room,
+                item = item,
                 palette = palette,
                 matrixMediaLoader = matrixMediaLoader,
-                onClick = onRoomClicked
+                onRoomClicked = onRoomClicked,
+                onRoomSelected = onRoomSelected
             )
         }
     }
@@ -614,15 +913,29 @@ private class RoomHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
     }
 ) {
     fun bind(
-        room: MatrixSpaceRoom,
+        item: SpaceListItem.Room,
         palette: SpacePalette,
         matrixMediaLoader: MatrixMediaLoader?,
-        onClick: (MatrixSpaceRoom) -> Unit
+        onRoomClicked: (MatrixSpaceRoom) -> Unit,
+        onRoomSelected: (String) -> Unit
     ) {
+        val room = item.room
         val row = itemView as SpaceRoomRowView
-        row.bind(room, palette, matrixMediaLoader)
+        row.bind(
+            room = room,
+            palette = palette,
+            matrixMediaLoader = matrixMediaLoader,
+            isSelectable = item.isSelectable,
+            isSelected = item.isSelected
+        )
         row.isFocusable = true
-        row.setOnClickListener { onClick(room) }
+        row.setOnClickListener {
+            if (item.isSelectable) {
+                onRoomSelected(room.roomId)
+            } else {
+                onRoomClicked(room)
+            }
+        }
     }
 }
 
@@ -677,7 +990,9 @@ private class SpaceRoomRowView(context: Context) : LinearLayout(context) {
     fun bind(
         room: MatrixSpaceRoom,
         palette: SpacePalette,
-        matrixMediaLoader: MatrixMediaLoader?
+        matrixMediaLoader: MatrixMediaLoader?,
+        isSelectable: Boolean,
+        isSelected: Boolean
     ) {
         setBackgroundColor(palette.background)
         title.text = room.displayName
@@ -705,7 +1020,17 @@ private class SpaceRoomRowView(context: Context) : LinearLayout(context) {
             MatrixSpaceMembership.JOINED -> baseSubtitle
             else -> context.getString(R.string.space_not_joined_format, baseSubtitle)
         }
-        alpha = if (room.membership == MatrixSpaceMembership.JOINED) 1f else 0.72f
+        alpha = if (isSelectable || room.membership == MatrixSpaceMembership.JOINED) {
+            1f
+        } else {
+            0.72f
+        }
+        accessory.text = when {
+            isSelectable && isSelected -> "✓"
+            isSelectable -> "○"
+            else -> "›"
+        }
+        accessory.textSize = if (isSelectable) 22f else 28f
         accessory.visibility = View.VISIBLE
         avatar.setPaletteBackground(palette.background)
         avatar.render(
@@ -721,7 +1046,23 @@ private class SpaceRoomRowView(context: Context) : LinearLayout(context) {
                 MatrixAvatarShape.CIRCLE
             }
         )
-        contentDescription = "${room.displayName}, ${subtitle.text}"
+        contentDescription = buildString {
+            append(room.displayName)
+            append(", ")
+            append(subtitle.text)
+            if (isSelectable) {
+                append(", ")
+                append(
+                    context.getString(
+                        if (isSelected) {
+                            R.string.space_manage_room_selected
+                        } else {
+                            R.string.space_manage_room_not_selected
+                        }
+                    )
+                )
+            }
+        }
     }
 
     private fun dp(value: Int): Int = (value * density).roundToInt()

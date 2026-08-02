@@ -315,8 +315,23 @@
     <string name="space_track">Track</string>
     <string name="space_tracks">Tracks</string>
     <string name="space_chats">Chats</string>
+    <string name="common_more_options">More options</string>
     <string name="space_details">Space details</string>
     <string name="space_empty">There aren’t any chats or tracks here yet.</string>
+    <string name="space_manage_chats">Manage chats</string>
+    <string name="space_manage_title">Manage chats</string>
+    <string name="space_manage_select_hint">Select chats to remove from this Space.</string>
+    <string name="space_manage_select_all">Select all</string>
+    <string name="space_manage_deselect_all">Deselect all</string>
+    <string name="space_manage_remove">Remove</string>
+    <string name="space_manage_removing">Removing…</string>
+    <string name="space_manage_empty">There aren’t any chats to manage here.</string>
+    <string name="space_manage_confirm_message">The chats will remain available to their members. They’ll only be removed from this Space.</string>
+    <string name="space_manage_remove_error">Couldn’t remove the selected chats. Try again.</string>
+    <string name="space_manage_partial_remove_error">Some chats were removed. The remaining chats are still selected.</string>
+    <string name="space_manage_permission_changed">Your permission to manage this Space changed.</string>
+    <string name="space_manage_room_selected">Selected</string>
+    <string name="space_manage_room_not_selected">Not selected</string>
     <string name="space_update_error">Couldn’t update this list.</string>
     <string name="space_load_error">Couldn’t load this Space.</string>
     <string name="space_invited_format">Invited · %1$s</string>
@@ -400,6 +415,18 @@
     <plurals name="space_members_count">
         <item quantity="one">%1$d member</item>
         <item quantity="other">%1$d members</item>
+    </plurals>
+    <plurals name="space_manage_selected_count">
+        <item quantity="one">%1$d chat selected</item>
+        <item quantity="other">%1$d chats selected</item>
+    </plurals>
+    <plurals name="space_manage_remove_count">
+        <item quantity="one">Remove %1$d chat</item>
+        <item quantity="other">Remove %1$d chats</item>
+    </plurals>
+    <plurals name="space_manage_confirm_title">
+        <item quantity="one">Remove %1$d chat?</item>
+        <item quantity="other">Remove %1$d chats?</item>
     </plurals>
     <string name="settings_presence">Presence</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>

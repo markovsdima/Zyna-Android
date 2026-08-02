@@ -1410,6 +1410,16 @@ class MatrixClientService(
             } ?: error("Matrix room is not available")
         }
 
+    suspend fun canManageSpaceChildren(roomId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val activeClient = client ?: error("Matrix client is not ready")
+            activeClient.getRoom(roomId)?.use { room ->
+                room.getPowerLevels().use { powerLevels ->
+                    powerLevels.canOwnUserSendState(StateEventType.SpaceChild)
+                }
+            } ?: error("Matrix room is not available")
+        }
+
     suspend fun loadRoomPermissions(roomId: String): MatrixRoomPermissions =
         withContext(Dispatchers.IO) {
             val activeClient = client ?: error("Matrix client is not ready")

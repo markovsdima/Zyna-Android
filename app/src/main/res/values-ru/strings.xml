@@ -278,8 +278,23 @@
     <string name="space_track">Линия</string>
     <string name="space_tracks">Линии</string>
     <string name="space_chats">Чаты</string>
+    <string name="common_more_options">Другие действия</string>
     <string name="space_details">Подробнее</string>
     <string name="space_empty">Здесь пока нет чатов и линий.</string>
+    <string name="space_manage_chats">Управлять чатами</string>
+    <string name="space_manage_title">Управление чатами</string>
+    <string name="space_manage_select_hint">Выберите чаты, которые нужно убрать из пространства.</string>
+    <string name="space_manage_select_all">Выбрать всё</string>
+    <string name="space_manage_deselect_all">Снять выбор</string>
+    <string name="space_manage_remove">Убрать</string>
+    <string name="space_manage_removing">Убираем…</string>
+    <string name="space_manage_empty">Здесь пока нет чатов для управления.</string>
+    <string name="space_manage_confirm_message">Чаты останутся доступны их участникам. Они будут только убраны из этого пространства.</string>
+    <string name="space_manage_remove_error">Не удалось убрать выбранные чаты. Попробуйте снова.</string>
+    <string name="space_manage_partial_remove_error">Часть чатов убрана. Остальные по-прежнему выбраны.</string>
+    <string name="space_manage_permission_changed">Ваши права на управление этим пространством изменились.</string>
+    <string name="space_manage_room_selected">Выбрано</string>
+    <string name="space_manage_room_not_selected">Не выбрано</string>
     <string name="space_update_error">Не удалось обновить список.</string>
     <string name="space_load_error">Не удалось загрузить пространство.</string>
     <string name="space_invited_format">Приглашение · %1$s</string>
@@ -369,6 +384,24 @@
         <item quantity="few">%1$d участника</item>
         <item quantity="many">%1$d участников</item>
         <item quantity="other">%1$d участника</item>
+    </plurals>
+    <plurals name="space_manage_selected_count">
+        <item quantity="one">Выбран %1$d чат</item>
+        <item quantity="few">Выбрано %1$d чата</item>
+        <item quantity="many">Выбрано %1$d чатов</item>
+        <item quantity="other">Выбрано %1$d чата</item>
+    </plurals>
+    <plurals name="space_manage_remove_count">
+        <item quantity="one">Убрать %1$d чат</item>
+        <item quantity="few">Убрать %1$d чата</item>
+        <item quantity="many">Убрать %1$d чатов</item>
+        <item quantity="other">Убрать %1$d чата</item>
+    </plurals>
+    <plurals name="space_manage_confirm_title">
+        <item quantity="one">Убрать %1$d чат?</item>
+        <item quantity="few">Убрать %1$d чата?</item>
+        <item quantity="many">Убрать %1$d чатов?</item>
+        <item quantity="other">Убрать %1$d чата?</item>
     </plurals>
     <string name="settings_presence">Статус онлайн</string>
     <string name="presence_provider_zyna_realtime">Zyna Realtime</string>

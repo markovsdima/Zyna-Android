@@ -26,6 +26,24 @@ enum class SpaceLoadError {
     LOAD
 }
 
+enum class SpaceChildManagementError {
+    REMOVE,
+    PARTIAL_REMOVE,
+    PERMISSION_CHANGED
+}
+
+data class SpaceChildManagementState(
+    val canManage: Boolean = false,
+    val isManaging: Boolean = false,
+    val selectedRoomIds: Set<String> = emptySet(),
+    val pendingRemovalRoomIds: Set<String> = emptySet(),
+    val isRemoving: Boolean = false,
+    val error: SpaceChildManagementError? = null
+) {
+    val canRequestRemoval: Boolean
+        get() = canManage && isManaging && selectedRoomIds.isNotEmpty() && !isRemoving
+}
+
 data class SpaceChildrenState(
     val target: SpaceTarget? = null,
     val space: MatrixSpaceRoom? = null,
@@ -34,7 +52,8 @@ data class SpaceChildrenState(
     val isKnown: Boolean = false,
     val endReached: Boolean = false,
     val isPaginating: Boolean = false,
-    val error: SpaceLoadError? = null
+    val error: SpaceLoadError? = null,
+    val management: SpaceChildManagementState = SpaceChildManagementState()
 ) {
     fun roomForId(roomId: String): MatrixSpaceRoom? {
         return tracks.firstOrNull { it.roomId == roomId }

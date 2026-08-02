@@ -1,7 +1,9 @@
 package com.zyna.app.data.matrix
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.matrix.rustcomponents.sdk.RoomPowerLevelsValues
 import uniffi.matrix_sdk.RoomPowerLevelChanges
@@ -73,6 +75,19 @@ class MatrixRoomPermissionsTest {
         )
 
         assertNull(permissions.level(MatrixRoomPermission.CHANGE_NAME))
+    }
+
+    @Test
+    fun performingAnActionDoesNotRequirePermissionToEditItsThreshold() {
+        val permissions = MatrixRoomPermissions(
+            roomId = ROOM_ID,
+            levels = mapOf(MatrixRoomPermission.MANAGE_SPACE_CHILDREN to 50L),
+            canEdit = false,
+            ownPowerLevel = 50L
+        )
+
+        assertTrue(permissions.canPerform(MatrixRoomPermission.MANAGE_SPACE_CHILDREN))
+        assertFalse(permissions.canEdit(MatrixRoomPermission.MANAGE_SPACE_CHILDREN))
     }
 
     @Test

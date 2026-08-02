@@ -45,6 +45,8 @@ interface MatrixSpaceRoomListSession : AutoCloseable {
     val snapshots: StateFlow<MatrixSpaceRemoteSnapshot>
 
     suspend fun paginate()
+
+    suspend fun reset()
 }
 
 data class MatrixLeaveSpaceRoom(
@@ -216,6 +218,22 @@ class MatrixSpaceService(
                 session
             }
         }
+    }
+
+    suspend fun removeChildFromSpace(
+        userId: String,
+        spaceId: String,
+        childId: String
+    ) = withContext(Dispatchers.IO) {
+        val normalizedSpaceId = spaceId.trim().takeIf(String::isNotEmpty)
+            ?: error("Space id is empty")
+        val normalizedChildId = childId.trim().takeIf(String::isNotEmpty)
+            ?: error("Child id is empty")
+        val service = requireActiveService(userId)
+        service.removeChildFromSpace(
+            childId = normalizedChildId,
+            spaceId = normalizedSpaceId
+        )
     }
 
     /** Loads fresh metadata for one preview without expanding hierarchy list mapping work. */
@@ -411,6 +429,14 @@ private class SdkSpaceRoomListSession(
         if (!closed.get()) {
             withContext(Dispatchers.IO) {
                 list.paginate()
+            }
+        }
+    }
+
+    override suspend fun reset() {
+        if (!closed.get()) {
+            withContext(Dispatchers.IO) {
+                list.reset()
             }
         }
     }

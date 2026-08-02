@@ -106,6 +106,7 @@ import com.zyna.app.ui.settings.ChatThemeSettingsScreenViewState
 import com.zyna.app.ui.settings.SettingsScreenView
 import com.zyna.app.ui.settings.SettingsScreenViewActions
 import com.zyna.app.ui.settings.SettingsScreenViewState
+import com.zyna.app.ui.spaces.SpaceChildManagementState
 import com.zyna.app.ui.spaces.SpaceFeatureState
 import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenActions
 import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenState
@@ -1309,6 +1310,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isPaginating = routeOwnedState?.isPaginating == true,
                         endReached = routeOwnedState?.endReached == true,
                         error = routeOwnedState?.error,
+                        management = routeOwnedState?.management
+                            ?: SpaceChildManagementState(),
                         matrixMediaLoader = dependencies.matrixMediaLoader
                     ),
                     actions = SpaceScreenViewActions(
@@ -1316,7 +1319,17 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenDetails = actions.spaces.onOpenDetails,
                         onOpenRoom = actions.spaces.onOpenRoom,
                         onLoadMore = actions.spaces.onLoadMore,
-                        onRetry = actions.spaces.onRetry
+                        onRetry = actions.spaces.onRetry,
+                        onEnterManagement = actions.spaces.onEnterManagement,
+                        onExitManagement = actions.spaces.onExitManagement,
+                        onToggleManagedRoom = actions.spaces.onToggleManagedRoom,
+                        onToggleAllManagedRooms = actions.spaces.onToggleAllManagedRooms,
+                        onRequestManagedRoomsRemoval =
+                            actions.spaces.onRequestManagedRoomsRemoval,
+                        onConfirmManagedRoomsRemoval =
+                            actions.spaces.onConfirmManagedRoomsRemoval,
+                        onCancelManagedRoomsRemoval =
+                            actions.spaces.onCancelManagedRoomsRemoval
                     )
                 )
                 ZynaPerfLog.end(updateStart, "root.spaceEntry.updateView") {

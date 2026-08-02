@@ -30,6 +30,12 @@ data class MatrixRoomPermissions(
         return canEdit && ownPowerLevel >= currentLevel
     }
 
+    /** Local power-level gate; destructive writes still need a fresh SDK capability check. */
+    fun canPerform(permission: MatrixRoomPermission): Boolean {
+        val currentLevel = level(permission) ?: return false
+        return ownPowerLevel >= currentLevel
+    }
+
     fun canSet(level: Long): Boolean = canEdit && ownPowerLevel >= level
 }
 

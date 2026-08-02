@@ -417,6 +417,192 @@ class SpaceChildrenStoreTest {
         }
     }
 
+    @Test
+    fun partialRemovalHidesSuccessAndKeepsOnlyFailureSelected() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val removed = spaceRoom("removed", kind = MatrixSpaceRoomKind.ROOM)
+        val failed = spaceRoom("failed", kind = MatrixSpaceRoomKind.ROOM)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(removed, failed),
+            isKnown = true,
+            endReached = true
+        )
+        fixture.removeBehavior = { roomId ->
+            if (roomId == failed.roomId) error("server rejected removal")
+        }
+        fixture.expectedWarningCount = 1
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.store.state.value.management.canManage }
+            fixture.store.enterManagement()
+            fixture.store.toggleManagedRoom(removed.roomId)
+            fixture.store.toggleManagedRoom(failed.roomId)
+            fixture.store.requestSelectedRoomsRemoval()
+            fixture.store.confirmSelectedRoomsRemoval()
+
+            awaitSpaceCondition {
+                fixture.store.state.value.management.error ==
+                    SpaceChildManagementError.PARTIAL_REMOVE
+            }
+
+            val state = fixture.store.state.value
+            assertEquals(listOf(failed), state.chats)
+            assertTrue(state.management.isManaging)
+            assertEquals(setOf(failed.roomId), state.management.selectedRoomIds)
+            assertEquals(setOf(removed.roomId, failed.roomId), fixture.removalCalls.toSet())
+            assertEquals(1, fixture.session(SPACE_A).resetCount)
+            assertFalse(
+                fixture.writes.last().third.rooms.any { it.roomId == removed.roomId }
+            )
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun successfulRemovalExitsManageModeAndRefreshesHierarchy() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val child = spaceRoom("child", kind = MatrixSpaceRoomKind.ROOM)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(child),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.store.state.value.management.canManage }
+            fixture.store.enterManagement()
+            fixture.store.toggleManagedRoom(child.roomId)
+            fixture.store.requestSelectedRoomsRemoval()
+            fixture.store.confirmSelectedRoomsRemoval()
+
+            awaitSpaceCondition {
+                fixture.removalCalls == listOf(child.roomId) &&
+                    !fixture.store.state.value.management.isRemoving
+            }
+
+            assertTrue(fixture.store.state.value.chats.isEmpty())
+            assertFalse(fixture.store.state.value.management.isManaging)
+            assertEquals(null, fixture.store.state.value.management.error)
+            assertEquals(1, fixture.session(SPACE_A).resetCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun refreshedGraphReconcilesRemovalThatSdkReportedAsFailed() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val child = spaceRoom("child", kind = MatrixSpaceRoomKind.ROOM)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(child),
+            isKnown = true,
+            endReached = true
+        )
+        fixture.removeBehavior = { error("inverse relationship update failed") }
+        fixture.session(SPACE_A).resetBehavior = {
+            fixture.session(SPACE_A).snapshots.value = MatrixSpaceRemoteSnapshot(
+                space = seed,
+                rooms = emptyList(),
+                isKnown = true,
+                endReached = true
+            )
+        }
+        fixture.expectedWarningCount = 1
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.store.state.value.management.canManage }
+            fixture.store.enterManagement()
+            fixture.store.toggleManagedRoom(child.roomId)
+            fixture.store.requestSelectedRoomsRemoval()
+            fixture.store.confirmSelectedRoomsRemoval()
+
+            awaitSpaceCondition {
+                fixture.store.state.value.chats.isEmpty() &&
+                    !fixture.store.state.value.management.isManaging &&
+                    fixture.store.state.value.management.error == null
+            }
+
+            assertEquals(listOf(child.roomId), fixture.removalCalls)
+            assertEquals(1, fixture.session(SPACE_A).resetCount)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun freshPermissionCheckPreventsRemovalAfterPermissionWasRevoked() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        val child = spaceRoom("child", kind = MatrixSpaceRoomKind.ROOM)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(child),
+            isKnown = true,
+            endReached = true
+        )
+        fixture.loadCanManageBehavior = { false }
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.store.state.value.management.canManage }
+            fixture.store.enterManagement()
+            fixture.store.toggleManagedRoom(child.roomId)
+            fixture.store.requestSelectedRoomsRemoval()
+            fixture.store.confirmSelectedRoomsRemoval()
+
+            awaitSpaceCondition {
+                fixture.store.state.value.management.error ==
+                    SpaceChildManagementError.PERMISSION_CHANGED
+            }
+
+            assertTrue(fixture.removalCalls.isEmpty())
+            assertFalse(fixture.store.state.value.management.canManage)
+            assertFalse(fixture.store.state.value.management.isManaging)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun livePermissionRevocationClosesManageMode() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        val seed = spaceRoom(SPACE_A)
+        fixture.cache(CHILDREN_USER, SPACE_A).value = MatrixSpaceListSnapshot(
+            space = seed,
+            rooms = listOf(spaceRoom("child", kind = MatrixSpaceRoomKind.ROOM)),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(target(SPACE_A, seed))
+            awaitSpaceCondition { fixture.store.state.value.management.canManage }
+            fixture.store.enterManagement()
+            assertTrue(fixture.store.state.value.management.isManaging)
+
+            fixture.canManage.value = false
+            awaitSpaceCondition { !fixture.store.state.value.management.canManage }
+
+            assertFalse(fixture.store.state.value.management.isManaging)
+            assertTrue(fixture.store.state.value.management.selectedRoomIds.isEmpty())
+            assertEquals(
+                SpaceChildManagementError.PERMISSION_CHANGED,
+                fixture.store.state.value.management.error
+            )
+
+            fixture.canManage.value = true
+            awaitSpaceCondition { fixture.store.state.value.management.canManage }
+            assertEquals(null, fixture.store.state.value.management.error)
+        } finally {
+            fixture.close()
+        }
+    }
+
     private fun target(spaceId: String, seed: MatrixSpaceRoom) =
         SpaceTarget(
             userId = CHILDREN_USER,
@@ -435,6 +621,10 @@ private class SpaceChildrenFixture(parentContext: CoroutineContext) {
 
     val writes = mutableListOf<Triple<String, String, MatrixSpaceListSnapshot>>()
     val warnings = mutableListOf<Pair<String, Throwable>>()
+    val canManage = MutableStateFlow(true)
+    val removalCalls = mutableListOf<String>()
+    var loadCanManageBehavior: suspend () -> Boolean = { canManage.value }
+    var removeBehavior: suspend (String) -> Unit = {}
     var expectedWarningCount = 0
 
     val store = SpaceChildrenStore(
@@ -448,6 +638,12 @@ private class SpaceChildrenFixture(parentContext: CoroutineContext) {
             cacheSnapshot = { userId, spaceId, snapshot ->
                 writes += Triple(spaceId, userId, snapshot)
                 cache(userId, spaceId).value = snapshot
+            },
+            observeCanManage = { canManage },
+            loadCanManage = { loadCanManageBehavior() },
+            removeChild = { _, _, childId ->
+                removalCalls += childId
+                removeBehavior(childId)
             }
         ),
         onWarning = { message, error -> warnings += message to error }
@@ -483,11 +679,18 @@ private class FakeSpaceRoomListSession : MatrixSpaceRoomListSession {
     override val snapshots = MutableStateFlow(MatrixSpaceRemoteSnapshot())
     var paginateCount = 0
     var paginateError: Throwable? = null
+    var resetCount = 0
+    var resetBehavior: suspend () -> Unit = {}
     var closed = false
 
     override suspend fun paginate() {
         paginateCount += 1
         paginateError?.let { throw it }
+    }
+
+    override suspend fun reset() {
+        resetCount += 1
+        resetBehavior()
     }
 
     override fun close() {

@@ -1207,6 +1207,80 @@ class MatrixClientService(
         } ?: error("Matrix room is not available")
     }
 
+    /**
+     * Loads the member ownership needed by the leave UI. The preview may use the local member
+     * snapshot; the destructive preflight always requests a fresh SDK sync.
+     */
+    suspend fun loadRoomLeaveContext(
+        userId: String,
+        roomId: String,
+        useCachedMembers: Boolean
+    ): MatrixRoomLeaveContext = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        knownRoomOrNull(userId, activeClient, normalizedRoomId)?.use { room ->
+            val iterator = if (useCachedMembers) {
+                room.membersNoSync()
+            } else {
+                room.members()
+            }
+            iterator.use { members ->
+                var ownRole: MatrixRoomMemberRole? = null
+                var otherOwnerExists = false
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val chunk = members.nextChunk(ROOM_MEMBERS_CHUNK_SIZE.toUInt())
+                        ?: break
+                    if (chunk.isEmpty()) break
+                    chunk.forEach { member ->
+                        val mapped = member.toMatrixRoomMemberOrNull() ?: return@forEach
+                        if (mapped.membership != MatrixRoomMemberMembership.JOINED) {
+                            return@forEach
+                        }
+                        if (mapped.userId == userId) {
+                            ownRole = mapped.role
+                        } else if (mapped.role.isRoomOwnershipRole()) {
+                            otherOwnerExists = true
+                        }
+                    }
+                }
+                val isLastOwner = ownRole?.isRoomOwnershipRole() == true && !otherOwnerExists
+                val roomInfo = room.roomInfo()
+                try {
+                    MatrixRoomLeaveContext(
+                        joinedMemberCount = roomInfo.joinedMembersCount
+                            .coerceAtMost(Long.MAX_VALUE.toULong())
+                            .toLong(),
+                        isLastOwner = isLastOwner,
+                        areCreatorsPrivileged = roomInfo.privilegedCreatorsRole
+                    )
+                } finally {
+                    roomInfo.destroy()
+                }
+            }
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun leaveRoom(userId: String, roomId: String) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        knownRoomOrNull(userId, activeClient, normalizedRoomId)?.use { room ->
+            room.leave()
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun isRoomLeft(userId: String, roomId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val activeClient = requireActiveClient(userId)
+            val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+                ?: error("Room id is empty")
+            knownRoomOrNull(userId, activeClient, normalizedRoomId)?.use { room ->
+                room.membership() == Membership.LEFT
+            } == true
+        }
+
     suspend fun loadRoomRoleChangeContext(
         roomId: String,
         targetUserId: String
@@ -3840,6 +3914,12 @@ internal fun RoomMemberRole.toMatrixRoomMemberRole(powerLevel: Long): MatrixRoom
         RoomMemberRole.MODERATOR -> MatrixRoomMemberRole.MODERATOR
         RoomMemberRole.USER -> MatrixRoomMemberRole.MEMBER
     }
+}
+
+private fun MatrixRoomMemberRole.isRoomOwnershipRole(): Boolean {
+    return this == MatrixRoomMemberRole.CREATOR ||
+        this == MatrixRoomMemberRole.OWNER ||
+        this == MatrixRoomMemberRole.ADMIN
 }
 
 private const val MATRIX_ROOM_OWNER_POWER_LEVEL = 150L

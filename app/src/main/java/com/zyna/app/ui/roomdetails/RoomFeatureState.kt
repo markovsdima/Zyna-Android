@@ -13,6 +13,7 @@ import com.zyna.app.ui.roomprofile.RoomProfileEditorState
  */
 data class RoomFeatureState(
     val details: RoomDetailsState,
+    val leave: RoomLeaveState = RoomLeaveState(),
     val profileEditor: RoomProfileEditorState,
     val createRoom: CreateRoomState,
     val members: RoomMembersState,

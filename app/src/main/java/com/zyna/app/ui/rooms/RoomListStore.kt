@@ -93,6 +93,7 @@ internal class RoomListStore(
     private var paginationRequestedForEntryCount: Int? = null
     private var lastCachedRevision: Long? = null
     private var lastCachedCompletion: Boolean? = null
+    private val confirmedLeftRoomIds = linkedSetOf<String>()
 
     @MainThread
     suspend fun activate(userId: String) {
@@ -155,6 +156,38 @@ internal class RoomListStore(
         updateVisibleRoomIds(emptyList())
     }
 
+    /** Hides successful leaves until the independent SDK room-list projection catches up. */
+    @MainThread
+    fun confirmRoomsLeft(userId: String, roomIds: Collection<String>) {
+        val session = activeSession?.takeIf { it.userId == userId } ?: return
+        val normalized = roomIds.asSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toSet()
+        if (normalized.isEmpty() || !isCurrent(session)) return
+        confirmedLeftRoomIds += normalized
+        _state.update { current ->
+            current.copy(rooms = current.rooms.filterNot { it.id in confirmedLeftRoomIds })
+        }
+        scope.launch {
+            try {
+                driver.cacheSnapshot(
+                    userId,
+                    emptyList(),
+                    emptySet(),
+                    normalized,
+                    false
+                )
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (isCurrent(session)) {
+                    onWarning("Failed to remove left rooms from cache", error)
+                }
+            }
+        }
+    }
+
     private fun updateVisibleRoomIds(normalized: List<String>) {
         if (visibleRoomIds != normalized) {
             visibleRoomIds = normalized
@@ -188,6 +221,7 @@ internal class RoomListStore(
         paginationRequestedForEntryCount = null
         lastCachedRevision = null
         lastCachedCompletion = null
+        confirmedLeftRoomIds.clear()
         _state.value = RoomListState()
     }
 
@@ -196,7 +230,11 @@ internal class RoomListStore(
             try {
                 driver.observeCachedRooms(session.userId).collect { rooms ->
                     if (isCurrent(session)) {
-                        _state.update { current -> current.copy(rooms = rooms) }
+                        _state.update { current ->
+                            current.copy(
+                                rooms = rooms.filterNot { it.id in confirmedLeftRoomIds }
+                            )
+                        }
                     }
                     session.initialCacheReady.complete(Unit)
                 }
@@ -340,12 +378,17 @@ internal class RoomListStore(
                 session.userId,
                 snapshot.rooms,
                 updatedRoomIds,
-                snapshot.excludedRoomIds,
+                snapshot.excludedRoomIds + confirmedLeftRoomIds,
                 isComplete
             )
             if (isCurrent(session)) {
                 lastCachedRevision = snapshot.revision
                 lastCachedCompletion = isComplete
+                val liveRoomIds = snapshot.rooms.mapTo(HashSet(snapshot.rooms.size)) { it.id }
+                confirmedLeftRoomIds.removeAll { roomId ->
+                    roomId in snapshot.excludedRoomIds ||
+                        (snapshot.endReached && roomId !in liveRoomIds)
+                }
                 if (liveSession === owner) owner.acknowledgeCached(snapshot.revision)
             }
         } catch (error: CancellationException) {

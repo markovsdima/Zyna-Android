@@ -62,7 +62,8 @@ data class SpaceChildrenState(
 data class SpaceFeatureState(
     val roots: SpaceRootsState = SpaceRootsState(),
     val children: SpaceChildrenState = SpaceChildrenState(),
-    val join: SpaceJoinState = SpaceJoinState()
+    val join: SpaceJoinState = SpaceJoinState(),
+    val leave: SpaceLeaveState = SpaceLeaveState()
 )
 
 internal fun visibleChatRootRooms(

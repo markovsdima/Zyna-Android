@@ -1,5 +1,6 @@
 package com.zyna.app.ui.roomdetails
 
+import android.app.AlertDialog
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Color
@@ -45,6 +46,7 @@ internal data class RoomDetailsScreenViewState(
     val isMarkedUnread: Boolean,
     val isLoading: Boolean,
     val errorMessage: String?,
+    val leave: RoomLeaveState,
     val matrixMediaLoader: MatrixMediaLoader?
 )
 
@@ -55,7 +57,10 @@ internal data class RoomDetailsScreenViewActions(
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
     val onOpenPermissions: () -> Unit,
-    val onRetry: () -> Unit
+    val onRetry: () -> Unit,
+    val onRequestLeave: () -> Unit,
+    val onConfirmLeave: () -> Unit,
+    val onCancelLeave: () -> Unit
 )
 
 internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
@@ -63,6 +68,8 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     private var palette = RoomDetailsPalette.from(context)
     private var statusTopInset = 0
     private var bottomInset = 0
+    private var leaveConfirmationDialog: AlertDialog? = null
+    private var leaveConfirmationKey: String? = null
 
     private val root = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -208,6 +215,12 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     private val mediaRow = disabledRow("Shared Media")
     private val securityRow = disabledRow("Security & Privacy")
     private val historyRow = disabledRow("Room History")
+    private val leaveRow = RoomDetailsRowView(context).apply {
+        title = context.getString(R.string.room_leave_action)
+        showsAccessory = false
+        isClickable = true
+        isFocusable = true
+    }
 
     init {
         setBackgroundColor(palette.background)
@@ -347,6 +360,10 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         content.addView(mediaRow, rowLayoutParams())
         content.addView(securityRow, rowLayoutParams())
         content.addView(historyRow, rowLayoutParams())
+        content.addView(
+            leaveRow,
+            rowLayoutParams().apply { topMargin = dp(18) }
+        )
 
         applyPalette()
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -376,6 +393,14 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         applyPalette()
     }
 
+    override fun onDetachedFromWindow() {
+        leaveConfirmationDialog?.setOnDismissListener(null)
+        leaveConfirmationDialog?.dismiss()
+        leaveConfirmationDialog = null
+        leaveConfirmationKey = null
+        super.onDetachedFromWindow()
+    }
+
     fun render(state: RoomDetailsScreenViewState, actions: RoomDetailsScreenViewActions) {
         backButton.setOnClickListener { actions.onBack() }
         val showsEdit = state.kind != MatrixRoomKind.DIRECT && state.canEditRoomProfile
@@ -385,6 +410,22 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             if (showsEdit) View.OnClickListener { actions.onOpenProfileEditor() } else null
         )
         retryButton.setOnClickListener { actions.onRetry() }
+        val leave = state.leave.takeIf { it.target?.roomId == state.roomId }
+            ?: RoomLeaveState()
+        leaveRow.isEnabled = !leave.isBusy
+        leaveRow.alpha = if (leave.isBusy) DISABLED_ALPHA else 1f
+        leaveRow.detail = when {
+            leave.isPreparing -> context.getString(R.string.room_leave_preparing)
+            leave.isLeaving -> context.getString(R.string.room_leave_in_progress)
+            leave.error == RoomLeaveError.PREPARE ->
+                context.getString(R.string.room_leave_prepare_error)
+            leave.error == RoomLeaveError.LEAVE -> context.getString(R.string.room_leave_error)
+            else -> null
+        }
+        leaveRow.setOnClickListener(
+            if (!leave.isBusy) View.OnClickListener { actions.onRequestLeave() } else null
+        )
+        renderLeaveConfirmation(state, leave, actions)
         val showsMembers = state.kind != MatrixRoomKind.DIRECT
         val showsInvite = showsMembers && state.canInviteMembers
         membersAction.visibility = if (showsMembers) VISIBLE else GONE
@@ -500,10 +541,53 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             pinnedRow,
             mediaRow,
             securityRow,
-            historyRow
+            historyRow,
+            leaveRow
         ).forEach { row ->
             row.setPalette(palette)
         }
+        leaveRow.setTitleColor(palette.destructiveText)
+    }
+
+    private fun renderLeaveConfirmation(
+        state: RoomDetailsScreenViewState,
+        leave: RoomLeaveState,
+        actions: RoomDetailsScreenViewActions
+    ) {
+        val pending = leave.pendingConfirmation
+        if (pending == null) {
+            leaveConfirmationDialog?.setOnDismissListener(null)
+            leaveConfirmationDialog?.dismiss()
+            leaveConfirmationDialog = null
+            leaveConfirmationKey = null
+            return
+        }
+        val key = "${state.roomId}:${pending.context.needsOwnershipWarning}"
+        if (leaveConfirmationDialog?.isShowing == true && leaveConfirmationKey == key) return
+        leaveConfirmationDialog?.setOnDismissListener(null)
+        leaveConfirmationDialog?.dismiss()
+        leaveConfirmationKey = key
+        val needsOwnerWarning = pending.context.needsOwnershipWarning
+        val message = when {
+            needsOwnerWarning -> R.string.room_leave_last_owner_message
+            state.kind == MatrixRoomKind.DIRECT -> R.string.room_leave_direct_message
+            state.access == MatrixRoomAccess.PUBLIC -> R.string.room_leave_public_message
+            else -> R.string.room_leave_private_message
+        }
+        leaveConfirmationDialog = AlertDialog.Builder(context)
+            .setTitle(
+                if (needsOwnerWarning) {
+                    context.getString(R.string.room_leave_last_owner_title)
+                } else {
+                    context.getString(R.string.room_leave_title, state.displayName)
+                }
+            )
+            .setMessage(message)
+            .setOnCancelListener { actions.onCancelLeave() }
+            .setNegativeButton(R.string.common_cancel) { _, _ -> actions.onCancelLeave() }
+            .setPositiveButton(R.string.room_leave_confirm) { _, _ -> actions.onConfirmLeave() }
+            .create()
+            .also(AlertDialog::show)
     }
 
     private fun sectionHeader(text: String): TextView {
@@ -754,6 +838,10 @@ private class RoomDetailsRowView(context: Context) : LinearLayout(context) {
         accessoryText.setTextColor(palette.secondaryText)
     }
 
+    fun setTitleColor(color: Int) {
+        titleText.setTextColor(color)
+    }
+
     private fun dp(value: Int): Int {
         return (value * density).roundToInt()
     }
@@ -766,6 +854,7 @@ private data class RoomDetailsPalette(
     val primaryText: Int,
     val secondaryText: Int,
     val actionText: Int,
+    val destructiveText: Int,
     val tagFill: Int,
     val tagText: Int
 ) {
@@ -781,6 +870,7 @@ private data class RoomDetailsPalette(
                     primaryText = Color.rgb(232, 225, 229),
                     secondaryText = Color.rgb(202, 196, 208),
                     actionText = Color.rgb(208, 188, 255),
+                    destructiveText = Color.rgb(255, 180, 171),
                     tagFill = Color.argb(42, 255, 255, 255),
                     tagText = Color.rgb(232, 225, 229)
                 )
@@ -792,6 +882,7 @@ private data class RoomDetailsPalette(
                     primaryText = Color.rgb(29, 27, 32),
                     secondaryText = Color.rgb(73, 69, 79),
                     actionText = Color.rgb(103, 80, 164),
+                    destructiveText = Color.rgb(186, 26, 26),
                     tagFill = Color.rgb(231, 224, 236),
                     tagText = Color.rgb(73, 69, 79)
                 )

@@ -74,6 +74,7 @@ import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewActions
 import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
 import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.roomdetails.RoomFeatureState
+import com.zyna.app.ui.roomdetails.RoomLeaveState
 import com.zyna.app.ui.roommembers.RoomMembersScreenView
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
@@ -110,6 +111,10 @@ import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenActions
 import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenState
 import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenView
 import com.zyna.app.ui.spaces.SpaceJoinState
+import com.zyna.app.ui.spaces.SpaceLeaveScreenActions
+import com.zyna.app.ui.spaces.SpaceLeaveScreenState
+import com.zyna.app.ui.spaces.SpaceLeaveScreenView
+import com.zyna.app.ui.spaces.SpaceLeaveState
 import com.zyna.app.ui.spaces.SpacePresentationKind
 import com.zyna.app.ui.spaces.SpaceScreenView
 import com.zyna.app.ui.spaces.SpaceScreenViewActions
@@ -955,6 +960,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 AppRoute.ChatThemeSettings -> chatThemeSettingsEntry(actions, preferences)
                 is AppRoute.RoomDetails -> roomDetailsEntry(
                     room.details,
+                    room.leave,
                     roomList,
                     actions,
                     dependencies,
@@ -1018,6 +1024,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     spaces = spaces,
                     actions = actions,
                     dependencies = dependencies,
+                    route = route
+                )
+                is AppRoute.SpaceLeave -> spaceLeaveEntry(
+                    spaces = spaces,
+                    actions = actions,
                     route = route
                 )
                 is AppRoute.Chat -> chatEntry(
@@ -1351,6 +1362,43 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
     }
 
+    private fun spaceLeaveEntry(
+        spaces: SpaceFeatureState,
+        actions: ZynaRootActions,
+        route: AppRoute.SpaceLeave
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "space-leave:${route.parentSpaceId.orEmpty()}:${route.spaceId}",
+            createView = { context -> SpaceLeaveScreenView(context) },
+            updateView = { view ->
+                val routeState = spaces.leave.takeIf { state ->
+                    state.target?.let { target ->
+                        target.spaceId == route.spaceId &&
+                            target.parentSpaceId == route.parentSpaceId
+                    } == true
+                } ?: SpaceLeaveState()
+                (view as SpaceLeaveScreenView).render(
+                    state = SpaceLeaveScreenState(
+                        leave = routeState,
+                        presentationKind = if (route.parentSpaceId == null) {
+                            SpacePresentationKind.STORYLINE
+                        } else {
+                            SpacePresentationKind.TRACK
+                        }
+                    ),
+                    actions = SpaceLeaveScreenActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetry = actions.spaces.onRetrySpaceLeave,
+                        onToggleRoom = actions.spaces.onToggleLeaveRoom,
+                        onToggleAll = actions.spaces.onToggleAllLeaveRooms,
+                        onResolveOwnership = actions.spaces.onResolveSpaceOwnership,
+                        onLeave = actions.spaces.onLeaveSpace
+                    )
+                )
+            }
+        )
+    }
+
     private fun roomsEntryKey(title: String, onBack: (() -> Unit)?): String {
         return "rooms:$title:${onBack != null}"
     }
@@ -1655,6 +1703,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
 
     private fun roomDetailsEntry(
         roomDetails: RoomDetailsState,
+        roomLeave: RoomLeaveState,
         roomList: RoomListState,
         actions: ZynaRootActions,
         dependencies: ZynaRenderDependencies,
@@ -1696,6 +1745,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isMarkedUnread = seed?.isMarkedUnread == true,
                         isLoading = routeState?.isLoading ?: (details == null),
                         errorMessage = routeState?.errorMessage,
+                        leave = roomLeave.takeIf { it.target?.roomId == route.roomId }
+                            ?: RoomLeaveState(),
                         matrixMediaLoader = dependencies.matrixMediaLoader
                     ),
                     actions = RoomDetailsScreenViewActions(
@@ -1713,7 +1764,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenProfileEditor = actions.roomDetails.onOpenProfileEditor,
                         onOpenInviteMembers = actions.roomDetails.onOpenInviteMembers,
                         onOpenPermissions = actions.roomDetails.onOpenPermissions,
-                        onRetry = actions.roomDetails.onRefresh
+                        onRetry = actions.roomDetails.onRefresh,
+                        onRequestLeave = actions.roomDetails.onRequestLeave,
+                        onConfirmLeave = actions.roomDetails.onConfirmLeave,
+                        onCancelLeave = actions.roomDetails.onCancelLeave
                     )
                 )
             }
@@ -2267,6 +2321,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "Space(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             is AppRoute.SpaceJoinPreview ->
                 "SpaceJoinPreview(${roomId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+            is AppRoute.SpaceLeave ->
+                "SpaceLeave(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

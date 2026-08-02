@@ -23,6 +23,27 @@ private const val ROOTS_USER_B = "@b:example.org"
 
 class SpaceRootsStoreTest {
     @Test
+    fun confirmedRootLeaveIsHiddenAndWrittenThroughCache() = runBlocking {
+        val fixture = SpaceRootsFixture(coroutineContext)
+        fixture.cache(ROOTS_USER_A).value = MatrixSpaceListSnapshot(
+            rooms = listOf(spaceRoom("left"), spaceRoom("kept")),
+            isKnown = true,
+            endReached = true
+        )
+        try {
+            fixture.store.activate(ROOTS_USER_A)
+            fixture.store.confirmLeftRoot(ROOTS_USER_A, "left")
+
+            assertEquals(listOf("kept"), fixture.store.state.value.spaces.map { it.roomId })
+            awaitSpaceCondition {
+                fixture.writes.lastOrNull()?.second?.rooms?.map { it.roomId } == listOf("kept")
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun cachedRootsAreTheFirstFrameBeforeLiveStarts() = runBlocking {
         val fixture = SpaceRootsFixture(coroutineContext)
         val cached = MatrixSpaceListSnapshot(

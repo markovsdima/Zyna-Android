@@ -18,6 +18,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.matrix.rustcomponents.sdk.AllowRule
 import org.matrix.rustcomponents.sdk.JoinRule
+import org.matrix.rustcomponents.sdk.LeaveSpaceHandle
+import org.matrix.rustcomponents.sdk.LeaveSpaceRoom
 import org.matrix.rustcomponents.sdk.Membership
 import org.matrix.rustcomponents.sdk.RoomType
 import org.matrix.rustcomponents.sdk.SpaceListUpdate
@@ -45,6 +47,23 @@ interface MatrixSpaceRoomListSession : AutoCloseable {
     suspend fun paginate()
 }
 
+data class MatrixLeaveSpaceRoom(
+    val room: MatrixSpaceRoom,
+    val isLastOwner: Boolean,
+    val areCreatorsPrivileged: Boolean
+) {
+    val needsOwnershipTransfer: Boolean
+        get() = isLastOwner && room.joinedMemberCount > 1L
+}
+
+interface MatrixSpaceLeaveSession : AutoCloseable {
+    val spaceId: String
+
+    suspend fun rooms(): List<MatrixLeaveSpaceRoom>
+
+    suspend fun leave(roomIds: List<String>)
+}
+
 /**
  * Session-scoped owner of the Matrix SDK Spaces service and child-list FFI handles.
  */
@@ -59,6 +78,7 @@ class MatrixSpaceService(
     private val mutex = Mutex()
     private var activeSession: ActiveSession? = null
     private val childSessions = mutableSetOf<SdkSpaceRoomListSession>()
+    private val leaveSessions = mutableSetOf<SdkSpaceLeaveSession>()
 
     suspend fun activate(userId: String) {
         val normalizedUserId = userId.trim().takeIf(String::isNotEmpty) ?: return
@@ -160,6 +180,44 @@ class MatrixSpaceService(
         }
     }
 
+    suspend fun openLeaveSession(
+        userId: String,
+        spaceId: String
+    ): MatrixSpaceLeaveSession {
+        val normalizedSpaceId = spaceId.trim().takeIf(String::isNotEmpty)
+            ?: error("Space id is empty")
+        return withFfiResourceHandoff<SdkSpaceLeaveSession>(
+            release = SdkSpaceLeaveSession::close
+        ) { own ->
+            mutex.withLock {
+                val service = activeSession
+                    ?.takeIf { it.userId == userId }
+                    ?.service
+                    ?: error("Spaces are not active for this Matrix session")
+                val handle = service.leaveSpace(normalizedSpaceId)
+                val session = try {
+                    SdkSpaceLeaveSession(
+                        spaceId = normalizedSpaceId,
+                        handle = handle,
+                        onClosed = { closed ->
+                            synchronized(leaveSessions) {
+                                leaveSessions.remove(closed)
+                            }
+                        }
+                    )
+                } catch (error: Throwable) {
+                    runCatching { handle.destroy() }
+                    throw error
+                }
+                own(session)
+                synchronized(leaveSessions) {
+                    leaveSessions += session
+                }
+                session
+            }
+        }
+    }
+
     /** Loads fresh metadata for one preview without expanding hierarchy list mapping work. */
     suspend fun loadJoinContext(
         userId: String,
@@ -220,9 +278,58 @@ class MatrixSpaceService(
             childSessions.toList().also { childSessions.clear() }
         }
         sessions.forEach(SdkSpaceRoomListSession::close)
+        val activeLeaveSessions = synchronized(leaveSessions) {
+            leaveSessions.toList().also { leaveSessions.clear() }
+        }
+        activeLeaveSessions.forEach(SdkSpaceLeaveSession::close)
         activeSession?.service?.destroy()
         activeSession = null
     }
+}
+
+private class SdkSpaceLeaveSession(
+    override val spaceId: String,
+    private val handle: LeaveSpaceHandle,
+    private val onClosed: (SdkSpaceLeaveSession) -> Unit
+) : MatrixSpaceLeaveSession {
+    private val closed = AtomicBoolean(false)
+
+    override suspend fun rooms(): List<MatrixLeaveSpaceRoom> = withContext(Dispatchers.IO) {
+        check(!closed.get()) { "Space leave session is closed" }
+        handle.rooms().map(LeaveSpaceRoom::toMatrixLeaveSpaceRoom)
+    }
+
+    override suspend fun leave(roomIds: List<String>) = withContext(Dispatchers.IO) {
+        check(!closed.get()) { "Space leave session is closed" }
+        // The root must be last: leaving it first can make descendant traversal unavailable.
+        handle.leave(matrixSpaceLeaveOrder(spaceId, roomIds))
+    }
+
+    override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        handle.destroy()
+        onClosed(this)
+    }
+}
+
+internal fun matrixSpaceLeaveOrder(spaceId: String, roomIds: List<String>): List<String> {
+    val normalizedSpaceId = spaceId.trim().takeIf(String::isNotEmpty)
+        ?: error("Space id is empty")
+    val descendants = roomIds.asSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .filterNot { it == normalizedSpaceId }
+        .distinct()
+        .toList()
+    return descendants + normalizedSpaceId
+}
+
+private fun LeaveSpaceRoom.toMatrixLeaveSpaceRoom(): MatrixLeaveSpaceRoom {
+    return MatrixLeaveSpaceRoom(
+        room = spaceRoom.toMatrixSpaceRoom(),
+        isLastOwner = isLastOwner,
+        areCreatorsPrivileged = areCreatorsPrivileged
+    )
 }
 
 private fun List<AllowRule>.restrictedRoomIds(): List<String> {

@@ -49,6 +49,7 @@ internal class SpaceRootsStore(
     private var latestCachedSnapshot: MatrixSpaceListSnapshot? = null
     private var latestLiveRootIds: Set<String>? = null
     private val confirmedJoinedRoots = linkedMapOf<String, MatrixSpaceRoom>()
+    private val confirmedLeftRootIds = linkedSetOf<String>()
 
     @MainThread
     fun activate(userId: String) {
@@ -83,12 +84,13 @@ internal class SpaceRootsStore(
                 val liveRoomIds = liveRooms.mapTo(HashSet(liveRooms.size)) { it.roomId }
                 latestLiveRootIds = liveRoomIds
                 val content = MatrixSpaceListSnapshot(
-                    rooms = liveRooms,
+                    rooms = liveRooms.filterNot { it.roomId in confirmedLeftRootIds },
                     isKnown = true,
                     endReached = true
                 )
                 if (content == latestCachedSnapshot?.withoutUpdateTime()) {
                     confirmedJoinedRoots.keys.removeAll(liveRoomIds)
+                    confirmedLeftRootIds.removeAll { it !in liveRoomIds }
                     return
                 }
                 try {
@@ -98,6 +100,7 @@ internal class SpaceRootsStore(
                     driver.cacheSnapshot(userId, storedContent)
                     latestCachedSnapshot = storedContent
                     confirmedJoinedRoots.keys.removeAll(liveRoomIds)
+                    confirmedLeftRootIds.removeAll { it !in liveRoomIds }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -167,8 +170,46 @@ internal class SpaceRootsStore(
             return
         }
         confirmedJoinedRoots[room.roomId] = room
+        confirmedLeftRootIds.remove(room.roomId)
         _state.update { state ->
-            SpaceRootsState(state.snapshot.withConfirmedJoinedRoots(confirmedJoinedRoots))
+            SpaceRootsState(state.snapshot.withConfirmedRoots(
+                confirmedJoinedRoots,
+                confirmedLeftRootIds
+            ))
+        }
+    }
+
+    /** Keeps a successful root leave hidden until the live Spaces list acknowledges it. */
+    @MainThread
+    fun confirmLeftRoot(userId: String, spaceId: String) {
+        val session = activeSession?.takeIf { it.userId == userId } ?: return
+        val normalizedSpaceId = spaceId.trim().takeIf(String::isNotEmpty) ?: return
+        if (!isCurrent(session)) return
+        confirmedJoinedRoots.remove(normalizedSpaceId)
+        confirmedLeftRootIds += normalizedSpaceId
+        val filtered = _state.value.snapshot.withConfirmedRoots(
+            confirmedJoinedRoots,
+            confirmedLeftRootIds
+        )
+        _state.value = SpaceRootsState(filtered)
+        if (filtered.isKnown) {
+            scope.launch {
+                try {
+                    val latestFiltered = _state.value.snapshot.withConfirmedRoots(
+                        confirmedJoinedRoots,
+                        confirmedLeftRootIds
+                    )
+                    val stored = latestFiltered.copy(updatedAtMillis = System.currentTimeMillis())
+                    driver.cacheSnapshot(userId, stored)
+                    if (isCurrent(session)) latestCachedSnapshot = stored
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (isCurrent(session)) {
+                        onWarning("Failed to remove left top-level Space from cache", error)
+                    }
+                }
+            }
         }
     }
 
@@ -183,6 +224,7 @@ internal class SpaceRootsStore(
         latestCachedSnapshot = null
         latestLiveRootIds = null
         confirmedJoinedRoots.clear()
+        confirmedLeftRootIds.clear()
         _state.value = SpaceRootsState()
     }
 
@@ -195,7 +237,10 @@ internal class SpaceRootsStore(
                             latestCachedSnapshot = snapshot
                         }
                         _state.value = SpaceRootsState(
-                            snapshot.withConfirmedJoinedRoots(confirmedJoinedRoots)
+                            snapshot.withConfirmedRoots(
+                                confirmedJoinedRoots,
+                                confirmedLeftRootIds
+                            )
                         )
                     }
                 }
@@ -243,11 +288,20 @@ private fun MatrixSpaceListSnapshot.withoutUpdateTime(): MatrixSpaceListSnapshot
     return copy(updatedAtMillis = null)
 }
 
-private fun MatrixSpaceListSnapshot.withConfirmedJoinedRoots(
-    confirmedRoots: Map<String, MatrixSpaceRoom>
+private fun MatrixSpaceListSnapshot.withConfirmedRoots(
+    confirmedRoots: Map<String, MatrixSpaceRoom>,
+    confirmedLeftRootIds: Set<String>
 ): MatrixSpaceListSnapshot {
-    if (confirmedRoots.isEmpty()) return this
-    val roomIds = rooms.mapTo(HashSet(rooms.size)) { it.roomId }
+    val filteredRooms = rooms.filterNot { it.roomId in confirmedLeftRootIds }
+    if (confirmedRoots.isEmpty()) {
+        return if (filteredRooms === rooms || filteredRooms == rooms) {
+            this
+        } else {
+            copy(rooms = filteredRooms)
+        }
+    }
+    val roomIds = filteredRooms.mapTo(HashSet(filteredRooms.size)) { it.roomId }
     val missingRoots = confirmedRoots.values.filterNot { it.roomId in roomIds }
-    return if (missingRoots.isEmpty()) this else copy(rooms = rooms + missingRoots)
+    val nextRooms = if (missingRoots.isEmpty()) filteredRooms else filteredRooms + missingRoots
+    return if (nextRooms == rooms) this else copy(rooms = nextRooms)
 }

@@ -5,6 +5,22 @@ import org.junit.Test
 
 class MatrixSpaceModelsTest {
     @Test
+    fun bulkSpaceLeaveAlwaysDeduplicatesAndLeavesRootLast() {
+        assertEquals(
+            listOf("!one:example.org", "!two:example.org", "!space:example.org"),
+            matrixSpaceLeaveOrder(
+                spaceId = "!space:example.org",
+                roomIds = listOf(
+                    "!space:example.org",
+                    "!one:example.org",
+                    "!one:example.org",
+                    "!two:example.org"
+                )
+            )
+        )
+    }
+
+    @Test
     fun roomListSpaceInviteKeepsMembershipAcrossPreviewMapping() {
         val summary = MatrixRoomSummary(
             id = "!invite:example.org",

@@ -82,7 +82,12 @@ data class SpacesFeatureActions(
     val onRetry: () -> Unit,
     val onOpenDetails: () -> Unit,
     val onPerformJoinAction: () -> Unit,
-    val onRetryJoinPreview: () -> Unit
+    val onRetryJoinPreview: () -> Unit,
+    val onToggleLeaveRoom: (String) -> Unit,
+    val onToggleAllLeaveRooms: () -> Unit,
+    val onLeaveSpace: () -> Unit,
+    val onRetrySpaceLeave: () -> Unit,
+    val onResolveSpaceOwnership: () -> Unit
 )
 
 data class CreateRoomActions(
@@ -104,7 +109,10 @@ data class RoomDetailsFeatureActions(
     val onOpenProfileEditor: () -> Unit,
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
-    val onOpenPermissions: () -> Unit
+    val onOpenPermissions: () -> Unit,
+    val onRequestLeave: () -> Unit,
+    val onConfirmLeave: () -> Unit,
+    val onCancelLeave: () -> Unit
 )
 
 data class RoomPermissionsFeatureActions(

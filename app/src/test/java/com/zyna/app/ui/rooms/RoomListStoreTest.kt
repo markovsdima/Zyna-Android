@@ -26,6 +26,25 @@ private const val SECOND_USER_ID = "@second:example.org"
 
 class RoomListStoreTest {
     @Test
+    fun confirmedLeaveIsHiddenImmediatelyAndPersistedAsAnExclusion() = runBlocking {
+        val fixture = RoomListStoreFixture(coroutineContext)
+        val left = room("!left:example.org")
+        val kept = room("!kept:example.org")
+        fixture.cachedRooms(FIRST_USER_ID).value = listOf(left, kept)
+        try {
+            fixture.store.activate(FIRST_USER_ID)
+            fixture.store.confirmRoomsLeft(FIRST_USER_ID, setOf(left.id))
+
+            assertEquals(listOf(kept), fixture.store.state.value.rooms)
+            awaitRoomListCondition {
+                fixture.cachedWrites.any { left.id in it.excludedRoomIds }
+            }
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun activationWaitsUntilTheInitialCacheSnapshotIsPublished() = runBlocking {
         val scopeJob = SupervisorJob()
         val scope = CoroutineScope(coroutineContext + scopeJob)

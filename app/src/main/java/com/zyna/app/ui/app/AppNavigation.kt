@@ -108,6 +108,11 @@ sealed interface AppRoute {
         val membership: MatrixSpaceMembership = MatrixSpaceMembership.UNKNOWN,
         val joinRule: MatrixSpaceJoinRule = MatrixSpaceJoinRule.UNKNOWN
     ) : AppRoute
+    data class SpaceLeave(
+        val spaceId: String,
+        val parentSpaceId: String?,
+        val displayName: String
+    ) : AppRoute
     data class Chat(
         val roomId: String,
         val displayName: String
@@ -197,6 +202,12 @@ data class AppNavState(
                     spaceRoute.takeIf { route -> route.spaceId == parentSpaceId }
                 }
             }
+            if (topRoute is AppRoute.SpaceLeave) {
+                return spaceRoute.takeIf { route ->
+                    route.spaceId == topRoute.spaceId &&
+                        route.parentSpaceId == topRoute.parentSpaceId
+                }
+            }
             if (topRoute is AppRoute.Chat) {
                 return spaceRoute
             }
@@ -223,6 +234,12 @@ data class AppNavState(
         get() {
             if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
             return chatsStack.lastOrNull() as? AppRoute.SpaceJoinPreview
+        }
+
+    val activeSpaceLeaveRoute: AppRoute.SpaceLeave?
+        get() {
+            if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
+            return chatsStack.lastOrNull() as? AppRoute.SpaceLeave
         }
 
     val activeRoomPermissionsRoute: AppRoute.RoomPermissions?
@@ -522,6 +539,39 @@ data class AppNavState(
             else -> return this
         }
         return copy(chatsStack = chatsStack + AppRoute.RoomDetails(roomId))
+    }
+
+    fun openSpaceLeave(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return this
+        val details = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
+        val space = chatsStack.filterIsInstance<AppRoute.Space>()
+            .lastOrNull { it.spaceId == details.roomId }
+            ?: return this
+        return copy(
+            chatsStack = chatsStack + AppRoute.SpaceLeave(
+                spaceId = space.spaceId,
+                parentSpaceId = space.parentSpaceId,
+                displayName = space.displayName
+            )
+        )
+    }
+
+    /** Removes the left room and every child screen it owns from the chat stack. */
+    fun closeLeftRoom(roomId: String): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS || roomId.isBlank()) {
+            return this
+        }
+        val ownerIndex = chatsStack.indexOfLast { route ->
+            when (route) {
+                is AppRoute.Chat -> route.roomId == roomId
+                is AppRoute.Space -> route.spaceId == roomId
+                else -> false
+            }
+        }
+        if (ownerIndex < 0) return this
+        return copy(
+            chatsStack = chatsStack.take(ownerIndex).ifEmpty { listOf(AppRoute.Rooms) }
+        )
     }
 
     fun openRoomMembers(): AppNavState {

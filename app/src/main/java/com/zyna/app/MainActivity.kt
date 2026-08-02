@@ -401,20 +401,28 @@ class MainActivity : AppCompatActivity() {
                                 },
                                 appViewModel.roomMemberModerationState,
                                 appViewModel.roomPermissionsState,
-                                appViewModel.roomRoleManagementState
-                            ) { room, memberModeration, permissions, roles ->
+                                appViewModel.roomRoleManagementState,
+                                appViewModel.roomLeaveState
+                            ) { room, memberModeration, permissions, roles, leave ->
                                 room.copy(
                                     memberModeration = memberModeration,
                                     permissions = permissions,
-                                    roles = roles
+                                    roles = roles,
+                                    leave = leave
                                 )
                             },
                             combine(
                                 appViewModel.spaceRootsState,
                                 appViewModel.spaceChildrenState,
-                                appViewModel.spaceJoinState
-                            ) { roots, children, join ->
-                                SpaceFeatureState(roots = roots, children = children, join = join)
+                                appViewModel.spaceJoinState,
+                                appViewModel.spaceLeaveState
+                            ) { roots, children, join, leave ->
+                                SpaceFeatureState(
+                                    roots = roots,
+                                    children = children,
+                                    join = join,
+                                    leave = leave
+                                )
                             }
                         ) { state, roomList, room, spaces ->
                             AppFeatureInput(
@@ -562,7 +570,12 @@ class MainActivity : AppCompatActivity() {
                 onRetry = appViewModel::retrySpaceChildren,
                 onOpenDetails = appViewModel::openRoomDetails,
                 onPerformJoinAction = appViewModel::performSpaceJoinAction,
-                onRetryJoinPreview = appViewModel::retrySpaceJoinPreview
+                onRetryJoinPreview = appViewModel::retrySpaceJoinPreview,
+                onToggleLeaveRoom = appViewModel::toggleSpaceLeaveRoom,
+                onToggleAllLeaveRooms = appViewModel::toggleAllSpaceLeaveRooms,
+                onLeaveSpace = appViewModel::leaveSpace,
+                onRetrySpaceLeave = appViewModel::retrySpaceLeave,
+                onResolveSpaceOwnership = appViewModel::resolveSpaceLeaveOwnership
             ),
             createRoom = CreateRoomActions(
                 onNameChanged = appViewModel::setCreateRoomName,
@@ -582,7 +595,10 @@ class MainActivity : AppCompatActivity() {
                 onOpenProfileEditor = appViewModel::openEditRoomProfile,
                 onOpenMembers = appViewModel::openRoomMembers,
                 onOpenInviteMembers = appViewModel::openInviteRoomMembers,
-                onOpenPermissions = appViewModel::openRoomPermissions
+                onOpenPermissions = appViewModel::openRoomPermissions,
+                onRequestLeave = appViewModel::requestRoomLeave,
+                onConfirmLeave = appViewModel::confirmRoomLeave,
+                onCancelLeave = appViewModel::cancelRoomLeave
             ),
             roomPermissions = RoomPermissionsFeatureActions(
                 onRetry = appViewModel::retryRoomPermissions,
@@ -1523,6 +1539,8 @@ private fun AppRoute.perfName(): String {
             "Space(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
         is AppRoute.SpaceJoinPreview ->
             "SpaceJoinPreview(${roomId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+        is AppRoute.SpaceLeave ->
+            "SpaceLeave(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
         AppRoute.CreateRoom -> "CreateRoom"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"

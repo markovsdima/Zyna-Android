@@ -7,6 +7,47 @@ import org.junit.Test
 
 class AppNavStateTest {
     @Test
+    fun leavingNestedSpaceClosesItsOwnedStackAndReturnsToParent() {
+        val parent = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+        val leave = parent
+            .openSpace(
+                spaceId = "!track:example.org",
+                parentSpaceId = "!story:example.org",
+                displayName = "Track",
+                avatarUrl = null,
+                topic = null
+            )
+            .openRoomDetails()
+            .openSpaceLeave()
+
+        assertTrue(leave.top is AppRoute.SpaceLeave)
+        assertEquals("!track:example.org", leave.activeSpaceRoute?.spaceId)
+        assertEquals("!track:example.org", leave.activeSpaceLeaveRoute?.spaceId)
+        assertEquals(parent, leave.closeLeftRoom("!track:example.org"))
+    }
+
+    @Test
+    fun leavingOrdinaryRoomClosesChatAndItsDetails() {
+        val state = AppNavState()
+            .enterMain()
+            .openChat("!room:example.org", "Room")
+            .openRoomDetails()
+
+        assertEquals(
+            listOf(AppRoute.Rooms),
+            state.closeLeftRoom("!room:example.org").chatsStack
+        )
+    }
+
+    @Test
     fun spacesKeepContextForNestedTracksAndChats() {
         val root = AppNavState()
             .enterMain()

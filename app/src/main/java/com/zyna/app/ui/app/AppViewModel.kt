@@ -80,7 +80,10 @@ import com.zyna.app.ui.profile.createOwnProfileStore
 import com.zyna.app.ui.profile.createUserProfileStore
 import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.roomdetails.RoomDetailsTarget
+import com.zyna.app.ui.roomdetails.RoomLeaveState
+import com.zyna.app.ui.roomdetails.RoomLeaveTarget
 import com.zyna.app.ui.roomdetails.createRoomDetailsStore
+import com.zyna.app.ui.roomdetails.createRoomLeaveStore
 import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.roommembers.RoomMembersTarget
 import com.zyna.app.ui.roommembers.RoomMemberModerationState
@@ -105,10 +108,13 @@ import com.zyna.app.ui.spaces.SpaceChildrenState
 import com.zyna.app.ui.spaces.SpaceJoinError
 import com.zyna.app.ui.spaces.SpaceJoinState
 import com.zyna.app.ui.spaces.SpaceJoinTarget
+import com.zyna.app.ui.spaces.SpaceLeaveState
+import com.zyna.app.ui.spaces.SpaceLeaveTarget
 import com.zyna.app.ui.spaces.SpaceTarget
 import com.zyna.app.ui.spaces.SpaceRootsState
 import com.zyna.app.ui.spaces.createSpaceChildrenStore
 import com.zyna.app.ui.spaces.createSpaceJoinStore
+import com.zyna.app.ui.spaces.createSpaceLeaveStore
 import com.zyna.app.ui.spaces.createSpaceRootsStore
 import com.zyna.app.util.ZynaPerfLog
 import kotlinx.coroutines.CancellationException
@@ -294,6 +300,14 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val spaceJoinState: StateFlow<SpaceJoinState> = spaceJoinStore.state
+    private val spaceLeaveStore = createSpaceLeaveStore(
+        scope = viewModelScope,
+        matrixSpaceService = matrixSpaceService,
+        onLeft = ::handleSpaceLeft,
+        onPartiallyLeft = ::handleSpaceRoomsPartiallyLeft,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val spaceLeaveState: StateFlow<SpaceLeaveState> = spaceLeaveStore.state
     private val createRoomStore = createCreateRoomStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -310,6 +324,13 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomDetailsState: StateFlow<RoomDetailsState> = roomDetailsStore.state
+    private val roomLeaveStore = createRoomLeaveStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onLeft = ::handleRoomLeft,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomLeaveState: StateFlow<RoomLeaveState> = roomLeaveStore.state
     private val roomProfileEditorStore = createRoomProfileEditorStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -420,11 +441,19 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeRoomLeaveRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeSpaceRouteInputs()
         }
 
         viewModelScope.launch {
             observeSpaceJoinRouteInputs()
+        }
+
+        viewModelScope.launch {
+            observeSpaceLeaveRouteInputs()
         }
 
         viewModelScope.launch {
@@ -545,8 +574,10 @@ class AppViewModel(
                     spaceRootsStore.deactivate()
                     spaceChildrenStore.deactivate()
                     spaceJoinStore.deactivate()
+                    spaceLeaveStore.deactivate()
                     matrixSpaceService.deactivate()
                     roomDetailsStore.deactivate()
+                    roomLeaveStore.deactivate()
                     roomProfileEditorStore.deactivate()
                     createRoomStore.deactivate()
                     roomMembersStore.clearSession()
@@ -1032,6 +1063,12 @@ class AppViewModel(
 
     fun navigateBack(): Boolean {
         val route = _uiState.value.route
+        if (route is AppRoute.SpaceLeave && spaceLeaveStore.state.value.isLeaving) {
+            return true
+        }
+        if (route is AppRoute.RoomDetails && roomLeaveStore.state.value.isBusy) {
+            return true
+        }
         if (route is AppRoute.RoomPermissions && roomPermissionsStore.state.value.isSaving) {
             return true
         }
@@ -1304,6 +1341,76 @@ class AppViewModel(
 
     fun refreshRoomDetails() {
         roomDetailsStore.refresh()
+    }
+
+    fun requestRoomLeave() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomDetails ?: return
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val details = roomDetailsStore.state.value
+            .takeIf { it.target == RoomDetailsTarget(userId, route.roomId) }
+            ?.details
+            ?: roomListStore.state.value.roomForId(route.roomId)?.roomDetails
+        val kind = details?.kind
+            ?: roomListStore.state.value.roomForId(route.roomId)?.kind
+            ?: return
+        if (kind == MatrixRoomKind.SPACE) {
+            _uiState.update { state ->
+                state.withNavigationState(state.navState.openSpaceLeave())
+            }
+            return
+        }
+        roomLeaveStore.activate(
+            RoomLeaveTarget(
+                userId = userId,
+                roomId = route.roomId,
+                displayName = details?.displayName
+                    ?: roomListStore.state.value.roomForId(route.roomId)?.displayName
+                    ?: route.roomId,
+                kind = kind,
+                access = details?.access
+            )
+        )
+        roomLeaveStore.request()
+    }
+
+    fun confirmRoomLeave() {
+        roomLeaveStore.confirm()
+    }
+
+    fun cancelRoomLeave() {
+        roomLeaveStore.cancelConfirmation()
+    }
+
+    fun toggleSpaceLeaveRoom(roomId: String) {
+        spaceLeaveStore.toggle(roomId)
+    }
+
+    fun toggleAllSpaceLeaveRooms() {
+        spaceLeaveStore.toggleAll()
+    }
+
+    fun leaveSpace() {
+        spaceLeaveStore.leave()
+    }
+
+    fun retrySpaceLeave() {
+        spaceLeaveStore.retry()
+    }
+
+    fun resolveSpaceLeaveOwnership() {
+        val route = _uiState.value.route as? AppRoute.SpaceLeave ?: return
+        val leave = spaceLeaveStore.state.value
+        if (leave.target?.spaceId != route.spaceId || !leave.needsOwnerChange) return
+        _uiState.update { current ->
+            val detailsState = current.navState.popActiveStack() ?: return@update current
+            val next = if (leave.areCreatorsPrivileged) {
+                detailsState.openRoomMembers()
+            } else {
+                detailsState.openRoomPermissions()
+            }
+            current.withNavigationState(next)
+        }
     }
 
     fun openEditRoomProfile() {
@@ -2292,6 +2399,36 @@ class AppViewModel(
         }
     }
 
+    private suspend fun observeRoomLeaveRouteInputs() {
+        combine(_uiState, roomDetailsStore.state, roomListStore.state) {
+                state,
+                detailsState,
+                roomList ->
+            val route = state.navState.activeRoomDetailsRoute ?: return@combine null
+            val userId = state.matrixState.userIdOrNull() ?: return@combine null
+            val details = detailsState
+                .takeIf { it.target == RoomDetailsTarget(userId, route.roomId) }
+                ?.details
+            val seed = roomList.roomForId(route.roomId)
+            val kind = details?.kind ?: seed?.kind ?: return@combine null
+            RoomLeaveTarget(
+                userId = userId,
+                roomId = route.roomId,
+                displayName = details?.displayName ?: seed?.displayName ?: route.roomId,
+                kind = kind,
+                access = details?.access
+            )
+        }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    roomLeaveStore.deactivate()
+                } else {
+                    roomLeaveStore.activate(target)
+                }
+            }
+    }
+
     private suspend fun observeSpaceRouteInputs() {
         _uiState
             .map { state ->
@@ -2338,6 +2475,144 @@ class AppViewModel(
                     spaceJoinStore.activate(target)
                 }
             }
+    }
+
+    private suspend fun observeSpaceLeaveRouteInputs() {
+        _uiState
+            .map { state ->
+                val route = state.navState.activeSpaceLeaveRoute ?: return@map null
+                val userId = state.matrixState.userIdOrNull() ?: return@map null
+                SpaceLeaveTarget(
+                    userId = userId,
+                    spaceId = route.spaceId,
+                    parentSpaceId = route.parentSpaceId,
+                    displayName = route.displayName
+                )
+            }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    spaceLeaveStore.deactivate()
+                } else {
+                    spaceLeaveStore.activate(target)
+                }
+            }
+    }
+
+    private fun handleRoomLeft(target: RoomLeaveTarget) {
+        val current = _uiState.value
+        if (current.matrixState.userIdOrNull() != target.userId) return
+        roomListStore.confirmRoomsLeft(target.userId, setOf(target.roomId))
+        if (current.activeChatRoute?.roomId == target.roomId) {
+            stopChatTimeline()
+            chatComposerStore.clearAll()
+        }
+        _uiState.update { state ->
+            if (state.matrixState.userIdOrNull() != target.userId) state else {
+                state.withNavigationState(state.navState.closeLeftRoom(target.roomId))
+            }
+        }
+    }
+
+    private fun handleSpaceLeft(target: SpaceLeaveTarget, roomIds: Set<String>) {
+        val current = _uiState.value
+        if (current.matrixState.userIdOrNull() != target.userId) return
+        confirmSpaceRoomsLeft(target, roomIds)
+        if (target.parentSpaceId != null) {
+            current.navState.chatsStack
+                .filterIsInstance<AppRoute.Space>()
+                .lastOrNull { route -> route.spaceId == target.parentSpaceId }
+                ?.let { parentRoute ->
+                    // The leave screen owns the child Space store. Switch the read model to its
+                    // parent before applying the overlay so the returned screen never flashes the
+                    // successfully left Track as joined.
+                    spaceChildrenStore.activate(parentRoute.toSpaceTarget(target.userId))
+                }
+            spaceChildrenStore.confirmChildMembership(
+                userId = target.userId,
+                spaceId = target.parentSpaceId,
+                roomId = target.spaceId,
+                membership = MatrixSpaceMembership.LEFT
+            )
+            viewModelScope.launch {
+                try {
+                    spaceCacheRepository.cacheSpaceChildMembership(
+                        target.userId,
+                        target.parentSpaceId,
+                        target.spaceId,
+                        MatrixSpaceMembership.LEFT
+                    )
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Failed to cache left nested Space membership", error)
+                }
+            }
+        }
+        stopChatTimeline()
+        chatComposerStore.clearAll()
+        _uiState.update { state ->
+            if (state.matrixState.userIdOrNull() != target.userId) state else {
+                state.withNavigationState(state.navState.closeLeftRoom(target.spaceId))
+            }
+        }
+    }
+
+    private fun handleSpaceRoomsPartiallyLeft(
+        target: SpaceLeaveTarget,
+        roomIds: Set<String>
+    ) {
+        val current = _uiState.value
+        if (current.matrixState.userIdOrNull() != target.userId) return
+        confirmSpaceRoomsLeft(target, roomIds)
+    }
+
+    private fun confirmSpaceRoomsLeft(target: SpaceLeaveTarget, roomIds: Set<String>) {
+        if (roomIds.isEmpty()) return
+        roomListStore.confirmRoomsLeft(target.userId, roomIds)
+
+        val visibleRootIds = spaceRootsStore.state.value.spaces
+            .mapTo(HashSet()) { it.roomId }
+        val leftRootIds = roomIds.filterTo(linkedSetOf(), visibleRootIds::contains)
+        if (target.parentSpaceId == null && target.spaceId in roomIds) {
+            leftRootIds += target.spaceId
+        }
+        leftRootIds.forEach { roomId ->
+            spaceRootsStore.confirmLeftRoot(target.userId, roomId)
+        }
+
+        val children = spaceChildrenStore.state.value
+        val directChildIds = if (
+            target.spaceId !in roomIds &&
+            children.target?.userId == target.userId &&
+            children.target.spaceId == target.spaceId
+        ) {
+            roomIds.filterTo(linkedSetOf()) { children.roomForId(it) != null }
+        } else {
+            emptySet()
+        }
+        directChildIds.forEach { roomId ->
+            spaceChildrenStore.confirmChildMembership(
+                userId = target.userId,
+                spaceId = target.spaceId,
+                roomId = roomId,
+                membership = MatrixSpaceMembership.LEFT
+            )
+            viewModelScope.launch {
+                try {
+                    spaceCacheRepository.cacheSpaceChildMembership(
+                        target.userId,
+                        target.spaceId,
+                        roomId,
+                        MatrixSpaceMembership.LEFT
+                    )
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Failed to cache left child Space membership", error)
+                }
+            }
+        }
     }
 
     private fun handleSpaceMembershipChanged(
@@ -2859,6 +3134,8 @@ class AppViewModel(
                 "Space(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             is AppRoute.SpaceJoinPreview ->
                 "SpaceJoinPreview(${roomId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
+            is AppRoute.SpaceLeave ->
+                "SpaceLeave(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

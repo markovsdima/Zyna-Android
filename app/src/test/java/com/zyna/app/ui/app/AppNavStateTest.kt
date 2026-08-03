@@ -305,6 +305,35 @@ class AppNavStateTest {
     }
 
     @Test
+    fun createdRootStorylineReplacesEditorAndOpensItsSpace() {
+        val storyline = AppNavState()
+            .enterMain()
+            .openCreateRoom()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Product",
+                avatarUrl = null,
+                topic = "Roadmap"
+            )
+
+        assertEquals(
+            listOf(
+                AppRoute.Rooms,
+                AppRoute.Space(
+                    spaceId = "!story:example.org",
+                    parentSpaceId = null,
+                    displayName = "Product",
+                    avatarUrl = null,
+                    topic = "Roadmap"
+                )
+            ),
+            storyline.chatsStack
+        )
+        assertFalse(storyline.chatsStack.contains(AppRoute.CreateRoom))
+    }
+
+    @Test
     fun openCreateRoomIsOnlyAllowedFromChatsRoot() {
         val chatState = AppNavState()
             .enterMain()

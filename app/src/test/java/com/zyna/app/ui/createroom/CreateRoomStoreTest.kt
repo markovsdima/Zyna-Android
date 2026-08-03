@@ -1,8 +1,9 @@
 package com.zyna.app.ui.createroom
 
-import com.zyna.app.data.matrix.MatrixGroupAccess
-import com.zyna.app.data.matrix.MatrixGroupCreationRequest
-import com.zyna.app.data.matrix.MatrixGroupPostingPermission
+import com.zyna.app.data.matrix.MatrixRoomCreationAccess
+import com.zyna.app.data.matrix.MatrixRoomCreationKind
+import com.zyna.app.data.matrix.MatrixRoomCreationRequest
+import com.zyna.app.data.matrix.MatrixRoomPostingPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.profile.ProfileAvatarDraft
 import kotlin.coroutines.CoroutineContext
@@ -23,6 +24,7 @@ import org.junit.Test
 
 private const val USER_ID = "@alice:example.org"
 private const val ROOM_ID = "!created:example.org"
+private const val PARENT_SPACE_ID = "!parent:example.org"
 
 class CreateRoomStoreTest {
     @Test
@@ -40,8 +42,9 @@ class CreateRoomStoreTest {
             val request = fixture.creationRequests.single()
             assertEquals("Friends", request.name)
             assertEquals("Weekend plans", request.topic)
-            assertEquals(MatrixGroupAccess.PRIVATE, request.access)
-            assertEquals(MatrixGroupPostingPermission.MODERATORS_ONLY, request.postingPermission)
+            assertEquals(MatrixRoomCreationKind.ROOM, request.kind)
+            assertEquals(MatrixRoomCreationAccess.Private, request.access)
+            assertEquals(MatrixRoomPostingPermission.MODERATORS_ONLY, request.postingPermission)
             assertNull(request.aliasLocalPart)
             assertEquals(listOf("cache:$ROOM_ID"), fixture.calls)
             assertEquals(CreateRoomState(), fixture.store.state.value)
@@ -77,7 +80,7 @@ class CreateRoomStoreTest {
                 ),
                 fixture.calls
             )
-            assertEquals(MatrixGroupAccess.PUBLIC, fixture.creationRequests.single().access)
+            assertEquals(MatrixRoomCreationAccess.Public, fixture.creationRequests.single().access)
             assertEquals("public-friends", fixture.creationRequests.single().aliasLocalPart)
         } finally {
             fixture.close()
@@ -100,6 +103,83 @@ class CreateRoomStoreTest {
             fixture.store.create()
             yield()
             assertTrue(fixture.creationRequests.isEmpty())
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun storylineCreateUsesSpaceContractAndIgnoresPostingPermission() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        val storylineTarget = CreateRoomTarget(USER_ID, mode = CreateRoomMode.STORYLINE)
+        try {
+            fixture.store.begin(storylineTarget)
+            fixture.store.setName("Product")
+            fixture.store.setPostingPermission(CreateRoomPostingPermission.MODERATORS_ONLY)
+
+            assertEquals(
+                CreateRoomPostingPermission.ALL_MEMBERS,
+                fixture.store.state.value.postingPermission
+            )
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            val request = fixture.creationRequests.single()
+            assertEquals(MatrixRoomCreationKind.SPACE, request.kind)
+            assertEquals(MatrixRoomCreationAccess.Private, request.access)
+            assertEquals(MatrixRoomPostingPermission.ALL_MEMBERS, request.postingPermission)
+            assertEquals(storylineTarget, fixture.createdRooms.single().first)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun invalidStorylineParentIsRejectedWithoutReplacingActiveSession() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Existing draft")
+
+            val didBegin = fixture.store.begin(
+                CreateRoomTarget(
+                    userId = USER_ID,
+                    mode = CreateRoomMode.STORYLINE,
+                    parent = CreateRoomParent(PARENT_SPACE_ID, "Product")
+                )
+            )
+
+            assertFalse(didBegin)
+            assertEquals(target(), fixture.store.state.value.target)
+            assertEquals("Existing draft", fixture.store.state.value.name)
+            assertTrue(fixture.warnings.single() is IllegalArgumentException)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun parentTargetDefaultsToRestrictedAccess() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        val childTarget = CreateRoomTarget(
+            userId = USER_ID,
+            parent = CreateRoomParent(PARENT_SPACE_ID, "Product")
+        )
+        try {
+            fixture.store.begin(childTarget)
+            fixture.store.setName("Android")
+
+            assertEquals(CreateRoomAccess.PARENT_MEMBERS, fixture.store.state.value.access)
+            assertTrue(fixture.store.state.value.canCreate)
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(
+                MatrixRoomCreationAccess.Restricted(PARENT_SPACE_ID),
+                fixture.creationRequests.single().access
+            )
         } finally {
             fixture.close()
         }
@@ -429,14 +509,14 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
 
     val calls = mutableListOf<String>()
     val deletedDrafts = mutableListOf<String>()
-    val creationRequests = mutableListOf<MatrixGroupCreationRequest>()
+    val creationRequests = mutableListOf<MatrixRoomCreationRequest>()
     val createdRooms = mutableListOf<Pair<CreateRoomTarget, MatrixRoomSummary>>()
     val cancelledTargets = mutableListOf<CreateRoomTarget>()
     val warnings = mutableListOf<Throwable>()
 
     var uploadBehavior: suspend (String, String) -> String = { _, _ -> "mxc://example/avatar" }
     var aliasAvailableBehavior: suspend (String) -> Boolean = { true }
-    var createBehavior: suspend (MatrixGroupCreationRequest) -> MatrixRoomSummary = { request ->
+    var createBehavior: suspend (MatrixRoomCreationRequest) -> MatrixRoomSummary = { request ->
         room(request.name, request.avatarUrl)
     }
     var cacheBehavior: suspend (String, MatrixRoomSummary) -> Unit = { _, _ -> }
@@ -456,7 +536,7 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
                 calls += "available:$alias"
                 aliasAvailableBehavior(alias)
             },
-            createGroup = { request ->
+            createRoom = { request ->
                 creationRequests += request
                 createBehavior(request)
             },

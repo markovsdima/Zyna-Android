@@ -788,14 +788,14 @@ class MatrixClientService(
         activeClient.isRoomAliasAvailable(alias)
     }
 
-    suspend fun createGroup(
-        request: MatrixGroupCreationRequest
+    suspend fun createRoom(
+        request: MatrixRoomCreationRequest
     ): MatrixRoomSummary = withContext(Dispatchers.IO) {
         val activeClient = client ?: error("Matrix client is not ready")
         val parameters = request.toCreateRoomParameters()
         val normalizedName = requireNotNull(parameters.name)
         val normalizedAvatarUrl = parameters.avatar?.takeIf { it.isNotBlank() }
-        val isPrivate = request.access == MatrixGroupAccess.PRIVATE
+        val isSpace = request.kind == MatrixRoomCreationKind.SPACE
         val canonicalAlias = parameters.canonicalAlias?.let { localPart ->
             activeClient.userId()
                 .substringAfter(':', missingDelimiterValue = "")
@@ -813,21 +813,29 @@ class MatrixClientService(
             id = roomId,
             displayName = normalizedName,
             avatarUrl = normalizedAvatarUrl,
+            isSpace = isSpace,
+            membership = MatrixSpaceMembership.JOINED,
             roomDetails = MatrixRoomDetails(
                 roomId = roomId,
                 displayName = normalizedName,
                 avatarUrl = normalizedAvatarUrl,
                 directUserId = null,
-                kind = MatrixRoomKind.GROUP,
+                kind = if (isSpace) MatrixRoomKind.SPACE else MatrixRoomKind.GROUP,
                 topic = parameters.topic,
                 joinedMemberCount = 1,
-                encryption = if (isPrivate) {
+                encryption = if (parameters.isEncrypted) {
                     MatrixRoomEncryption.ENCRYPTED
                 } else {
                     MatrixRoomEncryption.NOT_ENCRYPTED
                 },
-                access = if (isPrivate) MatrixRoomAccess.PRIVATE else MatrixRoomAccess.PUBLIC,
-                historyVisibility = if (isPrivate) {
+                access = when (request.access) {
+                    MatrixRoomCreationAccess.Private -> MatrixRoomAccess.PRIVATE
+                    MatrixRoomCreationAccess.Public -> MatrixRoomAccess.PUBLIC
+                    is MatrixRoomCreationAccess.Restricted -> MatrixRoomAccess.RESTRICTED
+                },
+                historyVisibility = if (parameters.historyVisibilityOverride ==
+                    RoomHistoryVisibility.Invited
+                ) {
                     MatrixRoomHistoryVisibility.INVITED
                 } else {
                     MatrixRoomHistoryVisibility.SHARED

@@ -8,6 +8,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.matrix.rustcomponents.sdk.AllowRule
 import org.matrix.rustcomponents.sdk.JoinRule
 import org.matrix.rustcomponents.sdk.RoomHistoryVisibility
 import org.matrix.rustcomponents.sdk.RoomPreset
@@ -16,11 +17,13 @@ import org.matrix.rustcomponents.sdk.RoomVisibility
 class MatrixRoomCreationTest {
     @Test
     fun privateGroupIsEncryptedInviteOnlyAndHasInvitedHistory() {
-        val parameters = request(access = MatrixGroupAccess.PRIVATE).toCreateRoomParameters()
+        val parameters = request(access = MatrixRoomCreationAccess.Private)
+            .toCreateRoomParameters()
 
         assertEquals("Friends", parameters.name)
         assertEquals("Weekend plans", parameters.topic)
         assertTrue(parameters.isEncrypted)
+        assertFalse(parameters.isSpace)
         assertEquals(RoomVisibility.Private, parameters.visibility)
         assertEquals(RoomPreset.PRIVATE_CHAT, parameters.preset)
         assertEquals(JoinRule.Invite, parameters.joinRuleOverride)
@@ -30,9 +33,11 @@ class MatrixRoomCreationTest {
 
     @Test
     fun publicGroupIsDiscoverableUnencryptedAndUsesAliasLocalPart() {
-        val parameters = request(access = MatrixGroupAccess.PUBLIC).toCreateRoomParameters()
+        val parameters = request(access = MatrixRoomCreationAccess.Public)
+            .toCreateRoomParameters()
 
         assertFalse(parameters.isEncrypted)
+        assertFalse(parameters.isSpace)
         assertEquals(RoomVisibility.Public, parameters.visibility)
         assertEquals(RoomPreset.PUBLIC_CHAT, parameters.preset)
         assertEquals(JoinRule.Public, parameters.joinRuleOverride)
@@ -41,10 +46,63 @@ class MatrixRoomCreationTest {
     }
 
     @Test
+    fun privateSpaceIsUnencryptedAndOwnerManaged() {
+        val parameters = request(
+            access = MatrixRoomCreationAccess.Private,
+            kind = MatrixRoomCreationKind.SPACE
+        ).toCreateRoomParameters()
+        val powerLevels = requireNotNull(parameters.powerLevelContentOverride)
+
+        assertTrue(parameters.isSpace)
+        assertFalse(parameters.isEncrypted)
+        assertEquals(RoomVisibility.Private, parameters.visibility)
+        assertEquals(RoomPreset.PRIVATE_CHAT, parameters.preset)
+        assertEquals(JoinRule.Invite, parameters.joinRuleOverride)
+        assertEquals(RoomHistoryVisibility.Invited, parameters.historyVisibilityOverride)
+        assertEquals(100, powerLevels.eventsDefault)
+        assertEquals(50, powerLevels.invite)
+        assertTrue(powerLevels.events.isEmpty())
+    }
+
+    @Test
+    fun publicSpaceIsDiscoverableAndAllowsMemberInvites() {
+        val parameters = request(
+            access = MatrixRoomCreationAccess.Public,
+            kind = MatrixRoomCreationKind.SPACE
+        ).toCreateRoomParameters()
+        val powerLevels = requireNotNull(parameters.powerLevelContentOverride)
+
+        assertTrue(parameters.isSpace)
+        assertFalse(parameters.isEncrypted)
+        assertEquals(RoomVisibility.Public, parameters.visibility)
+        assertEquals(JoinRule.Public, parameters.joinRuleOverride)
+        assertEquals("friends", parameters.canonicalAlias)
+        assertEquals(100, powerLevels.eventsDefault)
+        assertEquals(0, powerLevels.invite)
+    }
+
+    @Test
+    fun parentMembersAccessUsesRestrictedJoinRule() {
+        val parameters = request(
+            access = MatrixRoomCreationAccess.Restricted(PARENT_SPACE_ID)
+        ).toCreateRoomParameters()
+        val joinRule = parameters.joinRuleOverride as JoinRule.Restricted
+
+        assertEquals(
+            listOf(AllowRule.RoomMembership(PARENT_SPACE_ID)),
+            joinRule.rules
+        )
+        assertEquals(RoomVisibility.Private, parameters.visibility)
+        assertEquals(RoomPreset.PRIVATE_CHAT, parameters.preset)
+        assertEquals(RoomHistoryVisibility.Invited, parameters.historyVisibilityOverride)
+        assertTrue(parameters.isEncrypted)
+    }
+
+    @Test
     fun moderatorsOnlyRestrictsDefaultEventsButKeepsMatrixRtcAvailableToMembers() {
         val parameters = request(
-            access = MatrixGroupAccess.PRIVATE,
-            postingPermission = MatrixGroupPostingPermission.MODERATORS_ONLY
+            access = MatrixRoomCreationAccess.Private,
+            postingPermission = MatrixRoomPostingPermission.MODERATORS_ONLY
         ).toCreateRoomParameters()
         val powerLevels = requireNotNull(parameters.powerLevelContentOverride)
 
@@ -65,7 +123,7 @@ class MatrixRoomCreationTest {
     @Test
     fun allMembersLeavesDefaultPostingLevelsUnchanged() {
         val powerLevels = requireNotNull(
-            request(access = MatrixGroupAccess.PRIVATE).toCreateRoomParameters()
+            request(access = MatrixRoomCreationAccess.Private).toCreateRoomParameters()
                 .powerLevelContentOverride
         )
 
@@ -76,7 +134,7 @@ class MatrixRoomCreationTest {
     @Test
     fun rtcOverridesPreserveStandardProtectedRoomEvents() {
         val events = requireNotNull(
-            request(access = MatrixGroupAccess.PRIVATE).toCreateRoomParameters()
+            request(access = MatrixRoomCreationAccess.Private).toCreateRoomParameters()
                 .powerLevelContentOverride
         ).events
 
@@ -95,15 +153,20 @@ class MatrixRoomCreationTest {
 }
 
 private fun request(
-    access: MatrixGroupAccess,
-    postingPermission: MatrixGroupPostingPermission = MatrixGroupPostingPermission.ALL_MEMBERS
-): MatrixGroupCreationRequest {
-    return MatrixGroupCreationRequest(
+    access: MatrixRoomCreationAccess,
+    kind: MatrixRoomCreationKind = MatrixRoomCreationKind.ROOM,
+    postingPermission: MatrixRoomPostingPermission =
+        MatrixRoomPostingPermission.ALL_MEMBERS
+): MatrixRoomCreationRequest {
+    return MatrixRoomCreationRequest(
         name = " Friends ",
         topic = " Weekend plans ",
         avatarUrl = "mxc://example/avatar",
+        kind = kind,
         access = access,
-        aliasLocalPart = if (access == MatrixGroupAccess.PUBLIC) "friends" else null,
+        aliasLocalPart = if (access == MatrixRoomCreationAccess.Public) "friends" else null,
         postingPermission = postingPermission
     )
 }
+
+private const val PARENT_SPACE_ID = "!parent:example.org"

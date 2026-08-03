@@ -3,10 +3,11 @@ package com.zyna.app.ui.createroom
 import androidx.annotation.MainThread
 import com.zyna.app.data.local.LocalCacheRepository
 import com.zyna.app.data.matrix.MatrixClientService
-import com.zyna.app.data.matrix.MatrixGroupAccess
-import com.zyna.app.data.matrix.MatrixGroupCreationRequest
-import com.zyna.app.data.matrix.MatrixGroupPostingPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixRoomCreationAccess
+import com.zyna.app.data.matrix.MatrixRoomCreationKind
+import com.zyna.app.data.matrix.MatrixRoomCreationRequest
+import com.zyna.app.data.matrix.MatrixRoomPostingPermission
 import com.zyna.app.data.profile.ProfileAvatarDraft
 import java.io.File
 import java.util.Locale
@@ -19,16 +20,35 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+enum class CreateRoomMode {
+    GROUP,
+    STORYLINE
+}
+
+data class CreateRoomParent(
+    val spaceId: String,
+    val displayName: String
+)
+
 data class CreateRoomTarget(
-    val userId: String
+    val userId: String,
+    val mode: CreateRoomMode = CreateRoomMode.GROUP,
+    val parent: CreateRoomParent? = null
 ) {
     val serverName: String?
         get() = userId.substringAfter(':', missingDelimiterValue = "")
             .takeIf { it.isNotBlank() }
+
+    val defaultAccess: CreateRoomAccess
+        get() = if (parent == null) CreateRoomAccess.PRIVATE else CreateRoomAccess.PARENT_MEMBERS
+
+    val supportsPostingPermissions: Boolean
+        get() = mode == CreateRoomMode.GROUP
 }
 
 enum class CreateRoomAccess {
     PRIVATE,
+    PARENT_MEMBERS,
     PUBLIC
 }
 
@@ -88,8 +108,11 @@ data class CreateRoomState(
             name.isNotEmpty() ||
                 topic.isNotEmpty() ||
                 hasAvatar ||
-                access != CreateRoomAccess.PRIVATE ||
-                postingPermission != CreateRoomPostingPermission.ALL_MEMBERS ||
+                access != (target?.defaultAccess ?: CreateRoomAccess.PRIVATE) ||
+                (
+                    target?.supportsPostingPermissions == true &&
+                        postingPermission != CreateRoomPostingPermission.ALL_MEMBERS
+                    ) ||
                 isAliasUserEdited
             )
 
@@ -98,7 +121,7 @@ data class CreateRoomState(
             !isCreating &&
             name.isNotBlank() &&
             (
-                access == CreateRoomAccess.PRIVATE ||
+                access != CreateRoomAccess.PUBLIC ||
                     aliasAvailability == CreateRoomAliasAvailability.AVAILABLE
                 )
 }
@@ -108,13 +131,13 @@ internal class CreateRoomDriver(
     val suggestAliasLocalPart: (name: String) -> String,
     val isAliasValid: (fullAlias: String) -> Boolean,
     val isAliasAvailable: suspend (fullAlias: String) -> Boolean,
-    val createGroup: suspend (request: MatrixGroupCreationRequest) -> MatrixRoomSummary,
+    val createRoom: suspend (request: MatrixRoomCreationRequest) -> MatrixRoomSummary,
     val cacheCreatedRoom: suspend (userId: String, room: MatrixRoomSummary) -> Unit,
     val deleteDraft: (String?) -> Unit
 )
 
 /**
- * Owns one route-scoped group creation session.
+ * Owns one route-scoped Matrix room or Space creation session.
  *
  * Alias checks are debounced and generation-guarded, so a late response cannot validate a newer
  * address or another session. The address is checked once more immediately before upload/create.
@@ -139,17 +162,26 @@ internal class CreateRoomStore(
     private var aliasCheckJob: Job? = null
 
     @MainThread
-    fun begin(target: CreateRoomTarget) {
-        val normalizedTarget = target.normalizedOrNull() ?: return
+    fun begin(target: CreateRoomTarget): Boolean {
+        val normalizedTarget = target.normalizedOrNull()
+        if (normalizedTarget == null) {
+            onWarning(
+                "Rejected invalid Matrix room creation target",
+                IllegalArgumentException(target.validationFailureDescription())
+            )
+            return false
+        }
         cancelCreate()
         cancelAliasCheck()
         val previousDraft = _state.value.avatarLocalPath
         editSessionCounter += 1
         _state.value = CreateRoomState(
             target = normalizedTarget,
+            access = normalizedTarget.defaultAccess,
             editSessionId = editSessionCounter
         )
         driver.deleteDraft(previousDraft)
+        return true
     }
 
     @MainThread
@@ -195,6 +227,7 @@ internal class CreateRoomStore(
     @MainThread
     fun setAccess(access: CreateRoomAccess) {
         val current = editableStateOrNull() ?: return
+        if (access == CreateRoomAccess.PARENT_MEMBERS && current.target?.parent == null) return
         if (current.access == access) return
         val nextAlias = if (
             access == CreateRoomAccess.PUBLIC &&
@@ -217,6 +250,7 @@ internal class CreateRoomStore(
     @MainThread
     fun setPostingPermission(permission: CreateRoomPostingPermission) {
         val current = editableStateOrNull() ?: return
+        if (current.target?.supportsPostingPermissions != true) return
         _state.value = current.copy(postingPermission = permission, error = null)
     }
 
@@ -363,12 +397,13 @@ internal class CreateRoomStore(
                 }
 
                 stage = CreateRoomStage.CREATE_ROOM
-                val room = driver.createGroup(
-                    MatrixGroupCreationRequest(
+                val room = driver.createRoom(
+                    MatrixRoomCreationRequest(
                         name = current.name.trim(),
                         topic = current.topic.trim().takeIf { it.isNotEmpty() },
                         avatarUrl = avatarUrl,
-                        access = current.access.toMatrixAccess(),
+                        kind = target.mode.toMatrixKind(),
+                        access = current.access.toMatrixAccess(target.parent),
                         aliasLocalPart = if (current.access == CreateRoomAccess.PUBLIC) {
                             current.aliasLocalPart
                         } else {
@@ -393,7 +428,7 @@ internal class CreateRoomStore(
                 throw error
             } catch (error: Throwable) {
                 if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
-                onWarning("Failed to create group", error)
+                onWarning("Failed to create Matrix room", error)
                 _state.value = _state.value.copy(
                     isCreating = false,
                     aliasAvailability = if (stage == CreateRoomStage.CHECK_ADDRESS) {
@@ -517,7 +552,22 @@ internal class CreateRoomStore(
 
     private fun CreateRoomTarget.normalizedOrNull(): CreateRoomTarget? {
         val userId = userId.trim().takeIf { it.isNotEmpty() } ?: return null
-        return CreateRoomTarget(userId)
+        val normalizedParent = parent?.let { value ->
+            val spaceId = value.spaceId.trim().takeIf(String::isNotEmpty) ?: return null
+            value.copy(spaceId = spaceId, displayName = value.displayName.trim())
+        }
+        when (mode) {
+            CreateRoomMode.GROUP -> Unit
+            CreateRoomMode.STORYLINE -> if (normalizedParent != null) return null
+        }
+        return copy(userId = userId, parent = normalizedParent)
+    }
+
+    private fun CreateRoomTarget.validationFailureDescription(): String {
+        return "Invalid creation target: mode=$mode, " +
+            "userIdPresent=${userId.isNotBlank()}, " +
+            "parentPresent=${parent != null}, " +
+            "parentIdPresent=${parent?.spaceId?.isNotBlank() == true}"
     }
 }
 
@@ -536,7 +586,7 @@ internal fun createCreateRoomStore(
             suggestAliasLocalPart = matrixClientService::suggestRoomAliasLocalPart,
             isAliasValid = matrixClientService::isRoomAliasValid,
             isAliasAvailable = matrixClientService::isRoomAliasAvailable,
-            createGroup = matrixClientService::createGroup,
+            createRoom = matrixClientService::createRoom,
             cacheCreatedRoom = localCacheRepository::cacheCreatedRoomSummary,
             deleteDraft = { path ->
                 path?.takeIf { it.isNotBlank() }?.let { localPath ->
@@ -561,18 +611,30 @@ private fun normalizeAliasInput(value: String, serverName: String?): String {
     return normalized
 }
 
-private fun CreateRoomAccess.toMatrixAccess(): MatrixGroupAccess {
+private fun CreateRoomMode.toMatrixKind(): MatrixRoomCreationKind {
     return when (this) {
-        CreateRoomAccess.PRIVATE -> MatrixGroupAccess.PRIVATE
-        CreateRoomAccess.PUBLIC -> MatrixGroupAccess.PUBLIC
+        CreateRoomMode.GROUP -> MatrixRoomCreationKind.ROOM
+        CreateRoomMode.STORYLINE -> MatrixRoomCreationKind.SPACE
     }
 }
 
-private fun CreateRoomPostingPermission.toMatrixPermission(): MatrixGroupPostingPermission {
+private fun CreateRoomAccess.toMatrixAccess(
+    parent: CreateRoomParent?
+): MatrixRoomCreationAccess {
     return when (this) {
-        CreateRoomPostingPermission.ALL_MEMBERS -> MatrixGroupPostingPermission.ALL_MEMBERS
+        CreateRoomAccess.PRIVATE -> MatrixRoomCreationAccess.Private
+        CreateRoomAccess.PUBLIC -> MatrixRoomCreationAccess.Public
+        CreateRoomAccess.PARENT_MEMBERS -> MatrixRoomCreationAccess.Restricted(
+            parentSpaceId = requireNotNull(parent).spaceId
+        )
+    }
+}
+
+private fun CreateRoomPostingPermission.toMatrixPermission(): MatrixRoomPostingPermission {
+    return when (this) {
+        CreateRoomPostingPermission.ALL_MEMBERS -> MatrixRoomPostingPermission.ALL_MEMBERS
         CreateRoomPostingPermission.MODERATORS_ONLY ->
-            MatrixGroupPostingPermission.MODERATORS_ONLY
+            MatrixRoomPostingPermission.MODERATORS_ONLY
     }
 }
 

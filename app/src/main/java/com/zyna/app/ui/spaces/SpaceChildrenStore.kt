@@ -17,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -424,37 +425,47 @@ internal class SpaceChildrenStore(
 
     private fun launchPermissionObservation(current: Activation): Job {
         return scope.launch {
-            try {
-                driver.observeCanManage(current.target.spaceId).collect { canManage ->
-                    if (!isCurrent(current)) return@collect
-                    _state.update { state ->
-                        val management = state.management
-                        state.copy(
-                            management = when {
-                                canManage -> management.copy(
-                                    canManage = true,
-                                    error = management.error.takeUnless {
-                                        it == SpaceChildManagementError.PERMISSION_CHANGED
-                                    }
-                                )
-                                management.isRemoving -> management.copy(canManage = false)
-                                else -> SpaceChildManagementState(
-                                    canManage = false,
-                                    error = SpaceChildManagementError.PERMISSION_CHANGED.takeIf {
-                                        management.isManaging || management.error ==
-                                            SpaceChildManagementError.PERMISSION_CHANGED
-                                    }
-                                )
-                            }
-                        )
+            var retryDelayMillis = PERMISSION_RETRY_INITIAL_MILLIS
+            var didWarn = false
+            while (isCurrent(current)) {
+                try {
+                    driver.observeCanManage(current.target.spaceId).collect { canManage ->
+                        if (!isCurrent(current)) return@collect
+                        _state.update { state ->
+                            val management = state.management
+                            state.copy(
+                                management = when {
+                                    canManage -> management.copy(
+                                        canManage = true,
+                                        error = management.error.takeUnless {
+                                            it == SpaceChildManagementError.PERMISSION_CHANGED
+                                        }
+                                    )
+                                    management.isRemoving -> management.copy(canManage = false)
+                                    else -> SpaceChildManagementState(
+                                        canManage = false,
+                                        error = SpaceChildManagementError.PERMISSION_CHANGED.takeIf {
+                                            management.isManaging || management.error ==
+                                                SpaceChildManagementError.PERMISSION_CHANGED
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    if (!isCurrent(current)) return@launch
+                    if (!didWarn) {
+                        didWarn = true
+                        onWarning("Failed to observe Space management permission; retrying", error)
                     }
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                if (isCurrent(current)) {
-                    onWarning("Failed to observe Space management permission", error)
-                }
+                if (!isCurrent(current)) return@launch
+                delay(retryDelayMillis)
+                retryDelayMillis = (retryDelayMillis * 2)
+                    .coerceAtMost(PERMISSION_RETRY_MAX_MILLIS)
             }
         }
     }
@@ -811,6 +822,8 @@ internal class SpaceChildrenStore(
         const val MAX_CONCURRENT_REMOVALS = 4
         const val MAX_RECONCILIATION_PAGES = 256
         const val HIERARCHY_RECONCILIATION_TIMEOUT_MILLIS = 30_000L
+        const val PERMISSION_RETRY_INITIAL_MILLIS = 100L
+        const val PERMISSION_RETRY_MAX_MILLIS = 2_000L
     }
 }
 

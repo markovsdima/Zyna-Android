@@ -45,6 +45,7 @@ import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
 import com.zyna.app.ui.createroom.CreateRoomError
+import com.zyna.app.ui.createroom.CreateRoomMode
 import com.zyna.app.ui.createroom.CreateRoomScreenView
 import com.zyna.app.ui.createroom.CreateRoomScreenViewActions
 import com.zyna.app.ui.createroom.CreateRoomScreenViewState
@@ -149,14 +150,33 @@ private fun RoomProfileEditorError?.localizedMessage(context: Context): String? 
     return context.getString(stringId)
 }
 
-private fun CreateRoomError?.localizedMessage(context: Context): String? {
+private fun CreateRoomError?.localizedMessage(
+    context: Context,
+    mode: CreateRoomMode?
+): String? {
+    val isStoryline = mode == CreateRoomMode.STORYLINE
     val stringId = when (this) {
         null -> return null
-        CreateRoomError.AVATAR_PREPARATION -> com.zyna.app.R.string.create_group_avatar_error
-        CreateRoomError.AVATAR_UPLOAD -> com.zyna.app.R.string.create_group_avatar_upload_error
-        CreateRoomError.ADDRESS_CHECK ->
+        CreateRoomError.AVATAR_PREPARATION -> if (isStoryline) {
+            com.zyna.app.R.string.create_storyline_avatar_error
+        } else {
+            com.zyna.app.R.string.create_group_avatar_error
+        }
+        CreateRoomError.AVATAR_UPLOAD -> if (isStoryline) {
+            com.zyna.app.R.string.create_storyline_avatar_upload_error
+        } else {
+            com.zyna.app.R.string.create_group_avatar_upload_error
+        }
+        CreateRoomError.ADDRESS_CHECK -> if (isStoryline) {
+            com.zyna.app.R.string.create_storyline_address_check_create_error
+        } else {
             com.zyna.app.R.string.create_group_address_check_create_error
-        CreateRoomError.CREATE -> com.zyna.app.R.string.create_group_error
+        }
+        CreateRoomError.CREATE -> if (isStoryline) {
+            com.zyna.app.R.string.create_storyline_error
+        } else {
+            com.zyna.app.R.string.create_group_error
+        }
     }
     return context.getString(stringId)
 }
@@ -1255,6 +1275,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                             actions.rooms.onOpenRoom
                         },
                         onCreateRoom = actions.rooms.onCreateRoom.takeIf { onBack == null },
+                        onCreateStoryline = actions.rooms.onCreateStoryline.takeIf {
+                            onBack == null
+                        },
                         onBack = onBack,
                         onRetrySynchronization = actions.rooms.onRetrySynchronization,
                         onVisibleRoomsChanged = { roomIds ->
@@ -1682,7 +1705,10 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 (view as CreateRoomScreenView).render(
                     state = CreateRoomScreenViewState(
                         creation = creation,
-                        errorMessage = creation.error.localizedMessage(context),
+                        errorMessage = creation.error.localizedMessage(
+                            context,
+                            creation.target?.mode
+                        ),
                         matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = bottomInset
                     ),

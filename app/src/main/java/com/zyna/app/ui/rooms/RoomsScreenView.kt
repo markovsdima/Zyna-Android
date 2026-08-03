@@ -19,6 +19,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -66,6 +67,7 @@ data class RoomsScrollAnchor(
 data class RoomsScreenViewActions(
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onCreateRoom: (() -> Unit)?,
+    val onCreateStoryline: (() -> Unit)?,
     val onBack: (() -> Unit)?,
     val onRetrySynchronization: () -> Unit,
     val onVisibleRoomsChanged: (List<String>) -> Unit,
@@ -301,7 +303,7 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         backButton.visibility = if (state.showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { actions.onBack?.invoke() }
         createRoomButton.visibility = if (state.showCreateRoom) View.VISIBLE else View.GONE
-        createRoomButton.setOnClickListener { actions.onCreateRoom?.invoke() }
+        createRoomButton.setOnClickListener { showCreationMenu(actions) }
         retrySynchronizationButton.setOnClickListener { actions.onRetrySynchronization() }
         synchronizationErrorBar.visibility = if (state.hasSynchronizationError) {
             View.VISIBLE
@@ -362,6 +364,27 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         ZynaPerfLog.end(renderStart, "roomsView.render") {
             "title=${state.title} rooms=${state.rooms.size} " +
                 "synchronizing=${state.isSynchronizing}"
+        }
+    }
+
+    private fun showCreationMenu(actions: RoomsScreenViewActions) {
+        if (actions.onCreateRoom == null && actions.onCreateStoryline == null) return
+        PopupMenu(context, createRoomButton, Gravity.END).apply {
+            actions.onCreateRoom?.let {
+                menu.add(0, CREATE_GROUP_MENU_ID, 0, R.string.create_group_title)
+            }
+            actions.onCreateStoryline?.let {
+                menu.add(0, CREATE_STORYLINE_MENU_ID, 1, R.string.create_storyline_title)
+            }
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    CREATE_GROUP_MENU_ID -> actions.onCreateRoom?.invoke()
+                    CREATE_STORYLINE_MENU_ID -> actions.onCreateStoryline?.invoke()
+                    else -> return@setOnMenuItemClickListener false
+                }
+                true
+            }
+            show()
         }
     }
 
@@ -480,6 +503,8 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     private companion object {
+        const val CREATE_GROUP_MENU_ID = 1
+        const val CREATE_STORYLINE_MENU_ID = 2
         const val SYNCHRONIZATION_ERROR_TEXT_TAG = "rooms-sync-error-text"
         const val VISIBLE_PREFETCH_BEFORE = 4
         const val VISIBLE_PREFETCH_AFTER = 20

@@ -11,7 +11,9 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
@@ -700,6 +702,31 @@ class SpaceChildrenStoreTest {
     }
 
     @Test
+    fun permissionObservationRetriesUntilNewlyCreatedSpaceIsAvailable() = runBlocking {
+        val fixture = SpaceChildrenFixture(coroutineContext)
+        fixture.observeCanManageBehavior = {
+            if (fixture.observeCanManageAttempts == 1) {
+                flow { error("Matrix room is not available") }
+            } else {
+                fixture.canManage
+            }
+        }
+        fixture.expectedWarningCount = 1
+        try {
+            fixture.store.activate(target(SPACE_A, spaceRoom(SPACE_A)))
+
+            awaitSpaceCondition {
+                fixture.observeCanManageAttempts >= 2 &&
+                    fixture.store.state.value.management.canManage
+            }
+
+            assertTrue(fixture.warnings.single().first.endsWith("; retrying"))
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun freshPermissionCheckPreventsRemovalAfterPermissionWasRevoked() = runBlocking {
         val fixture = SpaceChildrenFixture(coroutineContext)
         val seed = spaceRoom(SPACE_A)
@@ -786,6 +813,8 @@ private class SpaceChildrenFixture(parentContext: CoroutineContext) {
     val warnings = mutableListOf<Pair<String, Throwable>>()
     val canManage = MutableStateFlow(true)
     val removalCalls = mutableListOf<String>()
+    var observeCanManageAttempts = 0
+    var observeCanManageBehavior: () -> Flow<Boolean> = { canManage }
     var loadCanManageBehavior: suspend () -> Boolean = { canManage.value }
     var removeBehavior: suspend (String) -> Unit = {}
     var expectedWarningCount = 0
@@ -802,7 +831,10 @@ private class SpaceChildrenFixture(parentContext: CoroutineContext) {
                 writes += Triple(spaceId, userId, snapshot)
                 cache(userId, spaceId).value = snapshot
             },
-            observeCanManage = { canManage },
+            observeCanManage = {
+                observeCanManageAttempts += 1
+                observeCanManageBehavior()
+            },
             loadCanManage = { loadCanManageBehavior() },
             removeChild = { _, _, childId ->
                 removalCalls += childId

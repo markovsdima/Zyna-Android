@@ -247,8 +247,58 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
     fun render(state: CreateRoomScreenViewState, actions: CreateRoomScreenViewActions) {
         this.actions = actions
         val creation = state.creation
+        val isStoryline = creation.target?.mode == CreateRoomMode.STORYLINE
         bottomContentPaddingPx = state.bottomContentPaddingPx
         scrollView.updatePadding(bottom = bottomContentPaddingPx + dp(24))
+
+        titleText.setText(
+            if (isStoryline) R.string.create_storyline_title else R.string.create_group_title
+        )
+        nameLabel.setText(
+            if (isStoryline) R.string.create_storyline_name else R.string.create_group_name
+        )
+        topicLabel.setText(
+            if (isStoryline) R.string.create_storyline_topic else R.string.create_group_topic
+        )
+        addressLabel.setText(
+            if (isStoryline) R.string.create_storyline_address else R.string.create_group_address
+        )
+        privateAccess.setContent(
+            context.getString(
+                if (isStoryline) {
+                    R.string.create_storyline_access_private
+                } else {
+                    R.string.create_group_access_private
+                }
+            ),
+            context.getString(
+                if (isStoryline) {
+                    R.string.create_storyline_access_private_description
+                } else {
+                    R.string.create_group_access_private_description
+                }
+            )
+        )
+        publicAccess.setContent(
+            context.getString(
+                if (isStoryline) {
+                    R.string.create_storyline_access_public
+                } else {
+                    R.string.create_group_access_public
+                }
+            ),
+            context.getString(
+                if (isStoryline) {
+                    R.string.create_storyline_access_public_description
+                } else {
+                    R.string.create_group_access_public_description
+                }
+            )
+        )
+        val postingVisibility = if (isStoryline) GONE else VISIBLE
+        postingHeader.visibility = postingVisibility
+        allMembersPosting.visibility = postingVisibility
+        moderatorsPosting.visibility = postingVisibility
 
         isRendering = true
         nameEdit.replaceText(creation.name)
@@ -275,7 +325,13 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         addressContainer.visibility = if (creation.access == CreateRoomAccess.PUBLIC) VISIBLE else GONE
         renderAddressStatus(creation.aliasAvailability)
         encryptionNote.text = context.getString(
-            if (creation.access == CreateRoomAccess.PRIVATE) {
+            if (isStoryline) {
+                if (creation.access == CreateRoomAccess.PRIVATE) {
+                    R.string.create_storyline_private_note
+                } else {
+                    R.string.create_storyline_public_note
+                }
+            } else if (creation.access == CreateRoomAccess.PRIVATE) {
                 R.string.create_group_encryption_private_note
             } else {
                 R.string.create_group_encryption_public_note
@@ -286,7 +342,7 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         if (isCreating || !creation.isDiscardConfirmationVisible) {
             discardDialog?.dismiss()
         } else {
-            showDiscardConfirmation(actions)
+            showDiscardConfirmation(actions, isStoryline)
         }
 
         cancelButton.setOnClickListener { if (!isCreating) actions.onBack() }
@@ -359,12 +415,27 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         removePhotoButton.alpha = if (enabled) 1f else DISABLED_ALPHA
     }
 
-    private fun showDiscardConfirmation(actions: CreateRoomScreenViewActions) {
+    private fun showDiscardConfirmation(
+        actions: CreateRoomScreenViewActions,
+        isStoryline: Boolean
+    ) {
         if (discardDialog?.isShowing == true) return
         var handled = false
         discardDialog = AlertDialog.Builder(context)
-            .setTitle(R.string.create_group_discard_title)
-            .setMessage(R.string.create_group_discard_message)
+            .setTitle(
+                if (isStoryline) {
+                    R.string.create_storyline_discard_title
+                } else {
+                    R.string.create_group_discard_title
+                }
+            )
+            .setMessage(
+                if (isStoryline) {
+                    R.string.create_storyline_discard_message
+                } else {
+                    R.string.create_group_discard_message
+                }
+            )
             .setNegativeButton(R.string.profile_edit_keep_editing) { _, _ ->
                 handled = true
                 actions.onDiscardChangesCancelled()

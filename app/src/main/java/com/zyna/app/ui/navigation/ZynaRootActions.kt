@@ -70,6 +70,7 @@ data class CallsFeatureActions(
 data class RoomsFeatureActions(
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
     val onCreateRoom: () -> Unit,
+    val onCreateStoryline: () -> Unit,
     val onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
     val onVisibleRoomsChanged: (String, List<String>) -> Unit,
     val onVisibleRoomsInactive: (String) -> Unit,

@@ -52,7 +52,6 @@ import com.zyna.app.ui.calls.NativeMatrixRtcCallView
 import com.zyna.app.ui.calls.NativeMatrixRtcCallViewActions
 import com.zyna.app.ui.chat.ChatFeatureState
 import com.zyna.app.ui.contacts.ContactsFeatureState
-import com.zyna.app.ui.createroom.CreateRoomTarget
 import com.zyna.app.ui.glass.GlassInputBarView
 import com.zyna.app.ui.navigation.AppActions
 import com.zyna.app.ui.navigation.CallsFeatureActions
@@ -221,7 +220,7 @@ class MainActivity : AppCompatActivity() {
                     )
                     is AvatarCropTarget.CreateRoom -> appViewModel.setCreateRoomAvatarDraft(
                         draft = draft,
-                        target = target.toCreateRoomTarget(),
+                        target = target.target,
                         editSessionId = target.editSessionId
                     )
                 }
@@ -239,7 +238,7 @@ class MainActivity : AppCompatActivity() {
                         )
                     is AvatarCropTarget.CreateRoom ->
                         appViewModel.setCreateRoomAvatarPreparationError(
-                            target = target.toCreateRoomTarget(),
+                            target = target.target,
                             editSessionId = target.editSessionId
                         )
                 }
@@ -561,6 +560,7 @@ class MainActivity : AppCompatActivity() {
             rooms = RoomsFeatureActions(
                 onOpenRoom = appViewModel::openRoom,
                 onCreateRoom = appViewModel::openCreateRoom,
+                onCreateStoryline = appViewModel::openCreateStoryline,
                 onForwardRoomSelected = appViewModel::selectForwardRoom,
                 onVisibleRoomsChanged = appViewModel::updateVisibleRooms,
                 onVisibleRoomsInactive = appViewModel::clearVisibleRooms,
@@ -794,7 +794,7 @@ class MainActivity : AppCompatActivity() {
         if (creation.editSessionId != editSessionId) return
         pendingProfileAvatarPickRequest = profileAvatarCropCoordinator.beginPick(
             AvatarCropTarget.CreateRoom(
-                userId = target.userId,
+                target = target,
                 editSessionId = editSessionId
             )
         )
@@ -833,7 +833,7 @@ class MainActivity : AppCompatActivity() {
             is AvatarCropTarget.CreateRoom -> {
                 val creation = appViewModel.createRoomState.value
                 appViewModel.uiState.value.route == AppRoute.CreateRoom &&
-                    creation.target == target.toCreateRoomTarget() &&
+                    creation.target == target.target &&
                     creation.editSessionId == target.editSessionId
             }
         }
@@ -1565,10 +1565,6 @@ private fun AppRoute.perfName(): String {
 
 private fun AvatarCropTarget.RoomProfile.toRoomProfileEditorTarget(): RoomProfileEditorTarget {
     return RoomProfileEditorTarget(userId = userId, roomId = roomId)
-}
-
-private fun AvatarCropTarget.CreateRoom.toCreateRoomTarget(): CreateRoomTarget {
-    return CreateRoomTarget(userId = userId)
 }
 
 private fun OutgoingPhotoDraftItem.localFiles(): List<File> {

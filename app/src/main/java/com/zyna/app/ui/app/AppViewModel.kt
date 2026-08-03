@@ -66,6 +66,7 @@ import com.zyna.app.ui.contacts.ResolvedDirectRoomAction
 import com.zyna.app.ui.contacts.createContactsStore
 import com.zyna.app.ui.contacts.createDirectRoomActionCoordinator
 import com.zyna.app.ui.createroom.CreateRoomAccess
+import com.zyna.app.ui.createroom.CreateRoomMode
 import com.zyna.app.ui.createroom.CreateRoomPostingPermission
 import com.zyna.app.ui.createroom.CreateRoomState
 import com.zyna.app.ui.createroom.CreateRoomTarget
@@ -1363,11 +1364,20 @@ class AppViewModel(
     }
 
     fun openCreateRoom() {
+        openCreateRoom(CreateRoomMode.GROUP)
+    }
+
+    fun openCreateStoryline() {
+        openCreateRoom(CreateRoomMode.STORYLINE)
+    }
+
+    private fun openCreateRoom(mode: CreateRoomMode) {
         val current = _uiState.value
         val userId = current.matrixState.userIdOrNull() ?: return
         val nextNavigation = current.navState.openCreateRoom()
         if (nextNavigation == current.navState) return
-        createRoomStore.begin(CreateRoomTarget(userId))
+        val didBegin = createRoomStore.begin(CreateRoomTarget(userId = userId, mode = mode))
+        if (!didBegin) return
         _uiState.update { state -> state.withNavigationState(nextNavigation) }
     }
 
@@ -2669,7 +2679,7 @@ class AppViewModel(
                 ?.let { parentRoute ->
                     // The leave screen owns the child Space store. Switch the read model to its
                     // parent before applying the overlay so the returned screen never flashes the
-                    // successfully left Track as joined.
+                    // successfully left child Space as joined.
                     spaceChildrenStore.activate(parentRoute.toSpaceTarget(target.userId))
                 }
             spaceChildrenStore.confirmChildMembership(
@@ -2892,14 +2902,23 @@ class AppViewModel(
         ) {
             return
         }
-        _uiState.update { state ->
-            state.withNavigationState(
-                state.navState.openCreatedRoomInvites(
-                    roomId = room.id,
-                    displayName = room.displayName,
-                    avatarUrl = room.avatarUrl
-                )
-            )
+        when (target.mode) {
+            CreateRoomMode.GROUP -> {
+                _uiState.update { state ->
+                    state.withNavigationState(
+                        state.navState.openCreatedRoomInvites(
+                            roomId = room.id,
+                            displayName = room.displayName,
+                            avatarUrl = room.avatarUrl
+                        )
+                    )
+                }
+            }
+            CreateRoomMode.STORYLINE -> {
+                val space = room.toSpaceRoom()
+                spaceRootsStore.confirmJoinedRoot(target.userId, space)
+                openSpace(space, parentSpaceId = null)
+            }
         }
     }
 

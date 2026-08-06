@@ -7,6 +7,65 @@ import org.junit.Test
 
 class AppNavStateTest {
     @Test
+    fun spaceAccessRouteKeepsItsExactSpaceAndDetailsOwnersActive() {
+        val story = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+        val track = story.openSpace(
+            spaceId = "!track:example.org",
+            parentSpaceId = "!story:example.org",
+            displayName = "Track",
+            avatarUrl = null,
+            topic = null
+        )
+        val details = track.openRoomDetails()
+
+        val access = details.openSpaceAccess()
+
+        assertEquals(
+            AppRoute.SpaceAccess(
+                spaceId = "!track:example.org",
+                parentSpaceId = "!story:example.org",
+                displayName = "Track"
+            ),
+            access.top
+        )
+        assertEquals("!track:example.org", access.activeSpaceRoute?.spaceId)
+        assertEquals("!track:example.org", access.activeSpaceAccessRoute?.spaceId)
+        assertEquals(AppRoute.RoomDetails("!track:example.org"), access.activeRoomDetailsRoute)
+        assertEquals(details, access.popActiveStack())
+        assertFalse(access.showsTabs)
+    }
+
+    @Test
+    fun openSpaceAccessRequiresSpaceOwnedTopDetailsRoute() {
+        val chat = AppNavState()
+            .enterMain()
+            .openChat(roomId = "!room:example.org", displayName = "Room")
+        val roomDetails = chat.openRoomDetails()
+        val space = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+
+        assertEquals(chat, chat.openSpaceAccess())
+        assertEquals(roomDetails, roomDetails.openSpaceAccess())
+        assertEquals(space, space.openSpaceAccess())
+        assertTrue(space.openRoomDetails().openSpaceAccess().top is AppRoute.SpaceAccess)
+    }
+
+    @Test
     fun addRoomsRouteKeepsItsExactSpaceActive() {
         val space = AppNavState()
             .enterMain()

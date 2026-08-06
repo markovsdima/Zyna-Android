@@ -22,6 +22,7 @@ import com.zyna.app.ui.createroom.CreateRoomAccess
 import com.zyna.app.ui.createroom.CreateRoomPostingPermission
 import com.zyna.app.ui.roompermissions.RoomPermissionAudience
 import com.zyna.app.ui.roomroles.RoomAssignableRole
+import com.zyna.app.ui.spaces.SpaceAccessOption
 import com.zyna.app.ui.theme.AppThemeMode
 
 data class ZynaRootActions(
@@ -101,7 +102,15 @@ data class SpacesFeatureActions(
     val onToggleAllLeaveRooms: () -> Unit,
     val onLeaveSpace: () -> Unit,
     val onRetrySpaceLeave: () -> Unit,
-    val onResolveSpaceOwnership: () -> Unit
+    val onResolveSpaceOwnership: () -> Unit,
+    val onRetryAccess: () -> Unit,
+    val onAccessChanged: (SpaceAccessOption) -> Unit,
+    val onAddressChanged: (String) -> Unit,
+    val onRetryAddressCheck: () -> Unit,
+    val onDirectoryVisibilityChanged: (Boolean) -> Unit,
+    val onSaveAccess: () -> Unit,
+    val onConfirmAccessDiscard: () -> Unit,
+    val onCancelAccessDiscard: () -> Unit
 )
 
 data class CreateRoomActions(
@@ -124,6 +133,7 @@ data class RoomDetailsFeatureActions(
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
     val onOpenPermissions: () -> Unit,
+    val onOpenSpaceAccess: () -> Unit,
     val onRequestLeave: () -> Unit,
     val onConfirmLeave: () -> Unit,
     val onCancelLeave: () -> Unit

@@ -112,6 +112,11 @@ import com.zyna.app.ui.spaces.SpaceAddRoomsScreenActions
 import com.zyna.app.ui.spaces.SpaceAddRoomsScreenState
 import com.zyna.app.ui.spaces.SpaceAddRoomsScreenView
 import com.zyna.app.ui.spaces.SpaceAddRoomsState
+import com.zyna.app.ui.spaces.SpaceAccessError
+import com.zyna.app.ui.spaces.SpaceAccessScreenView
+import com.zyna.app.ui.spaces.SpaceAccessScreenViewActions
+import com.zyna.app.ui.spaces.SpaceAccessScreenViewState
+import com.zyna.app.ui.spaces.SpaceAccessState
 import com.zyna.app.ui.spaces.SpaceChildManagementState
 import com.zyna.app.ui.spaces.SpaceFeatureState
 import com.zyna.app.ui.spaces.SpaceJoinPreviewScreenActions
@@ -147,6 +152,23 @@ private fun RoomProfileEditorError?.localizedMessage(context: Context): String? 
         RoomProfileEditorError.SAVE -> com.zyna.app.R.string.room_profile_edit_save_error
         RoomProfileEditorError.PARTIAL_SAVE ->
             com.zyna.app.R.string.room_profile_edit_partial_save_error
+    }
+    return context.getString(stringId)
+}
+
+private fun SpaceAccessError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        SpaceAccessError.LOAD -> com.zyna.app.R.string.space_access_load_error
+        SpaceAccessError.ADDRESS_CHECK ->
+            com.zyna.app.R.string.space_access_address_check_error
+        SpaceAccessError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.space_access_permission_changed
+        SpaceAccessError.REMOTE_CHANGED ->
+            com.zyna.app.R.string.space_access_remote_changed
+        SpaceAccessError.SAVE -> com.zyna.app.R.string.space_access_save_error
+        SpaceAccessError.PARTIAL_SAVE ->
+            com.zyna.app.R.string.space_access_partial_save_error
     }
     return context.getString(stringId)
 }
@@ -752,6 +774,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 return false
             }
         }
+        if (state.route is AppRoute.SpaceAccess) {
+            if (
+                latestSpaces?.access?.isSaving == true ||
+                latestSpaces?.access?.hasUnsavedChanges == true
+            ) {
+                return false
+            }
+        }
         if (state.route == AppRoute.CreateRoom) {
             if (
                 latestRoom?.createRoom?.isCreating == true ||
@@ -1099,6 +1129,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     roomList = roomList,
                     actions = actions,
                     dependencies = dependencies,
+                    route = route
+                )
+                is AppRoute.SpaceAccess -> spaceAccessEntry(
+                    spaces = spaces,
+                    actions = actions,
                     route = route
                 )
                 is AppRoute.SpaceJoinPreview -> spaceJoinPreviewEntry(
@@ -1536,6 +1571,48 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
     }
 
+    private fun spaceAccessEntry(
+        spaces: SpaceFeatureState,
+        actions: ZynaRootActions,
+        route: AppRoute.SpaceAccess
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "space-access:${route.parentSpaceId.orEmpty()}:${route.spaceId}",
+            createView = { context -> SpaceAccessScreenView(context) },
+            updateView = { view ->
+                val routeState = spaces.access.takeIf { state ->
+                    state.target?.let { target ->
+                        target.spaceId == route.spaceId &&
+                            target.parentSpaceId == route.parentSpaceId
+                    } == true
+                } ?: SpaceAccessState(isLoading = true)
+                (view as SpaceAccessScreenView).render(
+                    state = SpaceAccessScreenViewState(
+                        access = routeState,
+                        presentationKind = if (route.parentSpaceId == null) {
+                            SpacePresentationKind.STORYLINE
+                        } else {
+                            SpacePresentationKind.TRACK
+                        },
+                        errorMessage = routeState.error.localizedMessage(context)
+                    ),
+                    actions = SpaceAccessScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetry = actions.spaces.onRetryAccess,
+                        onAccessChanged = actions.spaces.onAccessChanged,
+                        onAddressChanged = actions.spaces.onAddressChanged,
+                        onRetryAddressCheck = actions.spaces.onRetryAddressCheck,
+                        onDirectoryVisibilityChanged =
+                            actions.spaces.onDirectoryVisibilityChanged,
+                        onSave = actions.spaces.onSaveAccess,
+                        onConfirmDiscard = actions.spaces.onConfirmAccessDiscard,
+                        onCancelDiscard = actions.spaces.onCancelAccessDiscard
+                    )
+                )
+            }
+        )
+    }
+
     private fun roomsEntryKey(title: String, onBack: (() -> Unit)?): String {
         return "rooms:$title:${onBack != null}"
     }
@@ -1915,6 +1992,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenProfileEditor = actions.roomDetails.onOpenProfileEditor,
                         onOpenInviteMembers = actions.roomDetails.onOpenInviteMembers,
                         onOpenPermissions = actions.roomDetails.onOpenPermissions,
+                        onOpenSpaceAccess = actions.roomDetails.onOpenSpaceAccess,
                         onRetry = actions.roomDetails.onRefresh,
                         onRequestLeave = actions.roomDetails.onRequestLeave,
                         onConfirmLeave = actions.roomDetails.onConfirmLeave,
@@ -2476,6 +2554,8 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 "SpaceLeave(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             is AppRoute.SpaceAddRooms ->
                 "SpaceAddRooms(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+            is AppRoute.SpaceAccess ->
+                "SpaceAccess(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.takeLast(10)})"

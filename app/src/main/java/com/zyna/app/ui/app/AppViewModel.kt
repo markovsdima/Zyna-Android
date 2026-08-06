@@ -108,6 +108,9 @@ import com.zyna.app.ui.rooms.RoomListState
 import com.zyna.app.ui.rooms.createRoomListStore
 import com.zyna.app.ui.spaces.SpaceAddRoomsState
 import com.zyna.app.ui.spaces.SpaceAddRoomsTarget
+import com.zyna.app.ui.spaces.SpaceAccessOption
+import com.zyna.app.ui.spaces.SpaceAccessState
+import com.zyna.app.ui.spaces.SpaceAccessTarget
 import com.zyna.app.ui.spaces.SpaceChildrenState
 import com.zyna.app.ui.spaces.SpaceJoinError
 import com.zyna.app.ui.spaces.SpaceJoinState
@@ -118,6 +121,7 @@ import com.zyna.app.ui.spaces.SpaceTarget
 import com.zyna.app.ui.spaces.SpaceRootsState
 import com.zyna.app.ui.spaces.createSpaceChildrenStore
 import com.zyna.app.ui.spaces.createSpaceAddRoomsStore
+import com.zyna.app.ui.spaces.createSpaceAccessStore
 import com.zyna.app.ui.spaces.createSpaceJoinStore
 import com.zyna.app.ui.spaces.createSpaceLeaveStore
 import com.zyna.app.ui.spaces.createSpaceRootsStore
@@ -324,6 +328,13 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val spaceLeaveState: StateFlow<SpaceLeaveState> = spaceLeaveStore.state
+    private val spaceAccessStore = createSpaceAccessStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        onFinished = ::handleSpaceAccessFinished,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val spaceAccessState: StateFlow<SpaceAccessState> = spaceAccessStore.state
     private val createRoomStore = createCreateRoomStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -479,6 +490,10 @@ class AppViewModel(
         }
 
         viewModelScope.launch {
+            observeSpaceAccessRouteInputs()
+        }
+
+        viewModelScope.launch {
             observeRoomProfileEditorOwner()
         }
 
@@ -598,6 +613,7 @@ class AppViewModel(
                     spaceAddRoomsStore.deactivate()
                     spaceJoinStore.deactivate()
                     spaceLeaveStore.deactivate()
+                    spaceAccessStore.deactivate()
                     matrixSpaceService.deactivate()
                     roomDetailsStore.deactivate()
                     roomLeaveStore.deactivate()
@@ -1170,6 +1186,10 @@ class AppViewModel(
         if (route is AppRoute.SpaceLeave && spaceLeaveStore.state.value.isLeaving) {
             return true
         }
+        if (route is AppRoute.SpaceAccess) {
+            spaceAccessStore.requestExit()
+            return true
+        }
         if (route is AppRoute.RoomDetails && roomLeaveStore.state.value.isBusy) {
             return true
         }
@@ -1562,6 +1582,49 @@ class AppViewModel(
             }
             current.withNavigationState(next)
         }
+    }
+
+    fun openSpaceAccess() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomDetails ?: return
+        current.navState.activeSpaceRoute
+            ?.takeIf { it.spaceId == route.roomId }
+            ?: return
+        _uiState.update { state ->
+            state.withNavigationState(state.navState.openSpaceAccess())
+        }
+    }
+
+    fun retrySpaceAccess() {
+        spaceAccessStore.retry()
+    }
+
+    fun setSpaceAccess(access: SpaceAccessOption) {
+        spaceAccessStore.setAccess(access)
+    }
+
+    fun setSpaceAddress(value: String) {
+        spaceAccessStore.setAddressLocalPart(value)
+    }
+
+    fun retrySpaceAddressCheck() {
+        spaceAccessStore.retryAddressCheck()
+    }
+
+    fun setSpaceDirectoryVisibility(isVisible: Boolean) {
+        spaceAccessStore.setDirectoryVisibility(isVisible)
+    }
+
+    fun saveSpaceAccess() {
+        spaceAccessStore.save()
+    }
+
+    fun confirmSpaceAccessDiscard() {
+        spaceAccessStore.confirmDiscard()
+    }
+
+    fun cancelSpaceAccessDiscard() {
+        spaceAccessStore.cancelDiscardConfirmation()
     }
 
     fun openEditRoomProfile() {
@@ -2679,6 +2742,51 @@ class AppViewModel(
             }
     }
 
+    private suspend fun observeSpaceAccessRouteInputs() {
+        _uiState
+            .map { state ->
+                val route = state.navState.activeSpaceAccessRoute ?: return@map null
+                val userId = state.matrixState.userIdOrNull() ?: return@map null
+                SpaceAccessTarget(
+                    userId = userId,
+                    spaceId = route.spaceId,
+                    parentSpaceId = route.parentSpaceId,
+                    displayName = route.displayName
+                )
+            }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    spaceAccessStore.deactivate()
+                } else {
+                    spaceAccessStore.activate(target)
+                }
+            }
+    }
+
+    private fun handleSpaceAccessFinished(
+        target: SpaceAccessTarget,
+        didSave: Boolean
+    ) {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.SpaceAccess ?: return
+        if (
+            current.matrixState.userIdOrNull() != target.userId ||
+            route.spaceId != target.spaceId ||
+            route.parentSpaceId != target.parentSpaceId
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.navState.popActiveStack()
+                ?.let(state::withNavigationState)
+                ?: state
+        }
+        if (didSave) {
+            roomDetailsStore.refresh()
+        }
+    }
+
     private fun handleSpaceRoomsAdded(
         target: SpaceAddRoomsTarget,
         roomIds: Set<String>
@@ -3366,6 +3474,8 @@ class AppViewModel(
                 "SpaceLeave(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             is AppRoute.SpaceAddRooms ->
                 "SpaceAddRooms(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
+            is AppRoute.SpaceAccess ->
+                "SpaceAccess(${spaceId.shortLogId()},parent=${parentSpaceId?.shortLogId()})"
             AppRoute.Rooms -> "Rooms"
             AppRoute.Settings -> "Settings"
             is AppRoute.Chat -> "Chat(${roomId.shortLogId()})"

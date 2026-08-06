@@ -83,7 +83,8 @@ data class SpaceFeatureState(
     val children: SpaceChildrenState = SpaceChildrenState(),
     val join: SpaceJoinState = SpaceJoinState(),
     val leave: SpaceLeaveState = SpaceLeaveState(),
-    val addRooms: SpaceAddRoomsState = SpaceAddRoomsState()
+    val addRooms: SpaceAddRoomsState = SpaceAddRoomsState(),
+    val access: SpaceAccessState = SpaceAccessState()
 )
 
 internal fun visibleChatRootRooms(

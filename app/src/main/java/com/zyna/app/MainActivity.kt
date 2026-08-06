@@ -411,19 +411,24 @@ class MainActivity : AppCompatActivity() {
                                 )
                             },
                             combine(
-                                appViewModel.spaceRootsState,
-                                appViewModel.spaceChildrenState,
-                                appViewModel.spaceJoinState,
-                                appViewModel.spaceLeaveState,
-                                appViewModel.spaceAddRoomsState
-                            ) { roots, children, join, leave, addRooms ->
-                                SpaceFeatureState(
-                                    roots = roots,
-                                    children = children,
-                                    join = join,
-                                    leave = leave,
-                                    addRooms = addRooms
-                                )
+                                combine(
+                                    appViewModel.spaceRootsState,
+                                    appViewModel.spaceChildrenState,
+                                    appViewModel.spaceJoinState,
+                                    appViewModel.spaceLeaveState,
+                                    appViewModel.spaceAddRoomsState
+                                ) { roots, children, join, leave, addRooms ->
+                                    SpaceFeatureState(
+                                        roots = roots,
+                                        children = children,
+                                        join = join,
+                                        leave = leave,
+                                        addRooms = addRooms
+                                    )
+                                },
+                                appViewModel.spaceAccessState
+                            ) { spaces, access ->
+                                spaces.copy(access = access)
                             }
                         ) { state, roomList, room, spaces ->
                             AppFeatureInput(
@@ -590,7 +595,15 @@ class MainActivity : AppCompatActivity() {
                 onToggleAllLeaveRooms = appViewModel::toggleAllSpaceLeaveRooms,
                 onLeaveSpace = appViewModel::leaveSpace,
                 onRetrySpaceLeave = appViewModel::retrySpaceLeave,
-                onResolveSpaceOwnership = appViewModel::resolveSpaceLeaveOwnership
+                onResolveSpaceOwnership = appViewModel::resolveSpaceLeaveOwnership,
+                onRetryAccess = appViewModel::retrySpaceAccess,
+                onAccessChanged = appViewModel::setSpaceAccess,
+                onAddressChanged = appViewModel::setSpaceAddress,
+                onRetryAddressCheck = appViewModel::retrySpaceAddressCheck,
+                onDirectoryVisibilityChanged = appViewModel::setSpaceDirectoryVisibility,
+                onSaveAccess = appViewModel::saveSpaceAccess,
+                onConfirmAccessDiscard = appViewModel::confirmSpaceAccessDiscard,
+                onCancelAccessDiscard = appViewModel::cancelSpaceAccessDiscard
             ),
             createRoom = CreateRoomActions(
                 onNameChanged = appViewModel::setCreateRoomName,
@@ -611,6 +624,7 @@ class MainActivity : AppCompatActivity() {
                 onOpenMembers = appViewModel::openRoomMembers,
                 onOpenInviteMembers = appViewModel::openInviteRoomMembers,
                 onOpenPermissions = appViewModel::openRoomPermissions,
+                onOpenSpaceAccess = appViewModel::openSpaceAccess,
                 onRequestLeave = appViewModel::requestRoomLeave,
                 onConfirmLeave = appViewModel::confirmRoomLeave,
                 onCancelLeave = appViewModel::cancelRoomLeave
@@ -1559,6 +1573,8 @@ private fun AppRoute.perfName(): String {
             "SpaceLeave(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
         is AppRoute.SpaceAddRooms ->
             "SpaceAddRooms(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
+        is AppRoute.SpaceAccess ->
+            "SpaceAccess(${spaceId.takeLast(10)},parent=${parentSpaceId?.takeLast(10)})"
         AppRoute.CreateRoom -> "CreateRoom"
         AppRoute.Rooms -> "Rooms"
         AppRoute.Settings -> "Settings"

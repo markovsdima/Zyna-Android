@@ -57,6 +57,7 @@ internal data class RoomDetailsScreenViewActions(
     val onOpenMembers: () -> Unit,
     val onOpenInviteMembers: () -> Unit,
     val onOpenPermissions: () -> Unit,
+    val onOpenSpaceAccess: () -> Unit,
     val onRetry: () -> Unit,
     val onRequestLeave: () -> Unit,
     val onConfirmLeave: () -> Unit,
@@ -213,7 +214,10 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     }
     private val pinnedRow = disabledRow("Pinned Messages")
     private val mediaRow = disabledRow("Shared Media")
-    private val securityRow = disabledRow("Security & Privacy")
+    private val securityRow = RoomDetailsRowView(context).apply {
+        title = "Security & Privacy"
+        showsAccessory = true
+    }
     private val historyRow = disabledRow("Room History")
     private val leaveRow = RoomDetailsRowView(context).apply {
         title = context.getString(R.string.room_leave_action)
@@ -443,6 +447,24 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         }
         permissionsRow.visibility = if (showsMembers) VISIBLE else GONE
         permissionsRow.isFocusable = showsMembers
+        val showsSpaceAccess = state.kind == MatrixRoomKind.SPACE
+        securityRow.title = if (showsSpaceAccess) {
+            context.getString(R.string.room_details_access_visibility)
+        } else {
+            "Security & Privacy"
+        }
+        securityRow.isEnabled = showsSpaceAccess
+        securityRow.isClickable = showsSpaceAccess
+        securityRow.isFocusable = showsSpaceAccess
+        securityRow.showsAccessory = showsSpaceAccess
+        securityRow.alpha = if (showsSpaceAccess) 1f else DISABLED_ALPHA
+        securityRow.setOnClickListener(
+            if (showsSpaceAccess) {
+                View.OnClickListener { actions.onOpenSpaceAccess() }
+            } else {
+                null
+            }
+        )
         inviteAction.visibility = if (showsInvite) VISIBLE else GONE
         inviteAction.isFocusable = showsInvite
         inviteAction.setOnClickListener(

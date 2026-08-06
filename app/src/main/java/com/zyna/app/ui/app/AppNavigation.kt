@@ -104,6 +104,11 @@ sealed interface AppRoute {
         val parentSpaceId: String?,
         val displayName: String
     ) : AppRoute
+    data class SpaceAccess(
+        val spaceId: String,
+        val parentSpaceId: String?,
+        val displayName: String
+    ) : AppRoute
     data class SpaceJoinPreview(
         val roomId: String,
         val parentSpaceId: String?,
@@ -179,6 +184,7 @@ data class AppNavState(
             val roomId = when (val topRoute = chatsStack.lastOrNull()) {
                 is AppRoute.RoomDetails -> topRoute.roomId
                 is AppRoute.EditRoomProfile -> topRoute.roomId
+                is AppRoute.SpaceAccess -> topRoute.spaceId
                 is AppRoute.RoomMembers -> topRoute.roomId
                 is AppRoute.RoomMemberDetails -> topRoute.roomId
                 is AppRoute.RoomPermissions -> topRoute.roomId
@@ -220,6 +226,12 @@ data class AppNavState(
                         route.parentSpaceId == topRoute.parentSpaceId
                 }
             }
+            if (topRoute is AppRoute.SpaceAccess) {
+                return spaceRoute.takeIf { route ->
+                    route.spaceId == topRoute.spaceId &&
+                        route.parentSpaceId == topRoute.parentSpaceId
+                }
+            }
             if (topRoute == AppRoute.CreateRoom) {
                 return spaceRoute
             }
@@ -235,6 +247,7 @@ data class AppNavState(
             val ownerRoomId = when (topRoute) {
                 is AppRoute.RoomDetails -> topRoute.roomId
                 is AppRoute.EditRoomProfile -> topRoute.roomId
+                is AppRoute.SpaceAccess -> topRoute.spaceId
                 is AppRoute.RoomMembers -> topRoute.roomId
                 is AppRoute.RoomMemberDetails -> topRoute.roomId
                 is AppRoute.RoomPermissions -> topRoute.roomId
@@ -267,6 +280,12 @@ data class AppNavState(
         get() {
             if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
             return chatsStack.lastOrNull() as? AppRoute.SpaceAddRooms
+        }
+
+    val activeSpaceAccessRoute: AppRoute.SpaceAccess?
+        get() {
+            if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
+            return chatsStack.lastOrNull() as? AppRoute.SpaceAccess
         }
 
     val activeRoomPermissionsRoute: AppRoute.RoomPermissions?
@@ -606,6 +625,21 @@ data class AppNavState(
         val space = chatsStack.lastOrNull() as? AppRoute.Space ?: return this
         return copy(
             chatsStack = chatsStack + AppRoute.SpaceAddRooms(
+                spaceId = space.spaceId,
+                parentSpaceId = space.parentSpaceId,
+                displayName = space.displayName
+            )
+        )
+    }
+
+    fun openSpaceAccess(): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return this
+        val details = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
+        val space = chatsStack.filterIsInstance<AppRoute.Space>()
+            .lastOrNull { route -> route.spaceId == details.roomId }
+            ?: return this
+        return copy(
+            chatsStack = chatsStack + AppRoute.SpaceAccess(
                 spaceId = space.spaceId,
                 parentSpaceId = space.parentSpaceId,
                 displayName = space.displayName

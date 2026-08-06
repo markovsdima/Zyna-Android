@@ -337,6 +337,7 @@ internal class RoomDetailsStore(
         return this?.takeIf {
             it.canInviteMembers != null ||
                 it.canChangeName != null ||
+                it.canChangeTopic != null ||
                 it.canChangeAvatar != null
         }
     }
@@ -347,12 +348,16 @@ internal class RoomDetailsStore(
         return MatrixRoomCapabilities(
             canInviteMembers = canInviteMembers ?: fallback?.canInviteMembers,
             canChangeName = canChangeName ?: fallback?.canChangeName,
+            canChangeTopic = canChangeTopic ?: fallback?.canChangeTopic,
             canChangeAvatar = canChangeAvatar ?: fallback?.canChangeAvatar
         )
     }
 
     private fun MatrixRoomCapabilities.isFullyKnown(): Boolean {
-        return canInviteMembers != null && canChangeName != null && canChangeAvatar != null
+        return canInviteMembers != null &&
+            canChangeName != null &&
+            canChangeTopic != null &&
+            canChangeAvatar != null
     }
 
     private fun isCurrent(target: RoomDetailsTarget, requestGeneration: Long): Boolean {

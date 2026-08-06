@@ -338,12 +338,13 @@
     <string name="room_profile_edit_space_title">Edit Space</string>
     <string name="room_profile_edit_group_name">Group Name</string>
     <string name="room_profile_edit_space_name">Space Name</string>
+    <string name="room_profile_edit_topic">Description (optional)</string>
     <string name="room_profile_edit_discard_message">Your room changes will not be saved.</string>
     <string name="room_profile_edit_avatar_error">Could not prepare the selected photo.</string>
     <string name="room_profile_edit_name_required">Enter a name to save the room.</string>
     <string name="room_profile_edit_permission_changed">You no longer have permission to save these changes.</string>
     <string name="room_profile_edit_save_error">Could not save the changes. Try again.</string>
-    <string name="room_profile_edit_partial_save_error">The name was saved, but the photo was not. You can retry the photo.</string>
+    <string name="room_profile_edit_partial_save_error">Some changes were saved. Retry to save the remaining changes.</string>
     <string name="room_profile_room_version">Room version: %1$s</string>
     <string name="room_permissions_title">Roles and Permissions</string>
     <string name="room_permissions_roles_section">Roles</string>

@@ -845,6 +845,7 @@ class MatrixClientService(
                 capabilities = MatrixRoomCapabilities(
                     canInviteMembers = true,
                     canChangeName = true,
+                    canChangeTopic = true,
                     canChangeAvatar = true
                 )
             )
@@ -1412,6 +1413,9 @@ class MatrixClientService(
                     MatrixRoomCapabilities(
                         canInviteMembers = powerLevels.canOwnUserInvite(),
                         canChangeName = powerLevels.canOwnUserSendState(StateEventType.RoomName),
+                        canChangeTopic = powerLevels.canOwnUserSendState(
+                            StateEventType.RoomTopic
+                        ),
                         canChangeAvatar = powerLevels.canOwnUserSendState(
                             StateEventType.RoomAvatar
                         )
@@ -1603,6 +1607,13 @@ class MatrixClientService(
         require(normalizedName.isNotEmpty()) { "Room name is required" }
         activeClient.getRoom(roomId)?.use { room ->
             room.setName(normalizedName)
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun setRoomTopic(roomId: String, topic: String) = withContext(Dispatchers.IO) {
+        val activeClient = client ?: error("Matrix client is not ready")
+        activeClient.getRoom(roomId)?.use { room ->
+            room.setTopic(topic.trim())
         } ?: error("Matrix room is not available")
     }
 
@@ -3116,6 +3127,11 @@ class MatrixClientService(
                 },
                 canChangeName = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
                     powerLevels?.canOwnUserSendState(StateEventType.RoomName)
+                } else {
+                    null
+                },
+                canChangeTopic = if (resolveCapabilities && kind != MatrixRoomKind.DIRECT) {
+                    powerLevels?.canOwnUserSendState(StateEventType.RoomTopic)
                 } else {
                     null
                 },

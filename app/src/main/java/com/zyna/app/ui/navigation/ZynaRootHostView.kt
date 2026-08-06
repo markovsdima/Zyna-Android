@@ -1592,6 +1592,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         identityId = ownProfile.userId,
                         displayName = ownProfile.displayName.orEmpty(),
                         editDisplayName = ownProfile.editDisplayName,
+                        editTopic = null,
                         avatarUrl = ownProfile.avatarUrl.takeUnless {
                             ownProfile.editAvatarChange == OwnProfileAvatarChange.REMOVE
                         },
@@ -1603,12 +1604,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isSaving = ownProfile.isSaving,
                         canSave = !ownProfile.isSaving && ownProfile.hasUnsavedChanges,
                         canChangeName = true,
+                        canChangeTopic = false,
                         canChangeAvatar = true,
                         errorMessage = ownProfile.errorMessage,
                         backLabel = context.getString(com.zyna.app.R.string.profile_edit_back),
                         saveLabel = context.getString(com.zyna.app.R.string.profile_edit_save),
                         title = context.getString(com.zyna.app.R.string.profile_edit_title),
                         nameLabel = context.getString(com.zyna.app.R.string.profile_edit_name_label),
+                        topicLabel = null,
                         changePhotoLabel = context.getString(
                             com.zyna.app.R.string.profile_edit_change_photo
                         ),
@@ -1634,6 +1637,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions = ProfileEditorScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onDisplayNameChanged = actions.profile.own.onDisplayNameChanged,
+                        onTopicChanged = {},
                         onPickAvatar = actions.profile.own.onPickAvatar,
                         onRemoveAvatar = actions.profile.own.onRemoveAvatar,
                         onSave = actions.profile.own.onSave,
@@ -1665,6 +1669,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         identityId = route.roomId,
                         displayName = routeState.displayName,
                         editDisplayName = routeState.editDisplayName,
+                        editTopic = routeState.editTopic,
                         avatarUrl = routeState.avatarUrl.takeUnless {
                             routeState.editAvatarChange == RoomProfileAvatarChange.REMOVE
                         },
@@ -1676,6 +1681,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         isSaving = routeState.isSaving,
                         canSave = routeState.canSave,
                         canChangeName = routeState.canChangeName,
+                        canChangeTopic = routeState.canChangeTopic,
                         canChangeAvatar = routeState.canChangeAvatar,
                         errorMessage = routeState.error.localizedMessage(context)
                             ?: if (
@@ -1704,6 +1710,9 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                                 com.zyna.app.R.string.room_profile_edit_group_name
                             }
                         ),
+                        topicLabel = context.getString(
+                            com.zyna.app.R.string.room_profile_edit_topic
+                        ),
                         changePhotoLabel = context.getString(
                             com.zyna.app.R.string.profile_edit_change_photo
                         ),
@@ -1731,6 +1740,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onBack = { actions.navigation.onNavigateBack() },
                         onDisplayNameChanged =
                             actions.roomProfileEditor.onDisplayNameChanged,
+                        onTopicChanged = actions.roomProfileEditor.onTopicChanged,
                         onPickAvatar = actions.roomProfileEditor.onPickAvatar,
                         onRemoveAvatar = actions.roomProfileEditor.onRemoveAvatar,
                         onSave = actions.roomProfileEditor.onSave,
@@ -1879,6 +1889,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         canEditRoomProfile = details?.let {
                             it.kind != MatrixRoomKind.DIRECT &&
                                 (it.capabilities.canChangeName == true ||
+                                    it.capabilities.canChangeTopic == true ||
                                     it.capabilities.canChangeAvatar == true)
                         } == true,
                         unreadCount = seed?.unreadCount ?: 0,

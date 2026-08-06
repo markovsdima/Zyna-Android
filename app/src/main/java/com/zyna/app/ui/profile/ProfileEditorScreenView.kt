@@ -28,6 +28,7 @@ internal data class ProfileEditorScreenViewState(
     val identityId: String,
     val displayName: String,
     val editDisplayName: String,
+    val editTopic: String?,
     val avatarUrl: String?,
     val editAvatarLocalPath: String?,
     val hasAvatar: Boolean,
@@ -35,12 +36,14 @@ internal data class ProfileEditorScreenViewState(
     val isSaving: Boolean,
     val canSave: Boolean,
     val canChangeName: Boolean,
+    val canChangeTopic: Boolean,
     val canChangeAvatar: Boolean,
     val errorMessage: String?,
     val backLabel: String,
     val saveLabel: String,
     val title: String,
     val nameLabel: String,
+    val topicLabel: String?,
     val changePhotoLabel: String,
     val removePhotoLabel: String,
     val discardTitle: String,
@@ -55,6 +58,7 @@ internal data class ProfileEditorScreenViewState(
 internal data class ProfileEditorScreenViewActions(
     val onBack: () -> Unit,
     val onDisplayNameChanged: (String) -> Unit,
+    val onTopicChanged: (String) -> Unit,
     val onPickAvatar: (Long) -> Unit,
     val onRemoveAvatar: () -> Unit,
     val onSave: () -> Unit,
@@ -143,6 +147,23 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
     private val nameEdit = EditText(context).apply {
         textSize = 18f
         setSingleLine(true)
+        imeOptions = EditorInfo.IME_ACTION_DONE
+        includeFontPadding = true
+        setSelectAllOnFocus(false)
+        updatePadding(left = dp(14), right = dp(14), top = dp(10), bottom = dp(10))
+    }
+    private val topicLabel = TextView(context).apply {
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        includeFontPadding = true
+        gravity = Gravity.START
+    }
+    private val topicEdit = EditText(context).apply {
+        textSize = 17f
+        setSingleLine(false)
+        minLines = 2
+        maxLines = 4
+        gravity = Gravity.TOP or Gravity.START
         imeOptions = EditorInfo.IME_ACTION_DONE
         includeFontPadding = true
         setSelectAllOnFocus(false)
@@ -252,6 +273,24 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
             }
         )
         content.addView(
+            topicLabel,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(20)
+            }
+        )
+        content.addView(
+            topicEdit,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(6)
+            }
+        )
+        content.addView(
             errorText,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -272,6 +311,15 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 if (!isRendering) {
                     actions?.onDisplayNameChanged(s?.toString().orEmpty())
+                }
+            }
+            override fun afterTextChanged(s: Editable?) = Unit
+        })
+        topicEdit.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (!isRendering) {
+                    actions?.onTopicChanged(s?.toString().orEmpty())
                 }
             }
             override fun afterTextChanged(s: Editable?) = Unit
@@ -319,6 +367,7 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
         saveButton.text = state.saveLabel
         titleText.text = state.title
         nameLabel.text = state.nameLabel
+        topicLabel.text = state.topicLabel.orEmpty()
         changePhotoButton.text = state.changePhotoLabel
         removePhotoButton.text = state.removePhotoLabel
         isRendering = true
@@ -326,7 +375,21 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
             nameEdit.setText(state.editDisplayName)
             nameEdit.setSelection(nameEdit.text?.length ?: 0)
         }
+        val nextTopic = state.editTopic.orEmpty()
+        if (topicEdit.text.toString() != nextTopic) {
+            topicEdit.setText(nextTopic)
+            topicEdit.setSelection(topicEdit.text?.length ?: 0)
+        }
         isRendering = false
+
+        val showsTopic = state.editTopic != null && state.topicLabel != null
+        topicLabel.visibility = if (showsTopic) VISIBLE else GONE
+        topicEdit.visibility = if (showsTopic) VISIBLE else GONE
+        nameEdit.imeOptions = if (showsTopic) {
+            EditorInfo.IME_ACTION_NEXT
+        } else {
+            EditorInfo.IME_ACTION_DONE
+        }
 
         avatarView.render(
             userId = state.identityId,
@@ -418,9 +481,13 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
         changePhotoButton.background = roundedDrawable(palette.selectedFill, dp(13))
         removePhotoButton.setTextColor(0xFFE5484D.toInt())
         nameLabel.setTextColor(palette.secondaryText)
+        topicLabel.setTextColor(palette.secondaryText)
         nameEdit.setTextColor(palette.primaryText)
         nameEdit.setHintTextColor(palette.secondaryText)
         nameEdit.background = roundedDrawable(palette.surface, dp(10))
+        topicEdit.setTextColor(palette.primaryText)
+        topicEdit.setHintTextColor(palette.secondaryText)
+        topicEdit.background = roundedDrawable(palette.surface, dp(10))
         errorText.setTextColor(0xFFE5484D.toInt())
     }
 
@@ -432,6 +499,8 @@ internal class ProfileEditorScreenView(context: Context) : FrameLayout(context) 
         removePhotoButton.alpha = if (!state.isSaving && state.canChangeAvatar) 1f else disabledAlpha
         nameEdit.isEnabled = !state.isSaving && state.canChangeName
         nameEdit.alpha = if (nameEdit.isEnabled) 1f else disabledAlpha
+        topicEdit.isEnabled = !state.isSaving && state.canChangeTopic
+        topicEdit.alpha = if (topicEdit.isEnabled) 1f else disabledAlpha
     }
 
     private fun updateTopBarHeight() {

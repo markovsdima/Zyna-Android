@@ -94,6 +94,7 @@ interface CachedRoomDao {
             ),
             detailsCanInviteMembers = COALESCE(:canInviteMembers, detailsCanInviteMembers),
             detailsCanChangeName = COALESCE(:canChangeName, detailsCanChangeName),
+            detailsCanChangeTopic = COALESCE(:canChangeTopic, detailsCanChangeTopic),
             detailsCanChangeAvatar = COALESCE(:canChangeAvatar, detailsCanChangeAvatar),
             detailsUpdatedAtMillis = :detailsUpdatedAtMillis
         WHERE userId = :userId AND id = :roomId
@@ -113,6 +114,7 @@ interface CachedRoomDao {
         creatorSemantics: String?,
         canInviteMembers: Boolean?,
         canChangeName: Boolean?,
+        canChangeTopic: Boolean?,
         canChangeAvatar: Boolean?,
         detailsUpdatedAtMillis: Long
     ): Int

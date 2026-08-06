@@ -1577,6 +1577,7 @@ class AppViewModel(
         if (
             details.kind == MatrixRoomKind.DIRECT ||
             (details.capabilities.canChangeName != true &&
+                details.capabilities.canChangeTopic != true &&
                 details.capabilities.canChangeAvatar != true)
         ) {
             return
@@ -1592,6 +1593,10 @@ class AppViewModel(
 
     fun setRoomProfileDisplayNameDraft(displayName: String) {
         roomProfileEditorStore.setDisplayNameDraft(displayName)
+    }
+
+    fun setRoomProfileTopicDraft(topic: String) {
+        roomProfileEditorStore.setTopicDraft(topic)
     }
 
     fun setRoomProfileAvatarDraft(

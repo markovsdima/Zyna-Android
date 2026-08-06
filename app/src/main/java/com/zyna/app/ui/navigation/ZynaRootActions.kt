@@ -145,6 +145,7 @@ data class RoomRolesFeatureActions(
 
 data class RoomProfileEditorActions(
     val onDisplayNameChanged: (String) -> Unit,
+    val onTopicChanged: (String) -> Unit,
     val onPickAvatar: (Long) -> Unit,
     val onRemoveAvatar: () -> Unit,
     val onSave: () -> Unit,

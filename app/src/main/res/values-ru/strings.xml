@@ -301,12 +301,13 @@
     <string name="room_profile_edit_space_title">Редактировать пространство</string>
     <string name="room_profile_edit_group_name">Название группы</string>
     <string name="room_profile_edit_space_name">Название пространства</string>
+    <string name="room_profile_edit_topic">Описание (необязательно)</string>
     <string name="room_profile_edit_discard_message">Изменения комнаты не сохранятся.</string>
     <string name="room_profile_edit_avatar_error">Не удалось подготовить выбранное фото.</string>
     <string name="room_profile_edit_name_required">Введите название комнаты.</string>
     <string name="room_profile_edit_permission_changed">У вас больше нет права сохранять эти изменения.</string>
     <string name="room_profile_edit_save_error">Не удалось сохранить изменения. Попробуйте снова.</string>
-    <string name="room_profile_edit_partial_save_error">Название сохранено, но фото — нет. Можно повторить сохранение фото.</string>
+    <string name="room_profile_edit_partial_save_error">Часть изменений сохранена. Повторите, чтобы сохранить остальные.</string>
     <string name="room_profile_room_version">Версия комнаты: %1$s</string>
     <string name="room_permissions_title">Роли и разрешения</string>
     <string name="room_permissions_roles_section">Роли</string>

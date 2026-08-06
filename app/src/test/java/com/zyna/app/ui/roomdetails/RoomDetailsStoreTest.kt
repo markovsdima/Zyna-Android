@@ -201,6 +201,7 @@ class RoomDetailsStoreTest {
             MatrixRoomCapabilities(
                 canInviteMembers = true,
                 canChangeName = false,
+                canChangeTopic = true,
                 canChangeAvatar = true
             )
         }
@@ -236,6 +237,7 @@ class RoomDetailsStoreTest {
                     "Live room",
                     canInviteMembers = true,
                     canChangeName = false,
+                    canChangeTopic = true,
                     canChangeAvatar = true
                 )
             )
@@ -258,7 +260,10 @@ class RoomDetailsStoreTest {
             canChangeName = true
         )
         fixture.capabilitiesBehavior = {
-            MatrixRoomCapabilities(canChangeAvatar = false)
+            MatrixRoomCapabilities(
+                canChangeTopic = true,
+                canChangeAvatar = false
+            )
         }
         try {
             fixture.store.activate(RoomDetailsTarget(USER_ID, ROOM_A), roomSummary(ROOM_A, "A"))
@@ -271,6 +276,7 @@ class RoomDetailsStoreTest {
                 val capabilities = fixture.store.state.value.details?.capabilities
                 capabilities?.canInviteMembers == true &&
                     capabilities.canChangeName == true &&
+                    capabilities.canChangeTopic == true &&
                     capabilities.canChangeAvatar == false
             }
 
@@ -279,6 +285,7 @@ class RoomDetailsStoreTest {
                 MatrixRoomCapabilities(
                     canInviteMembers = true,
                     canChangeName = true,
+                    canChangeTopic = true,
                     canChangeAvatar = false
                 ),
                 fixture.store.state.value.details?.capabilities
@@ -488,6 +495,7 @@ private fun roomDetails(
     displayName: String,
     canInviteMembers: Boolean? = null,
     canChangeName: Boolean? = null,
+    canChangeTopic: Boolean? = null,
     canChangeAvatar: Boolean? = null,
     kind: MatrixRoomKind = MatrixRoomKind.GROUP
 ): MatrixRoomDetails {
@@ -507,6 +515,7 @@ private fun roomDetails(
         capabilities = MatrixRoomCapabilities(
             canInviteMembers = canInviteMembers,
             canChangeName = canChangeName,
+            canChangeTopic = canChangeTopic,
             canChangeAvatar = canChangeAvatar
         )
     )

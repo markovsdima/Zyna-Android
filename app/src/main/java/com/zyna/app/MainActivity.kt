@@ -629,6 +629,7 @@ class MainActivity : AppCompatActivity() {
             ),
             roomProfileEditor = RoomProfileEditorActions(
                 onDisplayNameChanged = appViewModel::setRoomProfileDisplayNameDraft,
+                onTopicChanged = appViewModel::setRoomProfileTopicDraft,
                 onPickAvatar = ::launchRoomProfileAvatarPicker,
                 onRemoveAvatar = ::removeRoomProfileAvatarDraft,
                 onSave = appViewModel::saveRoomProfile,

@@ -235,6 +235,8 @@ private fun MatrixRoomSummary.toCachedRoomEntity(
             ?: existingRoom?.detailsCanInviteMembers,
         detailsCanChangeName = roomDetails?.capabilities?.canChangeName
             ?: existingRoom?.detailsCanChangeName,
+        detailsCanChangeTopic = roomDetails?.capabilities?.canChangeTopic
+            ?: existingRoom?.detailsCanChangeTopic,
         detailsCanChangeAvatar = roomDetails?.capabilities?.canChangeAvatar
             ?: existingRoom?.detailsCanChangeAvatar,
         detailsUpdatedAtMillis = if (roomDetails != null) {
@@ -451,6 +453,7 @@ class LocalCacheRepository(
                         ?.name,
                     canInviteMembers = details.capabilities.canInviteMembers,
                     canChangeName = details.capabilities.canChangeName,
+                    canChangeTopic = details.capabilities.canChangeTopic,
                     canChangeAvatar = details.capabilities.canChangeAvatar,
                     detailsUpdatedAtMillis = now
                 )
@@ -487,6 +490,7 @@ class LocalCacheRepository(
                                     ?.name,
                                 detailsCanInviteMembers = details.capabilities.canInviteMembers,
                                 detailsCanChangeName = details.capabilities.canChangeName,
+                                detailsCanChangeTopic = details.capabilities.canChangeTopic,
                                 detailsCanChangeAvatar = details.capabilities.canChangeAvatar,
                                 detailsUpdatedAtMillis = now
                             )
@@ -2538,6 +2542,7 @@ class LocalCacheRepository(
             capabilities = MatrixRoomCapabilities(
                 canInviteMembers = room.detailsCanInviteMembers,
                 canChangeName = room.detailsCanChangeName,
+                canChangeTopic = room.detailsCanChangeTopic,
                 canChangeAvatar = room.detailsCanChangeAvatar
             )
         )

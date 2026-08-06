@@ -50,6 +50,7 @@ data class MatrixRoomCapabilities(
     /** Null means the capability has not been resolved for the active room. */
     val canInviteMembers: Boolean? = null,
     val canChangeName: Boolean? = null,
+    val canChangeTopic: Boolean? = null,
     val canChangeAvatar: Boolean? = null
 )
 

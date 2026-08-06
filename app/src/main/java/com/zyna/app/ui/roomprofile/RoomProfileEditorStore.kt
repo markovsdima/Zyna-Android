@@ -37,12 +37,15 @@ data class RoomProfileEditorState(
     val target: RoomProfileEditorTarget? = null,
     val kind: MatrixRoomKind = MatrixRoomKind.GROUP,
     val displayName: String = "",
+    val topic: String = "",
     val avatarUrl: String? = null,
     val editDisplayName: String = "",
+    val editTopic: String = "",
     val editAvatarLocalPath: String? = null,
     val editAvatarMimeType: String = DEFAULT_ROOM_AVATAR_MIME_TYPE,
     val editAvatarChange: RoomProfileAvatarChange = RoomProfileAvatarChange.KEEP,
     val canChangeName: Boolean = false,
+    val canChangeTopic: Boolean = false,
     val canChangeAvatar: Boolean = false,
     val editSessionId: Long = 0L,
     val isSaving: Boolean = false,
@@ -58,16 +61,20 @@ data class RoomProfileEditorState(
     val hasNameChange: Boolean
         get() = editDisplayName.trim() != displayName
 
+    val hasTopicChange: Boolean
+        get() = editTopic.trim() != topic
+
     val hasAvatarChange: Boolean
         get() = editAvatarChange != RoomProfileAvatarChange.KEEP
 
     val hasUnsavedChanges: Boolean
-        get() = editSessionId != 0L && (hasNameChange || hasAvatarChange)
+        get() = editSessionId != 0L && (hasNameChange || hasTopicChange || hasAvatarChange)
 
     val canSave: Boolean
         get() {
             if (isSaving || !hasUnsavedChanges) return false
             if (hasNameChange && (!canChangeName || editDisplayName.trim().isEmpty())) return false
+            if (hasTopicChange && !canChangeTopic) return false
             if (hasAvatarChange && !canChangeAvatar) return false
             return true
         }
@@ -76,6 +83,7 @@ data class RoomProfileEditorState(
 internal class RoomProfileEditorDriver(
     val loadCapabilities: suspend (roomId: String) -> MatrixRoomCapabilities,
     val setName: suspend (roomId: String, name: String) -> Unit,
+    val setTopic: suspend (roomId: String, topic: String) -> Unit,
     val uploadAvatar: suspend (roomId: String, localPath: String, mimeType: String) -> Unit,
     val removeAvatar: suspend (roomId: String) -> Unit,
     val deleteDraft: (String?) -> Unit
@@ -84,10 +92,10 @@ internal class RoomProfileEditorDriver(
 /**
  * Owns one route-scoped room profile edit session.
  *
- * Matrix does not provide a transaction spanning room name and avatar state events. Saving is
- * therefore deliberately sequential: after a successful name update that field becomes the new
- * baseline. If the avatar update then fails, only the still-dirty avatar remains retryable and the
- * UI reports a partial save instead of pretending the whole operation rolled back.
+ * Matrix does not provide a transaction spanning room name, topic, and avatar state events. Saving
+ * is therefore deliberately sequential: after each successful update that field becomes the new
+ * baseline. If a later update fails, only the still-dirty fields remain retryable and the UI
+ * reports a partial save instead of pretending the whole operation rolled back.
  */
 internal class RoomProfileEditorStore(
     private val scope: CoroutineScope,
@@ -115,9 +123,12 @@ internal class RoomProfileEditorStore(
             target = normalizedTarget,
             kind = details.kind,
             displayName = details.displayName.trim(),
+            topic = details.topic?.trim().orEmpty(),
             avatarUrl = details.avatarUrl?.takeIf { it.isNotBlank() },
             editDisplayName = details.displayName.trim(),
+            editTopic = details.topic?.trim().orEmpty(),
             canChangeName = details.capabilities.canChangeName == true,
+            canChangeTopic = details.capabilities.canChangeTopic == true,
             canChangeAvatar = details.capabilities.canChangeAvatar == true,
             editSessionId = editSessionCounter
         )
@@ -138,6 +149,16 @@ internal class RoomProfileEditorStore(
         if (current.editSessionId == 0L || current.isSaving || !current.canChangeName) return
         _state.value = current.copy(
             editDisplayName = displayName,
+            error = null
+        )
+    }
+
+    @MainThread
+    fun setTopicDraft(topic: String) {
+        val current = _state.value
+        if (current.editSessionId == 0L || current.isSaving || !current.canChangeTopic) return
+        _state.value = current.copy(
+            editTopic = topic,
             error = null
         )
     }
@@ -232,8 +253,10 @@ internal class RoomProfileEditorStore(
         if (!current.canSave) return
 
         val nameChanged = current.hasNameChange
+        val topicChanged = current.hasTopicChange
         val avatarChange = current.editAvatarChange
         val nextName = current.editDisplayName.trim()
+        val nextTopic = current.editTopic.trim()
         val avatarPath = current.editAvatarLocalPath
         val avatarMimeType = current.editAvatarMimeType
         val requestGeneration = beginSave()
@@ -244,17 +267,20 @@ internal class RoomProfileEditorStore(
         )
 
         val nextJob = scope.launch {
-            var didSaveName = false
+            var didSaveAnyField = false
             try {
                 val capabilities = driver.loadCapabilities(target.roomId)
                 if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
                 val canChangeName = capabilities.canChangeName == true
+                val canChangeTopic = capabilities.canChangeTopic == true
                 val canChangeAvatar = capabilities.canChangeAvatar == true
                 if ((nameChanged && !canChangeName) ||
+                    (topicChanged && !canChangeTopic) ||
                     (avatarChange != RoomProfileAvatarChange.KEEP && !canChangeAvatar)
                 ) {
                     _state.value = _state.value.copy(
                         canChangeName = canChangeName,
+                        canChangeTopic = canChangeTopic,
                         canChangeAvatar = canChangeAvatar,
                         isSaving = false,
                         error = RoomProfileEditorError.PERMISSION_CHANGED
@@ -265,10 +291,20 @@ internal class RoomProfileEditorStore(
                 if (nameChanged) {
                     driver.setName(target.roomId, nextName)
                     if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
-                    didSaveName = true
+                    didSaveAnyField = true
                     _state.value = _state.value.copy(
                         displayName = nextName,
                         editDisplayName = nextName
+                    )
+                }
+
+                if (topicChanged) {
+                    driver.setTopic(target.roomId, nextTopic)
+                    if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
+                    didSaveAnyField = true
+                    _state.value = _state.value.copy(
+                        topic = nextTopic,
+                        editTopic = nextTopic
                     )
                 }
 
@@ -293,7 +329,7 @@ internal class RoomProfileEditorStore(
                 onWarning("Failed to save room profile", error)
                 _state.value = _state.value.copy(
                     isSaving = false,
-                    error = if (didSaveName) {
+                    error = if (didSaveAnyField) {
                         RoomProfileEditorError.PARTIAL_SAVE
                     } else {
                         RoomProfileEditorError.SAVE
@@ -355,6 +391,7 @@ internal fun createRoomProfileEditorStore(
         driver = RoomProfileEditorDriver(
             loadCapabilities = matrixClientService::loadRoomCapabilities,
             setName = matrixClientService::setRoomName,
+            setTopic = matrixClientService::setRoomTopic,
             uploadAvatar = matrixClientService::uploadRoomAvatar,
             removeAvatar = matrixClientService::removeRoomAvatar,
             deleteDraft = { path ->

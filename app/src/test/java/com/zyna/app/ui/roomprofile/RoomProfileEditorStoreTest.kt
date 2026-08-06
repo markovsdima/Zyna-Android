@@ -39,6 +39,7 @@ class RoomProfileEditorStoreTest {
                     capabilities = MatrixRoomCapabilities(
                         canInviteMembers = false,
                         canChangeName = true,
+                        canChangeTopic = true,
                         canChangeAvatar = false
                     )
                 )
@@ -46,7 +47,9 @@ class RoomProfileEditorStoreTest {
 
             val state = fixture.store.state.value
             assertEquals("Original", state.editDisplayName)
+            assertEquals("Original topic", state.editTopic)
             assertTrue(state.canChangeName)
+            assertTrue(state.canChangeTopic)
             assertFalse(state.canChangeAvatar)
             assertFalse(state.hasUnsavedChanges)
         } finally {
@@ -55,18 +58,27 @@ class RoomProfileEditorStoreTest {
     }
 
     @Test
-    fun saveRechecksCapabilitiesAndFinishesAfterBothMutations() = runBlocking {
+    fun saveRechecksCapabilitiesAndFinishesAfterAllMutations() = runBlocking {
         val fixture = RoomProfileEditorFixture(coroutineContext)
         try {
             fixture.beginEditableRoom()
             val sessionId = fixture.store.state.value.editSessionId
             fixture.store.setDisplayNameDraft(" Renamed ")
+            fixture.store.setTopicDraft(" Updated topic ")
             fixture.store.setAvatarDraft(avatarDraft("/draft/new.jpg"), target(ROOM_A), sessionId)
 
             fixture.store.save()
             awaitEditorCondition { fixture.finishedTargets.isNotEmpty() }
 
-            assertEquals(listOf("capabilities", "name:Renamed", "avatar:/draft/new.jpg"), fixture.calls)
+            assertEquals(
+                listOf(
+                    "capabilities",
+                    "name:Renamed",
+                    "topic:Updated topic",
+                    "avatar:/draft/new.jpg"
+                ),
+                fixture.calls
+            )
             assertEquals(listOf(target(ROOM_A)), fixture.finishedTargets)
             assertEquals(RoomProfileEditorState(), fixture.store.state.value)
             assertEquals(listOf("/draft/new.jpg"), fixture.deletedDrafts)
@@ -112,11 +124,93 @@ class RoomProfileEditorStoreTest {
     }
 
     @Test
+    fun avatarFailureAfterTopicSaveDoesNotRepeatTheTopic() = runBlocking {
+        val fixture = RoomProfileEditorFixture(coroutineContext)
+        var avatarAttempts = 0
+        fixture.uploadAvatarBehavior = { _, _, _ ->
+            avatarAttempts += 1
+            if (avatarAttempts == 1) error("upload failed")
+        }
+        try {
+            fixture.beginEditableRoom()
+            val sessionId = fixture.store.state.value.editSessionId
+            fixture.store.setTopicDraft("Updated topic")
+            fixture.store.setAvatarDraft(avatarDraft("/draft/new.jpg"), target(ROOM_A), sessionId)
+
+            fixture.store.save()
+            awaitEditorCondition {
+                fixture.store.state.value.error == RoomProfileEditorError.PARTIAL_SAVE
+            }
+
+            val partiallySaved = fixture.store.state.value
+            assertEquals("Updated topic", partiallySaved.topic)
+            assertFalse(partiallySaved.hasTopicChange)
+            assertTrue(partiallySaved.hasAvatarChange)
+            assertTrue(partiallySaved.canSave)
+
+            fixture.store.save()
+            awaitEditorCondition { fixture.finishedTargets.isNotEmpty() }
+
+            assertEquals(1, fixture.calls.count { it.startsWith("topic:") })
+            assertEquals(2, avatarAttempts)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun clearingTopicWritesAnEmptyStateEvent() = runBlocking {
+        val fixture = RoomProfileEditorFixture(coroutineContext)
+        try {
+            fixture.beginEditableRoom()
+            fixture.store.setTopicDraft("   ")
+
+            assertTrue(fixture.store.state.value.hasTopicChange)
+            assertTrue(fixture.store.state.value.canSave)
+
+            fixture.store.save()
+            awaitEditorCondition { fixture.finishedTargets.isNotEmpty() }
+
+            assertEquals(listOf("capabilities", "topic:"), fixture.calls)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun revokedTopicPermissionStopsBeforeMutation() = runBlocking {
+        val fixture = RoomProfileEditorFixture(coroutineContext)
+        fixture.capabilities = MatrixRoomCapabilities(
+            canInviteMembers = true,
+            canChangeName = true,
+            canChangeTopic = false,
+            canChangeAvatar = true
+        )
+        try {
+            fixture.beginEditableRoom()
+            fixture.store.setTopicDraft("Updated topic")
+
+            fixture.store.save()
+            awaitEditorCondition {
+                fixture.store.state.value.error == RoomProfileEditorError.PERMISSION_CHANGED
+            }
+
+            assertEquals(listOf("capabilities"), fixture.calls)
+            assertFalse(fixture.store.state.value.canChangeTopic)
+            assertTrue(fixture.store.state.value.hasTopicChange)
+            assertFalse(fixture.store.state.value.canSave)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun revokedPermissionStopsBeforeMutationAndUpdatesCapabilityState() = runBlocking {
         val fixture = RoomProfileEditorFixture(coroutineContext)
         fixture.capabilities = MatrixRoomCapabilities(
             canInviteMembers = true,
             canChangeName = false,
+            canChangeTopic = true,
             canChangeAvatar = true
         )
         try {
@@ -221,9 +315,11 @@ private class RoomProfileEditorFixture(parentContext: CoroutineContext) {
     var capabilities = MatrixRoomCapabilities(
         canInviteMembers = true,
         canChangeName = true,
+        canChangeTopic = true,
         canChangeAvatar = true
     )
     var setNameBehavior: suspend (String, String) -> Unit = { _, _ -> }
+    var setTopicBehavior: suspend (String, String) -> Unit = { _, _ -> }
     var uploadAvatarBehavior: suspend (String, String, String) -> Unit = { _, _, _ -> }
     var removeAvatarBehavior: suspend (String) -> Unit = {}
 
@@ -237,6 +333,10 @@ private class RoomProfileEditorFixture(parentContext: CoroutineContext) {
             setName = { roomId, name ->
                 calls += "name:$name"
                 setNameBehavior(roomId, name)
+            },
+            setTopic = { roomId, topic ->
+                calls += "topic:$topic"
+                setTopicBehavior(roomId, topic)
             },
             uploadAvatar = { roomId, path, mimeType ->
                 calls += "avatar:$path"
@@ -279,6 +379,7 @@ private fun details(
     capabilities: MatrixRoomCapabilities = MatrixRoomCapabilities(
         canInviteMembers = true,
         canChangeName = true,
+        canChangeTopic = true,
         canChangeAvatar = true
     )
 ): MatrixRoomDetails {
@@ -288,7 +389,7 @@ private fun details(
         avatarUrl = "mxc://example.org/avatar",
         directUserId = null,
         kind = MatrixRoomKind.GROUP,
-        topic = null,
+        topic = "Original topic",
         joinedMemberCount = 3,
         encryption = MatrixRoomEncryption.ENCRYPTED,
         access = MatrixRoomAccess.PRIVATE,

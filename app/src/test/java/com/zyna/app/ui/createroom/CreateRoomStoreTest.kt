@@ -17,6 +17,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
+import org.matrix.rustcomponents.sdk.ClientException
+import org.matrix.rustcomponents.sdk.ErrorKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -236,6 +238,8 @@ class CreateRoomStoreTest {
             awaitCreateRoomCondition { fixture.childReadinessChecks.isNotEmpty() }
 
             assertEquals(ROOM_ID, fixture.store.state.value.pendingCreatedRoom?.id)
+            assertTrue(fixture.store.state.value.isCreating)
+            assertFalse(fixture.store.state.value.canRetryParentLink)
             assertTrue(fixture.addCalls.isEmpty())
             assertTrue(fixture.createdRooms.isEmpty())
 
@@ -273,6 +277,7 @@ class CreateRoomStoreTest {
             }
 
             assertEquals(ROOM_ID, fixture.store.state.value.pendingCreatedRoom?.id)
+            assertTrue(fixture.store.state.value.canRetryParentLink)
             assertEquals(1, fixture.creationRequests.size)
             assertTrue(fixture.addCalls.isEmpty())
 
@@ -413,7 +418,7 @@ class CreateRoomStoreTest {
     }
 
     @Test
-    fun parentTargetDefaultsToRestrictedAccess() = runBlocking {
+    fun childChatDefaultsToRestrictedAccessLinksToParentAndFinishes() = runBlocking {
         val fixture = CreateRoomFixture(coroutineContext)
         val childTarget = CreateRoomTarget(
             userId = USER_ID,
@@ -424,15 +429,63 @@ class CreateRoomStoreTest {
             fixture.store.setName("Android")
 
             assertEquals(CreateRoomAccess.PARENT_MEMBERS, fixture.store.state.value.access)
+            assertTrue(fixture.store.state.value.target?.isChildChat == true)
             assertTrue(fixture.store.state.value.canCreate)
 
             fixture.store.create()
             awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
 
+            val request = fixture.creationRequests.single()
+            assertEquals(MatrixRoomCreationKind.ROOM, request.kind)
             assertEquals(
                 MatrixRoomCreationAccess.Restricted(PARENT_SPACE_ID),
-                fixture.creationRequests.single().access
+                request.access
             )
+            assertEquals(
+                listOf(PARENT_SPACE_ID, PARENT_SPACE_ID),
+                fixture.parentPermissionChecks
+            )
+            assertEquals(listOf(ROOM_ID), fixture.childReadinessChecks)
+            assertEquals(listOf(PARENT_SPACE_ID to ROOM_ID), fixture.addCalls)
+            assertEquals(listOf(childTarget to ROOM_ID), fixture.confirmedChildren)
+            assertEquals(childTarget, fixture.createdRooms.single().first)
+            assertEquals(CreateRoomAccess.PARENT_MEMBERS, fixture.createdAccesses.single())
+            assertEquals(CreateRoomState(), fixture.store.state.value)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun unsupportedRestrictedRoomVersionSuggestsAnotherAccessOption() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        fixture.createBehavior = {
+            throw ClientException.MatrixApi(
+                ErrorKind.UnsupportedRoomVersion,
+                "M_UNSUPPORTED_ROOM_VERSION",
+                "Unsupported room version",
+                null
+            )
+        }
+        try {
+            fixture.store.begin(
+                CreateRoomTarget(
+                    userId = USER_ID,
+                    parent = CreateRoomParent(PARENT_SPACE_ID, "Product")
+                )
+            )
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.error ==
+                    CreateRoomError.RESTRICTED_ACCESS_UNSUPPORTED
+            }
+
+            assertNull(fixture.store.state.value.pendingCreatedRoom)
+            assertTrue(fixture.store.state.value.canCreate)
+            assertTrue(fixture.addCalls.isEmpty())
+            assertTrue(fixture.createdRooms.isEmpty())
         } finally {
             fixture.close()
         }
@@ -764,6 +817,7 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
     val deletedDrafts = mutableListOf<String>()
     val creationRequests = mutableListOf<MatrixRoomCreationRequest>()
     val createdRooms = mutableListOf<Pair<CreateRoomTarget, MatrixRoomSummary>>()
+    val createdAccesses = mutableListOf<CreateRoomAccess>()
     val cancelledTargets = mutableListOf<CreateRoomTarget>()
     val warnings = mutableListOf<Throwable>()
     val parentPermissionChecks = mutableListOf<String>()
@@ -827,7 +881,10 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
             },
             deleteDraft = { path -> path?.let(deletedDrafts::add) }
         ),
-        onCreated = { target, createdRoom -> createdRooms += target to createdRoom },
+        onCreated = { target, createdRoom, access ->
+            createdRooms += target to createdRoom
+            createdAccesses += access
+        },
         onCancelled = cancelledTargets::add,
         onWarning = { _, error -> warnings += error },
         aliasCheckDebounceMillis = 0

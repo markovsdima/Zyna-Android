@@ -23,9 +23,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import org.matrix.rustcomponents.sdk.ClientException
+import org.matrix.rustcomponents.sdk.ErrorKind
 
 enum class CreateRoomMode {
     GROUP,
+    STORYLINE,
+    TRACK
+}
+
+enum class CreateRoomPresentation {
+    GROUP,
+    CHILD_CHAT,
     STORYLINE,
     TRACK
 }
@@ -40,6 +49,17 @@ data class CreateRoomTarget(
     val mode: CreateRoomMode = CreateRoomMode.GROUP,
     val parent: CreateRoomParent? = null
 ) {
+    val isChildChat: Boolean
+        get() = mode == CreateRoomMode.GROUP && parent != null
+
+    val presentation: CreateRoomPresentation
+        get() = when {
+            isChildChat -> CreateRoomPresentation.CHILD_CHAT
+            mode == CreateRoomMode.GROUP -> CreateRoomPresentation.GROUP
+            mode == CreateRoomMode.STORYLINE -> CreateRoomPresentation.STORYLINE
+            else -> CreateRoomPresentation.TRACK
+        }
+
     val serverName: String?
         get() = userId.substringAfter(':', missingDelimiterValue = "")
             .takeIf { it.isNotBlank() }
@@ -77,6 +97,7 @@ enum class CreateRoomError {
     ADDRESS_CHECK,
     PARENT_PERMISSION_CHECK,
     PERMISSION_CHANGED,
+    RESTRICTED_ACCESS_UNSUPPORTED,
     CREATE,
     ADD_TO_PARENT
 }
@@ -140,6 +161,9 @@ data class CreateRoomState(
                                 )
                         )
                 )
+
+    val canRetryParentLink: Boolean
+        get() = pendingCreatedRoom != null && !isCreating
 }
 
 internal class CreateRoomDriver(
@@ -183,7 +207,11 @@ internal class CreateRoomDriver(
 internal class CreateRoomStore(
     private val scope: CoroutineScope,
     private val driver: CreateRoomDriver,
-    private val onCreated: (target: CreateRoomTarget, room: MatrixRoomSummary) -> Unit,
+    private val onCreated: (
+        target: CreateRoomTarget,
+        room: MatrixRoomSummary,
+        access: CreateRoomAccess
+    ) -> Unit,
     private val onCancelled: (target: CreateRoomTarget) -> Unit,
     private val onWarning: (String, Throwable) -> Unit = { _, _ -> },
     private val aliasCheckDebounceMillis: Long = ALIAS_CHECK_DEBOUNCE_MILLIS
@@ -494,7 +522,7 @@ internal class CreateRoomStore(
 
                 driver.deleteDraft(avatarPath)
                 _state.value = CreateRoomState()
-                onCreated(target, createdRoom)
+                onCreated(target, createdRoom, current.access)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
@@ -512,7 +540,14 @@ internal class CreateRoomStore(
                         CreateRoomStage.CHECK_PARENT_PERMISSION ->
                             CreateRoomError.PARENT_PERMISSION_CHECK
                         CreateRoomStage.UPLOAD_AVATAR -> CreateRoomError.AVATAR_UPLOAD
-                        CreateRoomStage.CREATE_ROOM -> CreateRoomError.CREATE
+                        CreateRoomStage.CREATE_ROOM -> if (
+                            current.access == CreateRoomAccess.PARENT_MEMBERS &&
+                            error.isUnsupportedRoomVersion()
+                        ) {
+                            CreateRoomError.RESTRICTED_ACCESS_UNSUPPORTED
+                        } else {
+                            CreateRoomError.CREATE
+                        }
                         CreateRoomStage.WAIT_FOR_CHILD_ROOM -> CreateRoomError.ADD_TO_PARENT
                         CreateRoomStage.ADD_TO_PARENT -> CreateRoomError.ADD_TO_PARENT
                     }
@@ -695,7 +730,11 @@ internal fun createCreateRoomStore(
     matrixSpaceService: MatrixSpaceService,
     localCacheRepository: LocalCacheRepository,
     spaceChildrenStore: SpaceChildrenStore,
-    onCreated: (target: CreateRoomTarget, room: MatrixRoomSummary) -> Unit,
+    onCreated: (
+        target: CreateRoomTarget,
+        room: MatrixRoomSummary,
+        access: CreateRoomAccess
+    ) -> Unit,
     onCancelled: (target: CreateRoomTarget) -> Unit,
     onWarning: (String, Throwable) -> Unit
 ): CreateRoomStore {
@@ -778,6 +817,11 @@ private fun CreateRoomPostingPermission.toMatrixPermission(): MatrixRoomPostingP
         CreateRoomPostingPermission.MODERATORS_ONLY ->
             MatrixRoomPostingPermission.MODERATORS_ONLY
     }
+}
+
+private fun Throwable.isUnsupportedRoomVersion(): Boolean {
+    val kind = (this as? ClientException.MatrixApi)?.kind ?: return false
+    return kind is ErrorKind.IncompatibleRoomVersion || kind == ErrorKind.UnsupportedRoomVersion
 }
 
 private enum class CreateRoomStage {

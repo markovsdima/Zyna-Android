@@ -82,7 +82,7 @@ class MatrixRoomCreationTest {
     }
 
     @Test
-    fun parentMembersAccessUsesRestrictedJoinRule() {
+    fun parentMembersAccessUsesRestrictedJoinRuleAndSharedUnencryptedHistory() {
         val parameters = request(
             access = MatrixRoomCreationAccess.Restricted(PARENT_SPACE_ID)
         ).toCreateRoomParameters()
@@ -94,8 +94,8 @@ class MatrixRoomCreationTest {
         )
         assertEquals(RoomVisibility.Private, parameters.visibility)
         assertEquals(RoomPreset.PRIVATE_CHAT, parameters.preset)
-        assertEquals(RoomHistoryVisibility.Invited, parameters.historyVisibilityOverride)
-        assertTrue(parameters.isEncrypted)
+        assertEquals(RoomHistoryVisibility.Shared, parameters.historyVisibilityOverride)
+        assertFalse(parameters.isEncrypted)
     }
 
     @Test

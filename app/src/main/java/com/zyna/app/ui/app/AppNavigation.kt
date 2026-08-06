@@ -89,7 +89,8 @@ sealed interface AppRoute {
     data class InviteCreatedRoomMembers(
         val roomId: String,
         val displayName: String,
-        val avatarUrl: String?
+        val avatarUrl: String?,
+        val preserveSpaceContext: Boolean = false
     ) : AppRoute
     data class Space(
         val spaceId: String,
@@ -222,6 +223,12 @@ data class AppNavState(
             if (topRoute == AppRoute.CreateRoom) {
                 return spaceRoute
             }
+            if (
+                topRoute is AppRoute.InviteCreatedRoomMembers &&
+                topRoute.preserveSpaceContext
+            ) {
+                return spaceRoute
+            }
             if (topRoute is AppRoute.Chat) {
                 return spaceRoute
             }
@@ -348,6 +355,11 @@ data class AppNavState(
         }
         val baseStack = when (val topRoute = chatsStack.lastOrNull()) {
             is AppRoute.Space -> chatsStack
+            AppRoute.CreateRoom -> chatsStack.dropLast(1)
+            is AppRoute.InviteCreatedRoomMembers -> {
+                if (!topRoute.preserveSpaceContext || topRoute.roomId != roomId) return this
+                chatsStack.dropLast(1)
+            }
             is AppRoute.SpaceJoinPreview -> {
                 val parent = chatsStack.getOrNull(chatsStack.lastIndex - 1) as? AppRoute.Space
                     ?: return this
@@ -358,6 +370,7 @@ data class AppNavState(
             }
             else -> return this
         }
+        if (baseStack.lastOrNull() !is AppRoute.Space) return this
         return copy(
             chatsStack = baseStack + AppRoute.Chat(
                 roomId = roomId,
@@ -476,7 +489,8 @@ data class AppNavState(
     fun openCreatedRoomInvites(
         roomId: String,
         displayName: String,
-        avatarUrl: String?
+        avatarUrl: String?,
+        preserveSpaceContext: Boolean = false
     ): AppNavState {
         if (
             mode != AppNavMode.Main ||
@@ -486,11 +500,18 @@ data class AppNavState(
         ) {
             return this
         }
+        if (
+            preserveSpaceContext &&
+            chatsStack.getOrNull(chatsStack.lastIndex - 1) !is AppRoute.Space
+        ) {
+            return this
+        }
         return copy(
             chatsStack = chatsStack.dropLast(1) + AppRoute.InviteCreatedRoomMembers(
                 roomId = roomId,
                 displayName = displayName,
-                avatarUrl = avatarUrl
+                avatarUrl = avatarUrl,
+                preserveSpaceContext = preserveSpaceContext
             )
         )
     }

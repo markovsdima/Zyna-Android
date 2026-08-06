@@ -249,8 +249,9 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
     fun render(state: CreateRoomScreenViewState, actions: CreateRoomScreenViewActions) {
         this.actions = actions
         val creation = state.creation
-        val mode = creation.target?.mode ?: CreateRoomMode.GROUP
-        val isSpace = mode != CreateRoomMode.GROUP
+        val presentation = creation.target?.presentation ?: CreateRoomPresentation.GROUP
+        val isSpace = presentation == CreateRoomPresentation.STORYLINE ||
+            presentation == CreateRoomPresentation.TRACK
         val parentName = creation.target?.parent?.displayName
             ?.takeIf(String::isNotBlank)
             ?: context.getString(R.string.space_storyline)
@@ -258,72 +259,104 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         scrollView.updatePadding(bottom = bottomContentPaddingPx + dp(24))
 
         titleText.setText(
-            when (mode) {
-                CreateRoomMode.GROUP -> R.string.create_group_title
-                CreateRoomMode.STORYLINE -> R.string.create_storyline_title
-                CreateRoomMode.TRACK -> R.string.create_track_title
+            when (presentation) {
+                CreateRoomPresentation.GROUP -> R.string.create_group_title
+                CreateRoomPresentation.CHILD_CHAT -> R.string.create_child_chat_title
+                CreateRoomPresentation.STORYLINE -> R.string.create_storyline_title
+                CreateRoomPresentation.TRACK -> R.string.create_track_title
             }
         )
         createButton.setText(
-            if (creation.pendingCreatedRoom != null) R.string.common_retry
+            if (creation.canRetryParentLink) R.string.common_retry
+            else if (presentation == CreateRoomPresentation.CHILD_CHAT) {
+                R.string.create_child_chat_create
+            }
             else R.string.create_group_create
         )
         nameLabel.setText(
-            when (mode) {
-                CreateRoomMode.GROUP -> R.string.create_group_name
-                CreateRoomMode.STORYLINE -> R.string.create_storyline_name
-                CreateRoomMode.TRACK -> R.string.create_track_name
+            when (presentation) {
+                CreateRoomPresentation.GROUP -> R.string.create_group_name
+                CreateRoomPresentation.CHILD_CHAT -> R.string.create_child_chat_name
+                CreateRoomPresentation.STORYLINE -> R.string.create_storyline_name
+                CreateRoomPresentation.TRACK -> R.string.create_track_name
             }
         )
         topicLabel.setText(
-            when (mode) {
-                CreateRoomMode.GROUP -> R.string.create_group_topic
-                CreateRoomMode.STORYLINE -> R.string.create_storyline_topic
-                CreateRoomMode.TRACK -> R.string.create_track_topic
+            when (presentation) {
+                CreateRoomPresentation.GROUP -> R.string.create_group_topic
+                CreateRoomPresentation.CHILD_CHAT -> R.string.create_child_chat_topic
+                CreateRoomPresentation.STORYLINE -> R.string.create_storyline_topic
+                CreateRoomPresentation.TRACK -> R.string.create_track_topic
             }
         )
         addressLabel.setText(
-            when (mode) {
-                CreateRoomMode.GROUP -> R.string.create_group_address
-                CreateRoomMode.STORYLINE -> R.string.create_storyline_address
-                CreateRoomMode.TRACK -> R.string.create_track_address
+            when (presentation) {
+                CreateRoomPresentation.GROUP -> R.string.create_group_address
+                CreateRoomPresentation.CHILD_CHAT -> R.string.create_child_chat_address
+                CreateRoomPresentation.STORYLINE -> R.string.create_storyline_address
+                CreateRoomPresentation.TRACK -> R.string.create_track_address
             }
         )
         privateAccess.setContent(
             context.getString(
-                when (mode) {
-                    CreateRoomMode.GROUP -> R.string.create_group_access_private
-                    CreateRoomMode.STORYLINE -> R.string.create_storyline_access_private
-                    CreateRoomMode.TRACK -> R.string.create_track_access_private
+                when (presentation) {
+                    CreateRoomPresentation.GROUP -> R.string.create_group_access_private
+                    CreateRoomPresentation.CHILD_CHAT ->
+                        R.string.create_child_chat_access_private
+                    CreateRoomPresentation.STORYLINE ->
+                        R.string.create_storyline_access_private
+                    CreateRoomPresentation.TRACK -> R.string.create_track_access_private
                 }
             ),
             context.getString(
-                when (mode) {
-                    CreateRoomMode.GROUP -> R.string.create_group_access_private_description
-                    CreateRoomMode.STORYLINE ->
+                when (presentation) {
+                    CreateRoomPresentation.GROUP ->
+                        R.string.create_group_access_private_description
+                    CreateRoomPresentation.CHILD_CHAT ->
+                        R.string.create_child_chat_access_private_description
+                    CreateRoomPresentation.STORYLINE ->
                         R.string.create_storyline_access_private_description
-                    CreateRoomMode.TRACK -> R.string.create_track_access_private_description
+                    CreateRoomPresentation.TRACK ->
+                        R.string.create_track_access_private_description
                 }
             )
         )
         parentAccess.setContent(
-            context.getString(R.string.create_track_access_parent),
-            context.getString(R.string.create_track_access_parent_description, parentName)
+            if (presentation == CreateRoomPresentation.CHILD_CHAT) {
+                context.getString(R.string.create_child_chat_access_parent, parentName)
+            } else {
+                context.getString(R.string.create_track_access_parent)
+            },
+            context.getString(
+                if (presentation == CreateRoomPresentation.CHILD_CHAT) {
+                    R.string.create_child_chat_access_parent_description
+                } else {
+                    R.string.create_track_access_parent_description
+                },
+                parentName
+            )
         )
         publicAccess.setContent(
             context.getString(
-                when (mode) {
-                    CreateRoomMode.GROUP -> R.string.create_group_access_public
-                    CreateRoomMode.STORYLINE -> R.string.create_storyline_access_public
-                    CreateRoomMode.TRACK -> R.string.create_track_access_public
+                when (presentation) {
+                    CreateRoomPresentation.GROUP -> R.string.create_group_access_public
+                    CreateRoomPresentation.CHILD_CHAT ->
+                        R.string.create_child_chat_access_public
+                    CreateRoomPresentation.STORYLINE ->
+                        R.string.create_storyline_access_public
+                    CreateRoomPresentation.TRACK -> R.string.create_track_access_public
                 }
             ),
             context.getString(
-                when (mode) {
-                    CreateRoomMode.GROUP -> R.string.create_group_access_public_description
-                    CreateRoomMode.STORYLINE ->
+                when (presentation) {
+                    CreateRoomPresentation.GROUP ->
+                        R.string.create_group_access_public_description
+                    CreateRoomPresentation.CHILD_CHAT ->
+                        R.string.create_child_chat_access_public_description
+                    CreateRoomPresentation.STORYLINE ->
                         R.string.create_storyline_access_public_description
-                    CreateRoomMode.TRACK -> R.string.create_track_access_public_description
+                    CreateRoomPresentation.TRACK ->
+                        R.string.create_track_access_public_description
                 }
             )
         )
@@ -358,15 +391,15 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
 
         addressContainer.visibility = if (creation.access == CreateRoomAccess.PUBLIC) VISIBLE else GONE
         renderAddressStatus(creation.aliasAvailability)
-        encryptionNote.text = when (mode) {
-            CreateRoomMode.STORYLINE -> context.getString(
+        encryptionNote.text = when (presentation) {
+            CreateRoomPresentation.STORYLINE -> context.getString(
                 if (creation.access == CreateRoomAccess.PRIVATE) {
                     R.string.create_storyline_private_note
                 } else {
                     R.string.create_storyline_public_note
                 }
             )
-            CreateRoomMode.TRACK -> context.getString(
+            CreateRoomPresentation.TRACK -> context.getString(
                 when (creation.access) {
                     CreateRoomAccess.PRIVATE -> R.string.create_track_private_note
                     CreateRoomAccess.PARENT_MEMBERS -> R.string.create_track_parent_note
@@ -374,13 +407,22 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
                 },
                 parentName
             )
-            CreateRoomMode.GROUP -> context.getString(
-                if (creation.access == CreateRoomAccess.PRIVATE) {
-                    R.string.create_group_encryption_private_note
-                } else {
-                    R.string.create_group_encryption_public_note
-                }
-            )
+            CreateRoomPresentation.CHILD_CHAT -> when (creation.access) {
+                CreateRoomAccess.PRIVATE ->
+                    context.getString(R.string.create_child_chat_private_note)
+                CreateRoomAccess.PARENT_MEMBERS ->
+                    context.getString(R.string.create_child_chat_parent_note, parentName)
+                CreateRoomAccess.PUBLIC ->
+                    context.getString(R.string.create_child_chat_public_note)
+            }
+            CreateRoomPresentation.GROUP -> when (creation.access) {
+                CreateRoomAccess.PRIVATE ->
+                    context.getString(R.string.create_group_encryption_private_note)
+                CreateRoomAccess.PUBLIC ->
+                    context.getString(R.string.create_group_encryption_public_note)
+                CreateRoomAccess.PARENT_MEMBERS ->
+                    context.getString(R.string.create_group_encryption_private_note)
+            }
         }
 
         val isCreating = creation.isCreating
@@ -476,32 +518,59 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
     ) {
         if (discardDialog?.isShowing == true) return
         var handled = false
+        val presentation = creation.target?.presentation ?: CreateRoomPresentation.GROUP
+        val isChildChat = presentation == CreateRoomPresentation.CHILD_CHAT
         discardDialog = AlertDialog.Builder(context)
             .setTitle(
                 when {
                     creation.pendingCreatedRoom != null ->
-                        R.string.create_track_link_discard_title
-                    creation.target?.mode == CreateRoomMode.STORYLINE ->
+                        if (isChildChat) {
+                            R.string.create_child_chat_link_discard_title
+                        } else {
+                            R.string.create_track_link_discard_title
+                        }
+                    isChildChat ->
+                        R.string.create_child_chat_discard_title
+                    presentation == CreateRoomPresentation.STORYLINE ->
                         R.string.create_storyline_discard_title
-                    creation.target?.mode == CreateRoomMode.TRACK ->
+                    presentation == CreateRoomPresentation.TRACK ->
                         R.string.create_track_discard_title
                     else -> R.string.create_group_discard_title
                 }
             )
             .setMessage(
-                when {
-                    creation.pendingCreatedRoom != null ->
-                        R.string.create_track_link_discard_message
-                    creation.target?.mode == CreateRoomMode.STORYLINE ->
-                        R.string.create_storyline_discard_message
-                    creation.target?.mode == CreateRoomMode.TRACK ->
-                        R.string.create_track_discard_message
-                    else -> R.string.create_group_discard_message
+                if (
+                    creation.pendingCreatedRoom != null &&
+                    isChildChat
+                ) {
+                    context.getString(
+                        R.string.create_child_chat_link_discard_message,
+                        creation.target?.parent?.displayName?.takeIf(String::isNotBlank)
+                            ?: context.getString(R.string.space_storyline)
+                    )
+                } else {
+                    context.getString(
+                        when {
+                            creation.pendingCreatedRoom != null ->
+                                R.string.create_track_link_discard_message
+                            isChildChat ->
+                                R.string.create_child_chat_discard_message
+                            presentation == CreateRoomPresentation.STORYLINE ->
+                                R.string.create_storyline_discard_message
+                            presentation == CreateRoomPresentation.TRACK ->
+                                R.string.create_track_discard_message
+                            else -> R.string.create_group_discard_message
+                        }
+                    )
                 }
             )
             .setNegativeButton(
                 if (creation.pendingCreatedRoom != null) {
-                    R.string.create_track_link_keep_trying
+                    if (isChildChat) {
+                        R.string.create_child_chat_link_keep_trying
+                    } else {
+                        R.string.create_track_link_keep_trying
+                    }
                 } else {
                     R.string.profile_edit_keep_editing
                 }
@@ -511,7 +580,11 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
             }
             .setPositiveButton(
                 if (creation.pendingCreatedRoom != null) {
-                    R.string.create_track_link_close
+                    if (isChildChat) {
+                        R.string.create_child_chat_link_close
+                    } else {
+                        R.string.create_track_link_close
+                    }
                 } else {
                     R.string.profile_edit_discard
                 }

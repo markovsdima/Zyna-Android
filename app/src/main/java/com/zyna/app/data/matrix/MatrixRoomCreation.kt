@@ -39,9 +39,11 @@ data class MatrixRoomCreationRequest(
 /**
  * Maps the product-level creation contract to Matrix room creation parameters.
  *
- * Public rooms are intentionally unencrypted: publishing an encrypted room would advertise a
- * history that newly joined users cannot decrypt. Private rooms are invite-only and encrypted.
- * Spaces never carry timeline messages and use a high default event power level instead of E2EE.
+ * Public and parent-restricted rooms are intentionally unencrypted. Anyone who satisfies their
+ * advertised access rule can join without a separate invitation, so E2EE would promise privacy
+ * without providing readable shared history to those future members. Private rooms require an
+ * explicit invitation and remain encrypted. Spaces never carry timeline messages and use a high
+ * default event power level instead of E2EE.
  */
 internal fun MatrixRoomCreationRequest.toCreateRoomParameters(): CreateRoomParameters {
     val normalizedName = name.trim()
@@ -62,10 +64,11 @@ internal fun MatrixRoomCreationRequest.toCreateRoomParameters(): CreateRoomParam
             MatrixRoomCreationAccess.Restricted(parentSpaceId)
         }
     }
+    val isRestricted = normalizedAccess is MatrixRoomCreationAccess.Restricted
     return CreateRoomParameters(
         name = normalizedName,
         topic = topic?.trim()?.takeIf { it.isNotEmpty() },
-        isEncrypted = !isSpace && !isPublic,
+        isEncrypted = !isSpace && !isPublic && !isRestricted,
         isDirect = false,
         visibility = if (isPublic) RoomVisibility.Public else RoomVisibility.Private,
         preset = if (isPublic) RoomPreset.PUBLIC_CHAT else RoomPreset.PRIVATE_CHAT,
@@ -83,7 +86,11 @@ internal fun MatrixRoomCreationRequest.toCreateRoomParameters(): CreateRoomParam
                 rules = listOf(AllowRule.RoomMembership(normalizedAccess.parentSpaceId))
             )
         },
-        historyVisibilityOverride = if (isPublic) null else RoomHistoryVisibility.Invited,
+        historyVisibilityOverride = when {
+            isPublic -> null
+            isRestricted -> RoomHistoryVisibility.Shared
+            else -> RoomHistoryVisibility.Invited
+        },
         canonicalAlias = normalizedAlias,
         isSpace = isSpace
     )

@@ -45,7 +45,7 @@ import com.zyna.app.ui.contacts.ContactsScreenView
 import com.zyna.app.ui.contacts.ContactsScreenViewActions
 import com.zyna.app.ui.contacts.ContactsScreenViewState
 import com.zyna.app.ui.createroom.CreateRoomError
-import com.zyna.app.ui.createroom.CreateRoomMode
+import com.zyna.app.ui.createroom.CreateRoomPresentation
 import com.zyna.app.ui.createroom.CreateRoomScreenView
 import com.zyna.app.ui.createroom.CreateRoomScreenViewActions
 import com.zyna.app.ui.createroom.CreateRoomScreenViewState
@@ -155,37 +155,66 @@ private fun CreateRoomError?.localizedMessage(
     context: Context,
     target: CreateRoomTarget?
 ): String? {
-    val mode = target?.mode ?: CreateRoomMode.GROUP
+    val presentation = target?.presentation ?: CreateRoomPresentation.GROUP
     val stringId = when (this) {
         null -> return null
-        CreateRoomError.AVATAR_PREPARATION -> when (mode) {
-            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_avatar_error
-            CreateRoomMode.STORYLINE -> com.zyna.app.R.string.create_storyline_avatar_error
-            CreateRoomMode.TRACK -> com.zyna.app.R.string.create_track_avatar_error
+        CreateRoomError.AVATAR_PREPARATION -> when (presentation) {
+            CreateRoomPresentation.GROUP -> com.zyna.app.R.string.create_group_avatar_error
+            CreateRoomPresentation.CHILD_CHAT ->
+                com.zyna.app.R.string.create_child_chat_avatar_error
+            CreateRoomPresentation.STORYLINE ->
+                com.zyna.app.R.string.create_storyline_avatar_error
+            CreateRoomPresentation.TRACK -> com.zyna.app.R.string.create_track_avatar_error
         }
-        CreateRoomError.AVATAR_UPLOAD -> when (mode) {
-            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_avatar_upload_error
-            CreateRoomMode.STORYLINE ->
+        CreateRoomError.AVATAR_UPLOAD -> when (presentation) {
+            CreateRoomPresentation.GROUP ->
+                com.zyna.app.R.string.create_group_avatar_upload_error
+            CreateRoomPresentation.CHILD_CHAT ->
+                com.zyna.app.R.string.create_child_chat_avatar_upload_error
+            CreateRoomPresentation.STORYLINE ->
                 com.zyna.app.R.string.create_storyline_avatar_upload_error
-            CreateRoomMode.TRACK -> com.zyna.app.R.string.create_track_avatar_upload_error
+            CreateRoomPresentation.TRACK ->
+                com.zyna.app.R.string.create_track_avatar_upload_error
         }
-        CreateRoomError.ADDRESS_CHECK -> when (mode) {
-            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_address_check_create_error
-            CreateRoomMode.STORYLINE ->
+        CreateRoomError.ADDRESS_CHECK -> when (presentation) {
+            CreateRoomPresentation.GROUP ->
+                com.zyna.app.R.string.create_group_address_check_create_error
+            CreateRoomPresentation.CHILD_CHAT ->
+                com.zyna.app.R.string.create_child_chat_address_check_create_error
+            CreateRoomPresentation.STORYLINE ->
                 com.zyna.app.R.string.create_storyline_address_check_create_error
-            CreateRoomMode.TRACK ->
+            CreateRoomPresentation.TRACK ->
                 com.zyna.app.R.string.create_track_address_check_create_error
         }
-        CreateRoomError.PARENT_PERMISSION_CHECK ->
+        CreateRoomError.PARENT_PERMISSION_CHECK -> if (
+            presentation == CreateRoomPresentation.CHILD_CHAT
+        ) {
+            com.zyna.app.R.string.create_child_chat_permission_check_error
+        } else {
             com.zyna.app.R.string.create_track_permission_check_error
-        CreateRoomError.PERMISSION_CHANGED ->
-            com.zyna.app.R.string.create_track_permission_changed
-        CreateRoomError.CREATE -> when (mode) {
-            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_error
-            CreateRoomMode.STORYLINE -> com.zyna.app.R.string.create_storyline_error
-            CreateRoomMode.TRACK -> com.zyna.app.R.string.create_track_error
         }
-        CreateRoomError.ADD_TO_PARENT -> com.zyna.app.R.string.create_track_add_error
+        CreateRoomError.PERMISSION_CHANGED -> if (
+            presentation == CreateRoomPresentation.CHILD_CHAT
+        ) {
+            com.zyna.app.R.string.create_child_chat_permission_changed
+        } else {
+            com.zyna.app.R.string.create_track_permission_changed
+        }
+        CreateRoomError.RESTRICTED_ACCESS_UNSUPPORTED ->
+            com.zyna.app.R.string.create_parent_access_unsupported
+        CreateRoomError.CREATE -> when (presentation) {
+            CreateRoomPresentation.GROUP -> com.zyna.app.R.string.create_group_error
+            CreateRoomPresentation.CHILD_CHAT -> com.zyna.app.R.string.create_child_chat_error
+            CreateRoomPresentation.STORYLINE -> com.zyna.app.R.string.create_storyline_error
+            CreateRoomPresentation.TRACK -> com.zyna.app.R.string.create_track_error
+        }
+        CreateRoomError.ADD_TO_PARENT -> if (
+            presentation == CreateRoomPresentation.CHILD_CHAT
+        ) {
+            com.zyna.app.R.string.create_child_chat_add_error
+        } else {
+            com.zyna.app.R.string.create_track_add_error
+        }
     }
     return if (
         this == CreateRoomError.PERMISSION_CHANGED ||
@@ -1371,6 +1400,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions = SpaceScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onOpenDetails = actions.spaces.onOpenDetails,
+                        onCreateChat = actions.spaces.onCreateChat,
                         onCreateTrack = actions.spaces.onCreateTrack,
                         onAddRooms = actions.spaces.onOpenAddRooms,
                         onOpenRoom = actions.spaces.onOpenRoom,

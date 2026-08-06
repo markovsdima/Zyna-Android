@@ -55,6 +55,7 @@ data class SpaceScreenViewState(
 data class SpaceScreenViewActions(
     val onBack: () -> Unit,
     val onOpenDetails: () -> Unit,
+    val onCreateChat: () -> Unit,
     val onCreateTrack: () -> Unit,
     val onAddRooms: () -> Unit,
     val onOpenRoom: (MatrixSpaceRoom) -> Unit,
@@ -505,6 +506,7 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         backButton.alpha = if (management.isRemoving) 0.45f else 1f
         overflowButton.setOnClickListener {
             showOverflowMenu(
+                canCreateChat = management.canManage,
                 canCreateTrack = management.canManage &&
                     state.presentationKind == SpacePresentationKind.STORYLINE,
                 canAddChats = management.canManage,
@@ -649,6 +651,7 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     }
 
     private fun showOverflowMenu(
+        canCreateChat: Boolean,
         canCreateTrack: Boolean,
         canAddChats: Boolean,
         canManageChats: Boolean,
@@ -656,18 +659,22 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
     ) {
         PopupMenu(context, overflowButton, Gravity.END).apply {
             menu.add(0, MENU_DETAILS, 0, R.string.space_details)
+            if (canCreateChat) {
+                menu.add(0, MENU_CREATE_CHAT, 1, R.string.space_create_chat)
+            }
             if (canCreateTrack) {
-                menu.add(0, MENU_CREATE_TRACK, 1, R.string.space_create_track)
+                menu.add(0, MENU_CREATE_TRACK, 2, R.string.space_create_track)
             }
             if (canAddChats) {
-                menu.add(0, MENU_ADD_CHATS, 2, R.string.space_add_existing_chats)
+                menu.add(0, MENU_ADD_CHATS, 3, R.string.space_add_existing_chats)
             }
             if (canManageChats) {
-                menu.add(0, MENU_MANAGE_CHATS, 3, R.string.space_manage_chats)
+                menu.add(0, MENU_MANAGE_CHATS, 4, R.string.space_manage_chats)
             }
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     MENU_DETAILS -> actions.onOpenDetails()
+                    MENU_CREATE_CHAT -> actions.onCreateChat()
                     MENU_CREATE_TRACK -> actions.onCreateTrack()
                     MENU_ADD_CHATS -> actions.onAddRooms()
                     MENU_MANAGE_CHATS -> actions.onEnterManagement()
@@ -764,6 +771,7 @@ class SpaceScreenView(context: Context) : FrameLayout(context) {
         const val MENU_MANAGE_CHATS = 2
         const val MENU_ADD_CHATS = 3
         const val MENU_CREATE_TRACK = 4
+        const val MENU_CREATE_CHAT = 5
     }
 }
 

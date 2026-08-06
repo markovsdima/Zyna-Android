@@ -1374,25 +1374,36 @@ class AppViewModel(
         openCreateRoom(CreateRoomMode.STORYLINE)
     }
 
+    fun openCreateSpaceChat() {
+        val parent = currentManagedSpaceParent(requireRootStoryline = false) ?: return
+        openCreateRoom(mode = CreateRoomMode.GROUP, parent = parent)
+    }
+
     fun openCreateTrack() {
+        val parent = currentManagedSpaceParent(requireRootStoryline = true) ?: return
+        openCreateRoom(mode = CreateRoomMode.TRACK, parent = parent)
+    }
+
+    private fun currentManagedSpaceParent(
+        requireRootStoryline: Boolean
+    ): CreateRoomParent? {
         val current = _uiState.value
-        val route = current.route as? AppRoute.Space ?: return
-        if (route.parentSpaceId != null) return
-        val userId = current.matrixState.userIdOrNull() ?: return
+        val route = current.route as? AppRoute.Space ?: return null
+        if (requireRootStoryline && route.parentSpaceId != null) return null
+        val userId = current.matrixState.userIdOrNull() ?: return null
         val children = spaceChildrenStore.state.value
+        val target = children.target ?: return null
         if (
-            children.target?.userId != userId ||
-            children.target.spaceId != route.spaceId ||
+            target.userId != userId ||
+            target.spaceId != route.spaceId ||
+            target.parentSpaceId != route.parentSpaceId ||
             !children.management.canManage
         ) {
-            return
+            return null
         }
-        openCreateRoom(
-            mode = CreateRoomMode.TRACK,
-            parent = CreateRoomParent(
-                spaceId = route.spaceId,
-                displayName = route.displayName
-            )
+        return CreateRoomParent(
+            spaceId = route.spaceId,
+            displayName = route.displayName
         )
     }
 
@@ -2924,7 +2935,11 @@ class AppViewModel(
         }
     }
 
-    private fun handleRoomCreated(target: CreateRoomTarget, room: MatrixRoomSummary) {
+    private fun handleRoomCreated(
+        target: CreateRoomTarget,
+        room: MatrixRoomSummary,
+        access: CreateRoomAccess
+    ) {
         val current = _uiState.value
         if (
             current.route != AppRoute.CreateRoom ||
@@ -2934,13 +2949,22 @@ class AppViewModel(
         }
         when (target.mode) {
             CreateRoomMode.GROUP -> {
-                _uiState.update { state ->
-                    state.withNavigationState(
-                        state.navState.openCreatedRoomInvites(
-                            roomId = room.id,
-                            displayName = room.displayName,
-                            avatarUrl = room.avatarUrl
+                if (target.parent == null || access == CreateRoomAccess.PRIVATE) {
+                    _uiState.update { state ->
+                        state.withNavigationState(
+                            state.navState.openCreatedRoomInvites(
+                                roomId = room.id,
+                                displayName = room.displayName,
+                                avatarUrl = room.avatarUrl,
+                                preserveSpaceContext = target.parent != null
+                            )
                         )
+                    }
+                } else {
+                    openRoom(
+                        room = room,
+                        forwardTarget = null,
+                        preserveSpaceContext = true
                     )
                 }
             }
@@ -3077,7 +3101,9 @@ class AppViewModel(
                 id = route.roomId,
                 displayName = route.displayName,
                 avatarUrl = route.avatarUrl
-            )
+            ),
+            forwardTarget = null,
+            preserveSpaceContext = route.preserveSpaceContext
         )
     }
 

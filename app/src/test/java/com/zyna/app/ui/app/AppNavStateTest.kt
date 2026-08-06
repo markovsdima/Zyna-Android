@@ -283,6 +283,13 @@ class AppNavStateTest {
         val creationState = AppNavState()
             .enterMain()
             .openCreateRoom()
+        assertEquals(
+            creationState,
+            creationState.openChatFromSpace(
+                roomId = "!not-a-space-child:example.org",
+                displayName = "Not a child"
+            )
+        )
         val inviteState = creationState.openCreatedRoomInvites(
             roomId = roomId,
             displayName = displayName,
@@ -378,6 +385,109 @@ class AppNavStateTest {
             created.chatsStack
         )
         assertFalse(created.chatsStack.contains(AppRoute.CreateRoom))
+    }
+
+    @Test
+    fun childChatEditorKeepsParentActiveAndIsReplacedByCreatedChat() {
+        val parent = AppRoute.Space(
+            spaceId = "!track:example.org",
+            parentSpaceId = "!story:example.org",
+            displayName = "Android",
+            avatarUrl = null,
+            topic = null
+        )
+        val editor = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Product",
+                avatarUrl = null,
+                topic = null
+            )
+            .openSpace(
+                spaceId = parent.spaceId,
+                parentSpaceId = parent.parentSpaceId,
+                displayName = parent.displayName,
+                avatarUrl = parent.avatarUrl,
+                topic = parent.topic
+            )
+            .openCreateRoom()
+
+        assertEquals(parent, editor.activeSpaceRoute)
+
+        val created = editor.openChatFromSpace(
+            roomId = "!chat:example.org",
+            displayName = "Releases"
+        )
+
+        assertEquals(
+            listOf(
+                AppRoute.Rooms,
+                AppRoute.Space(
+                    spaceId = "!story:example.org",
+                    parentSpaceId = null,
+                    displayName = "Product",
+                    avatarUrl = null,
+                    topic = null
+                ),
+                parent,
+                AppRoute.Chat(
+                    roomId = "!chat:example.org",
+                    displayName = "Releases"
+                )
+            ),
+            created.chatsStack
+        )
+        assertFalse(created.chatsStack.contains(AppRoute.CreateRoom))
+    }
+
+    @Test
+    fun privateChildChatInvitesKeepParentActiveUntilChatOpens() {
+        val parent = AppRoute.Space(
+            spaceId = "!story:example.org",
+            parentSpaceId = null,
+            displayName = "Product",
+            avatarUrl = null,
+            topic = null
+        )
+        val editor = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = parent.spaceId,
+                parentSpaceId = parent.parentSpaceId,
+                displayName = parent.displayName,
+                avatarUrl = parent.avatarUrl,
+                topic = parent.topic
+            )
+            .openCreateRoom()
+
+        val invites = editor.openCreatedRoomInvites(
+            roomId = "!chat:example.org",
+            displayName = "Leadership",
+            avatarUrl = null,
+            preserveSpaceContext = true
+        )
+
+        assertEquals(parent, invites.activeSpaceRoute)
+        assertEquals(
+            AppRoute.InviteCreatedRoomMembers(
+                roomId = "!chat:example.org",
+                displayName = "Leadership",
+                avatarUrl = null,
+                preserveSpaceContext = true
+            ),
+            invites.top
+        )
+
+        val chat = invites.openChatFromSpace(
+            roomId = "!chat:example.org",
+            displayName = "Leadership"
+        )
+
+        assertEquals(parent, chat.activeSpaceRoute)
+        assertEquals(AppRoute.Chat("!chat:example.org", "Leadership"), chat.top)
+        assertFalse(chat.chatsStack.any { it is AppRoute.InviteCreatedRoomMembers })
     }
 
     @Test

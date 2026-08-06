@@ -82,6 +82,7 @@ data class SpacesFeatureActions(
     val onLoadMore: () -> Unit,
     val onRetry: () -> Unit,
     val onOpenDetails: () -> Unit,
+    val onCreateChat: () -> Unit,
     val onCreateTrack: () -> Unit,
     val onOpenAddRooms: () -> Unit,
     val onSetAddRoomsSearchQuery: (String) -> Unit,

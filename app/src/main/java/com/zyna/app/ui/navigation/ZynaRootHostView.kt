@@ -50,6 +50,7 @@ import com.zyna.app.ui.createroom.CreateRoomScreenView
 import com.zyna.app.ui.createroom.CreateRoomScreenViewActions
 import com.zyna.app.ui.createroom.CreateRoomScreenViewState
 import com.zyna.app.ui.createroom.CreateRoomState
+import com.zyna.app.ui.createroom.CreateRoomTarget
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
 import com.zyna.app.ui.glass.VulkanChatOverlayView
 import com.zyna.app.ui.invitemembers.InviteMembersScreenView
@@ -152,33 +153,52 @@ private fun RoomProfileEditorError?.localizedMessage(context: Context): String? 
 
 private fun CreateRoomError?.localizedMessage(
     context: Context,
-    mode: CreateRoomMode?
+    target: CreateRoomTarget?
 ): String? {
-    val isStoryline = mode == CreateRoomMode.STORYLINE
+    val mode = target?.mode ?: CreateRoomMode.GROUP
     val stringId = when (this) {
         null -> return null
-        CreateRoomError.AVATAR_PREPARATION -> if (isStoryline) {
-            com.zyna.app.R.string.create_storyline_avatar_error
-        } else {
-            com.zyna.app.R.string.create_group_avatar_error
+        CreateRoomError.AVATAR_PREPARATION -> when (mode) {
+            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_avatar_error
+            CreateRoomMode.STORYLINE -> com.zyna.app.R.string.create_storyline_avatar_error
+            CreateRoomMode.TRACK -> com.zyna.app.R.string.create_track_avatar_error
         }
-        CreateRoomError.AVATAR_UPLOAD -> if (isStoryline) {
-            com.zyna.app.R.string.create_storyline_avatar_upload_error
-        } else {
-            com.zyna.app.R.string.create_group_avatar_upload_error
+        CreateRoomError.AVATAR_UPLOAD -> when (mode) {
+            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_avatar_upload_error
+            CreateRoomMode.STORYLINE ->
+                com.zyna.app.R.string.create_storyline_avatar_upload_error
+            CreateRoomMode.TRACK -> com.zyna.app.R.string.create_track_avatar_upload_error
         }
-        CreateRoomError.ADDRESS_CHECK -> if (isStoryline) {
-            com.zyna.app.R.string.create_storyline_address_check_create_error
-        } else {
-            com.zyna.app.R.string.create_group_address_check_create_error
+        CreateRoomError.ADDRESS_CHECK -> when (mode) {
+            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_address_check_create_error
+            CreateRoomMode.STORYLINE ->
+                com.zyna.app.R.string.create_storyline_address_check_create_error
+            CreateRoomMode.TRACK ->
+                com.zyna.app.R.string.create_track_address_check_create_error
         }
-        CreateRoomError.CREATE -> if (isStoryline) {
-            com.zyna.app.R.string.create_storyline_error
-        } else {
-            com.zyna.app.R.string.create_group_error
+        CreateRoomError.PARENT_PERMISSION_CHECK ->
+            com.zyna.app.R.string.create_track_permission_check_error
+        CreateRoomError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.create_track_permission_changed
+        CreateRoomError.CREATE -> when (mode) {
+            CreateRoomMode.GROUP -> com.zyna.app.R.string.create_group_error
+            CreateRoomMode.STORYLINE -> com.zyna.app.R.string.create_storyline_error
+            CreateRoomMode.TRACK -> com.zyna.app.R.string.create_track_error
         }
+        CreateRoomError.ADD_TO_PARENT -> com.zyna.app.R.string.create_track_add_error
     }
-    return context.getString(stringId)
+    return if (
+        this == CreateRoomError.PERMISSION_CHANGED ||
+        this == CreateRoomError.ADD_TO_PARENT
+    ) {
+        context.getString(
+            stringId,
+            target?.parent?.displayName?.takeIf(String::isNotBlank)
+                ?: context.getString(com.zyna.app.R.string.space_storyline)
+        )
+    } else {
+        context.getString(stringId)
+    }
 }
 
 private fun RoomPermissionsError?.localizedMessage(context: Context): String? {
@@ -1351,6 +1371,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     actions = SpaceScreenViewActions(
                         onBack = { actions.navigation.onNavigateBack() },
                         onOpenDetails = actions.spaces.onOpenDetails,
+                        onCreateTrack = actions.spaces.onCreateTrack,
                         onAddRooms = actions.spaces.onOpenAddRooms,
                         onOpenRoom = actions.spaces.onOpenRoom,
                         onLoadMore = actions.spaces.onLoadMore,
@@ -1707,7 +1728,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         creation = creation,
                         errorMessage = creation.error.localizedMessage(
                             context,
-                            creation.target?.mode
+                            creation.target
                         ),
                         matrixMediaLoader = dependencies.matrixMediaLoader,
                         bottomContentPaddingPx = bottomInset

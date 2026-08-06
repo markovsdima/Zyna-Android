@@ -219,6 +219,9 @@ data class AppNavState(
                         route.parentSpaceId == topRoute.parentSpaceId
                 }
             }
+            if (topRoute == AppRoute.CreateRoom) {
+                return spaceRoute
+            }
             if (topRoute is AppRoute.Chat) {
                 return spaceRoute
             }
@@ -389,6 +392,7 @@ data class AppNavState(
         }
         val baseStack = when (val topRoute = chatsStack.lastOrNull()) {
             is AppRoute.Space -> chatsStack
+            AppRoute.CreateRoom -> chatsStack.dropLast(1)
             is AppRoute.SpaceJoinPreview -> {
                 if (topRoute.parentSpaceId != parentSpaceId || topRoute.roomId != spaceId) {
                     return this
@@ -460,7 +464,10 @@ data class AppNavState(
             return this
         }
         val rootedStack = ensureChatsRoot(chatsStack)
-        if (rootedStack.lastOrNull() != AppRoute.Rooms) {
+        if (
+            rootedStack.lastOrNull() != AppRoute.Rooms &&
+            rootedStack.lastOrNull() !is AppRoute.Space
+        ) {
             return this
         }
         return copy(chatsStack = rootedStack + AppRoute.CreateRoom)

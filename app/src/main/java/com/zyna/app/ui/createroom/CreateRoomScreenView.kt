@@ -104,6 +104,7 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
     }
     private val accessHeader = sectionHeader(R.string.create_group_access)
     private val privateAccess = CreateRoomOptionView(context)
+    private val parentAccess = CreateRoomOptionView(context)
     private val publicAccess = CreateRoomOptionView(context)
     private val addressContainer = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
@@ -172,6 +173,7 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
 
         content.addView(accessHeader, fullWidthWrapParams())
         content.addView(privateAccess, fullWidthWrapParams())
+        content.addView(parentAccess, fullWidthWrapParams().apply { topMargin = dp(8) })
         content.addView(publicAccess, fullWidthWrapParams().apply { topMargin = dp(8) })
 
         addressContainer.addView(addressLabel, fullWidthWrapParams())
@@ -247,55 +249,86 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
     fun render(state: CreateRoomScreenViewState, actions: CreateRoomScreenViewActions) {
         this.actions = actions
         val creation = state.creation
-        val isStoryline = creation.target?.mode == CreateRoomMode.STORYLINE
+        val mode = creation.target?.mode ?: CreateRoomMode.GROUP
+        val isSpace = mode != CreateRoomMode.GROUP
+        val parentName = creation.target?.parent?.displayName
+            ?.takeIf(String::isNotBlank)
+            ?: context.getString(R.string.space_storyline)
         bottomContentPaddingPx = state.bottomContentPaddingPx
         scrollView.updatePadding(bottom = bottomContentPaddingPx + dp(24))
 
         titleText.setText(
-            if (isStoryline) R.string.create_storyline_title else R.string.create_group_title
+            when (mode) {
+                CreateRoomMode.GROUP -> R.string.create_group_title
+                CreateRoomMode.STORYLINE -> R.string.create_storyline_title
+                CreateRoomMode.TRACK -> R.string.create_track_title
+            }
+        )
+        createButton.setText(
+            if (creation.pendingCreatedRoom != null) R.string.common_retry
+            else R.string.create_group_create
         )
         nameLabel.setText(
-            if (isStoryline) R.string.create_storyline_name else R.string.create_group_name
+            when (mode) {
+                CreateRoomMode.GROUP -> R.string.create_group_name
+                CreateRoomMode.STORYLINE -> R.string.create_storyline_name
+                CreateRoomMode.TRACK -> R.string.create_track_name
+            }
         )
         topicLabel.setText(
-            if (isStoryline) R.string.create_storyline_topic else R.string.create_group_topic
+            when (mode) {
+                CreateRoomMode.GROUP -> R.string.create_group_topic
+                CreateRoomMode.STORYLINE -> R.string.create_storyline_topic
+                CreateRoomMode.TRACK -> R.string.create_track_topic
+            }
         )
         addressLabel.setText(
-            if (isStoryline) R.string.create_storyline_address else R.string.create_group_address
+            when (mode) {
+                CreateRoomMode.GROUP -> R.string.create_group_address
+                CreateRoomMode.STORYLINE -> R.string.create_storyline_address
+                CreateRoomMode.TRACK -> R.string.create_track_address
+            }
         )
         privateAccess.setContent(
             context.getString(
-                if (isStoryline) {
-                    R.string.create_storyline_access_private
-                } else {
-                    R.string.create_group_access_private
+                when (mode) {
+                    CreateRoomMode.GROUP -> R.string.create_group_access_private
+                    CreateRoomMode.STORYLINE -> R.string.create_storyline_access_private
+                    CreateRoomMode.TRACK -> R.string.create_track_access_private
                 }
             ),
             context.getString(
-                if (isStoryline) {
-                    R.string.create_storyline_access_private_description
-                } else {
-                    R.string.create_group_access_private_description
+                when (mode) {
+                    CreateRoomMode.GROUP -> R.string.create_group_access_private_description
+                    CreateRoomMode.STORYLINE ->
+                        R.string.create_storyline_access_private_description
+                    CreateRoomMode.TRACK -> R.string.create_track_access_private_description
                 }
             )
+        )
+        parentAccess.setContent(
+            context.getString(R.string.create_track_access_parent),
+            context.getString(R.string.create_track_access_parent_description, parentName)
         )
         publicAccess.setContent(
             context.getString(
-                if (isStoryline) {
-                    R.string.create_storyline_access_public
-                } else {
-                    R.string.create_group_access_public
+                when (mode) {
+                    CreateRoomMode.GROUP -> R.string.create_group_access_public
+                    CreateRoomMode.STORYLINE -> R.string.create_storyline_access_public
+                    CreateRoomMode.TRACK -> R.string.create_track_access_public
                 }
             ),
             context.getString(
-                if (isStoryline) {
-                    R.string.create_storyline_access_public_description
-                } else {
-                    R.string.create_group_access_public_description
+                when (mode) {
+                    CreateRoomMode.GROUP -> R.string.create_group_access_public_description
+                    CreateRoomMode.STORYLINE ->
+                        R.string.create_storyline_access_public_description
+                    CreateRoomMode.TRACK -> R.string.create_track_access_public_description
                 }
             )
         )
-        val postingVisibility = if (isStoryline) GONE else VISIBLE
+        parentAccess.visibility = if (creation.target?.parent != null) VISIBLE else GONE
+        val postingVisibility = if (isSpace) GONE else VISIBLE
         postingHeader.visibility = postingVisibility
         allMembersPosting.visibility = postingVisibility
         moderatorsPosting.visibility = postingVisibility
@@ -316,6 +349,7 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         )
         addressSuffix.text = creation.target?.serverName?.let { ":$it" }.orEmpty()
         privateAccess.isOptionSelected = creation.access == CreateRoomAccess.PRIVATE
+        parentAccess.isOptionSelected = creation.access == CreateRoomAccess.PARENT_MEMBERS
         publicAccess.isOptionSelected = creation.access == CreateRoomAccess.PUBLIC
         allMembersPosting.isOptionSelected =
             creation.postingPermission == CreateRoomPostingPermission.ALL_MEMBERS
@@ -324,25 +358,36 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
 
         addressContainer.visibility = if (creation.access == CreateRoomAccess.PUBLIC) VISIBLE else GONE
         renderAddressStatus(creation.aliasAvailability)
-        encryptionNote.text = context.getString(
-            if (isStoryline) {
+        encryptionNote.text = when (mode) {
+            CreateRoomMode.STORYLINE -> context.getString(
                 if (creation.access == CreateRoomAccess.PRIVATE) {
                     R.string.create_storyline_private_note
                 } else {
                     R.string.create_storyline_public_note
                 }
-            } else if (creation.access == CreateRoomAccess.PRIVATE) {
-                R.string.create_group_encryption_private_note
-            } else {
-                R.string.create_group_encryption_public_note
-            }
-        )
+            )
+            CreateRoomMode.TRACK -> context.getString(
+                when (creation.access) {
+                    CreateRoomAccess.PRIVATE -> R.string.create_track_private_note
+                    CreateRoomAccess.PARENT_MEMBERS -> R.string.create_track_parent_note
+                    CreateRoomAccess.PUBLIC -> R.string.create_track_public_note
+                },
+                parentName
+            )
+            CreateRoomMode.GROUP -> context.getString(
+                if (creation.access == CreateRoomAccess.PRIVATE) {
+                    R.string.create_group_encryption_private_note
+                } else {
+                    R.string.create_group_encryption_public_note
+                }
+            )
+        }
 
         val isCreating = creation.isCreating
         if (isCreating || !creation.isDiscardConfirmationVisible) {
             discardDialog?.dismiss()
         } else {
-            showDiscardConfirmation(actions, isStoryline)
+            showDiscardConfirmation(actions, creation)
         }
 
         cancelButton.setOnClickListener { if (!isCreating) actions.onBack() }
@@ -353,6 +398,9 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         removePhotoButton.setOnClickListener { if (!isCreating) actions.onRemoveAvatar() }
         privateAccess.setOnClickListener {
             if (!isCreating) actions.onAccessChanged(CreateRoomAccess.PRIVATE)
+        }
+        parentAccess.setOnClickListener {
+            if (!isCreating) actions.onAccessChanged(CreateRoomAccess.PARENT_MEMBERS)
         }
         publicAccess.setOnClickListener {
             if (!isCreating) actions.onAccessChanged(CreateRoomAccess.PUBLIC)
@@ -397,50 +445,77 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
 
     private fun applyEnabledState(state: CreateRoomState) {
         val enabled = !state.isCreating
+        val editable = enabled && state.pendingCreatedRoom == null
         cancelButton.isEnabled = enabled
         cancelButton.alpha = if (enabled) 1f else DISABLED_ALPHA
         createButton.isEnabled = state.canCreate
         createButton.alpha = if (state.canCreate) 1f else DISABLED_ALPHA
         listOf(nameEdit, topicEdit, addressEdit).forEach { field ->
-            field.isEnabled = enabled
-            field.alpha = if (enabled) 1f else DISABLED_ALPHA
+            field.isEnabled = editable
+            field.alpha = if (editable) 1f else DISABLED_ALPHA
         }
-        listOf(privateAccess, publicAccess, allMembersPosting, moderatorsPosting).forEach { option ->
-            option.isEnabled = enabled
-            option.alpha = if (enabled) 1f else DISABLED_ALPHA
+        listOf(
+            privateAccess,
+            parentAccess,
+            publicAccess,
+            allMembersPosting,
+            moderatorsPosting
+        ).forEach { option ->
+            option.isEnabled = editable
+            option.alpha = if (editable) 1f else DISABLED_ALPHA
         }
-        changePhotoButton.isEnabled = enabled
-        removePhotoButton.isEnabled = enabled
-        changePhotoButton.alpha = if (enabled) 1f else DISABLED_ALPHA
-        removePhotoButton.alpha = if (enabled) 1f else DISABLED_ALPHA
+        changePhotoButton.isEnabled = editable
+        removePhotoButton.isEnabled = editable
+        changePhotoButton.alpha = if (editable) 1f else DISABLED_ALPHA
+        removePhotoButton.alpha = if (editable) 1f else DISABLED_ALPHA
     }
 
     private fun showDiscardConfirmation(
         actions: CreateRoomScreenViewActions,
-        isStoryline: Boolean
+        creation: CreateRoomState
     ) {
         if (discardDialog?.isShowing == true) return
         var handled = false
         discardDialog = AlertDialog.Builder(context)
             .setTitle(
-                if (isStoryline) {
-                    R.string.create_storyline_discard_title
-                } else {
-                    R.string.create_group_discard_title
+                when {
+                    creation.pendingCreatedRoom != null ->
+                        R.string.create_track_link_discard_title
+                    creation.target?.mode == CreateRoomMode.STORYLINE ->
+                        R.string.create_storyline_discard_title
+                    creation.target?.mode == CreateRoomMode.TRACK ->
+                        R.string.create_track_discard_title
+                    else -> R.string.create_group_discard_title
                 }
             )
             .setMessage(
-                if (isStoryline) {
-                    R.string.create_storyline_discard_message
-                } else {
-                    R.string.create_group_discard_message
+                when {
+                    creation.pendingCreatedRoom != null ->
+                        R.string.create_track_link_discard_message
+                    creation.target?.mode == CreateRoomMode.STORYLINE ->
+                        R.string.create_storyline_discard_message
+                    creation.target?.mode == CreateRoomMode.TRACK ->
+                        R.string.create_track_discard_message
+                    else -> R.string.create_group_discard_message
                 }
             )
-            .setNegativeButton(R.string.profile_edit_keep_editing) { _, _ ->
+            .setNegativeButton(
+                if (creation.pendingCreatedRoom != null) {
+                    R.string.create_track_link_keep_trying
+                } else {
+                    R.string.profile_edit_keep_editing
+                }
+            ) { _, _ ->
                 handled = true
                 actions.onDiscardChangesCancelled()
             }
-            .setPositiveButton(R.string.profile_edit_discard) { _, _ ->
+            .setPositiveButton(
+                if (creation.pendingCreatedRoom != null) {
+                    R.string.create_track_link_close
+                } else {
+                    R.string.profile_edit_discard
+                }
+            ) { _, _ ->
                 handled = true
                 actions.onDiscardChangesConfirmed()
             }
@@ -487,7 +562,13 @@ internal class CreateRoomScreenView(context: Context) : FrameLayout(context) {
         retryAddress.setTextColor(palette.actionText)
         encryptionNote.setTextColor(palette.secondaryText)
         errorText.setTextColor(ERROR_COLOR)
-        listOf(privateAccess, publicAccess, allMembersPosting, moderatorsPosting).forEach {
+        listOf(
+            privateAccess,
+            parentAccess,
+            publicAccess,
+            allMembersPosting,
+            moderatorsPosting
+        ).forEach {
             it.setPalette(palette)
         }
     }

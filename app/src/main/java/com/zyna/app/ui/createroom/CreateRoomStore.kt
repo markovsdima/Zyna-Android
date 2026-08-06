@@ -8,7 +8,11 @@ import com.zyna.app.data.matrix.MatrixRoomCreationAccess
 import com.zyna.app.data.matrix.MatrixRoomCreationKind
 import com.zyna.app.data.matrix.MatrixRoomCreationRequest
 import com.zyna.app.data.matrix.MatrixRoomPostingPermission
+import com.zyna.app.data.matrix.MatrixSpaceService
+import com.zyna.app.data.matrix.toJoinedSpaceChild
+import com.zyna.app.data.matrix.toSpaceRoom
 import com.zyna.app.data.profile.ProfileAvatarDraft
+import com.zyna.app.ui.spaces.SpaceChildrenStore
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -22,7 +26,8 @@ import kotlinx.coroutines.launch
 
 enum class CreateRoomMode {
     GROUP,
-    STORYLINE
+    STORYLINE,
+    TRACK
 }
 
 data class CreateRoomParent(
@@ -70,7 +75,10 @@ enum class CreateRoomError {
     AVATAR_PREPARATION,
     AVATAR_UPLOAD,
     ADDRESS_CHECK,
-    CREATE
+    PARENT_PERMISSION_CHECK,
+    PERMISSION_CHANGED,
+    CREATE,
+    ADD_TO_PARENT
 }
 
 data class CreateRoomState(
@@ -87,6 +95,8 @@ data class CreateRoomState(
     val avatarLocalPath: String? = null,
     val avatarMimeType: String = DEFAULT_ROOM_AVATAR_MIME_TYPE,
     val uploadedAvatarUrl: String? = null,
+    /** Set after createRoom succeeds so a link retry never creates a duplicate room. */
+    val pendingCreatedRoom: MatrixRoomSummary? = null,
     val editSessionId: Long = 0L,
     val isCreating: Boolean = false,
     val error: CreateRoomError? = null,
@@ -105,7 +115,8 @@ data class CreateRoomState(
 
     val hasUnsavedChanges: Boolean
         get() = editSessionId != 0L && (
-            name.isNotEmpty() ||
+            pendingCreatedRoom != null ||
+                name.isNotEmpty() ||
                 topic.isNotEmpty() ||
                 hasAvatar ||
                 access != (target?.defaultAccess ?: CreateRoomAccess.PRIVATE) ||
@@ -119,10 +130,15 @@ data class CreateRoomState(
     val canCreate: Boolean
         get() = editSessionId != 0L &&
             !isCreating &&
-            name.isNotBlank() &&
             (
-                access != CreateRoomAccess.PUBLIC ||
-                    aliasAvailability == CreateRoomAliasAvailability.AVAILABLE
+                pendingCreatedRoom != null ||
+                    (
+                        name.isNotBlank() &&
+                            (
+                                access != CreateRoomAccess.PUBLIC ||
+                                    aliasAvailability == CreateRoomAliasAvailability.AVAILABLE
+                                )
+                        )
                 )
 }
 
@@ -131,8 +147,26 @@ internal class CreateRoomDriver(
     val suggestAliasLocalPart: (name: String) -> String,
     val isAliasValid: (fullAlias: String) -> Boolean,
     val isAliasAvailable: suspend (fullAlias: String) -> Boolean,
+    val canManageParent: suspend (userId: String, parentSpaceId: String) -> Boolean,
     val createRoom: suspend (request: MatrixRoomCreationRequest) -> MatrixRoomSummary,
     val cacheCreatedRoom: suspend (userId: String, room: MatrixRoomSummary) -> Unit,
+    val awaitChildReadyForParentLink: suspend (
+        userId: String,
+        childRoomId: String
+    ) -> Unit,
+    val addChildToParent: suspend (
+        userId: String,
+        parentSpaceId: String,
+        childRoomId: String
+    ) -> Unit,
+    val confirmChildAdded: suspend (
+        target: CreateRoomTarget,
+        room: MatrixRoomSummary
+    ) -> Unit,
+    val reconcileChildAdded: suspend (
+        target: CreateRoomTarget,
+        childRoomId: String
+    ) -> Boolean?,
     val deleteDraft: (String?) -> Unit
 )
 
@@ -142,7 +176,9 @@ internal class CreateRoomDriver(
  * Alias checks are debounced and generation-guarded, so a late response cannot validate a newer
  * address or another session. The address is checked once more immediately before upload/create.
  * Avatar upload results are retained across create retries. Once Matrix returns a room ID, local
- * cache persistence is best-effort because the create mutation cannot be rolled back.
+ * cache persistence is best-effort because the create mutation cannot be rolled back. Child
+ * creation also retains the created room while its parent link is unresolved, so retrying can only
+ * repeat the m.space.child write and can never create a duplicate.
  */
 internal class CreateRoomStore(
     private val scope: CoroutineScope,
@@ -285,7 +321,8 @@ internal class CreateRoomStore(
             current.target != target ||
             current.editSessionId == 0L ||
             current.editSessionId != editSessionId ||
-            current.isCreating
+            current.isCreating ||
+            current.pendingCreatedRoom != null
         ) {
             driver.deleteDraft(draft.localPath)
             return
@@ -312,7 +349,8 @@ internal class CreateRoomStore(
         if (
             current.target != target ||
             current.editSessionId != editSessionId ||
-            current.isCreating
+            current.isCreating ||
+            current.pendingCreatedRoom != null
         ) return
         _state.value = current.copy(error = CreateRoomError.AVATAR_PREPARATION)
     }
@@ -372,63 +410,96 @@ internal class CreateRoomStore(
         val nextJob = scope.launch {
             var stage = CreateRoomStage.CHECK_ADDRESS
             try {
-                if (current.access == CreateRoomAccess.PUBLIC) {
-                    checkNotNull(alias)
-                    if (!driver.isAliasValid(alias) || !driver.isAliasAvailable(alias)) {
+                var room = current.pendingCreatedRoom
+                if (room == null) {
+                    if (current.access == CreateRoomAccess.PUBLIC) {
+                        checkNotNull(alias)
+                        if (!driver.isAliasValid(alias) || !driver.isAliasAvailable(alias)) {
+                            if (!isCurrent(target, current.editSessionId, requestGeneration)) {
+                                return@launch
+                            }
+                            _state.value = _state.value.copy(
+                                isCreating = false,
+                                aliasAvailability = CreateRoomAliasAvailability.TAKEN
+                            )
+                            return@launch
+                        }
+                    }
+
+                    if (target.parent != null) {
+                        stage = CreateRoomStage.CHECK_PARENT_PERMISSION
+                        if (!checkParentPermission(
+                                target,
+                                current.editSessionId,
+                                requestGeneration
+                            )
+                        ) {
+                            return@launch
+                        }
+                    }
+
+                    stage = CreateRoomStage.UPLOAD_AVATAR
+                    val avatarUrl = current.uploadedAvatarUrl ?: avatarPath?.let { path ->
+                        val uploadedUrl = driver.uploadMedia(path, current.avatarMimeType)
                         if (!isCurrent(target, current.editSessionId, requestGeneration)) {
                             return@launch
                         }
-                        _state.value = _state.value.copy(
-                            isCreating = false,
-                            aliasAvailability = CreateRoomAliasAvailability.TAKEN
-                        )
-                        return@launch
+                        _state.value = _state.value.copy(uploadedAvatarUrl = uploadedUrl)
+                        uploadedUrl
                     }
+
+                    stage = CreateRoomStage.CREATE_ROOM
+                    room = driver.createRoom(
+                        MatrixRoomCreationRequest(
+                            name = current.name.trim(),
+                            topic = current.topic.trim().takeIf { it.isNotEmpty() },
+                            avatarUrl = avatarUrl,
+                            kind = target.mode.toMatrixKind(),
+                            access = current.access.toMatrixAccess(target.parent),
+                            aliasLocalPart = if (current.access == CreateRoomAccess.PUBLIC) {
+                                current.aliasLocalPart
+                            } else {
+                                null
+                            },
+                            postingPermission = current.postingPermission.toMatrixPermission()
+                        )
+                    )
+                    if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
+                    _state.value = _state.value.copy(pendingCreatedRoom = room)
+
+                    runCatching { driver.cacheCreatedRoom(target.userId, room) }
+                        .onFailure { error ->
+                            if (error is CancellationException) throw error
+                            onWarning("Failed to cache newly created room", error)
+                        }
+                    if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
                 }
 
-                stage = CreateRoomStage.UPLOAD_AVATAR
-                val avatarUrl = current.uploadedAvatarUrl ?: avatarPath?.let { path ->
-                    val uploadedUrl = driver.uploadMedia(path, current.avatarMimeType)
+                val createdRoom = requireNotNull(room)
+                val parent = target.parent
+                if (parent != null) {
+                    stage = CreateRoomStage.WAIT_FOR_CHILD_ROOM
+                    driver.awaitChildReadyForParentLink(target.userId, createdRoom.id)
                     if (!isCurrent(target, current.editSessionId, requestGeneration)) {
                         return@launch
                     }
-                    _state.value = _state.value.copy(uploadedAvatarUrl = uploadedUrl)
-                    uploadedUrl
-                }
-
-                stage = CreateRoomStage.CREATE_ROOM
-                val room = driver.createRoom(
-                    MatrixRoomCreationRequest(
-                        name = current.name.trim(),
-                        topic = current.topic.trim().takeIf { it.isNotEmpty() },
-                        avatarUrl = avatarUrl,
-                        kind = target.mode.toMatrixKind(),
-                        access = current.access.toMatrixAccess(target.parent),
-                        aliasLocalPart = if (current.access == CreateRoomAccess.PUBLIC) {
-                            current.aliasLocalPart
-                        } else {
-                            null
-                        },
-                        postingPermission = current.postingPermission.toMatrixPermission()
-                    )
-                )
-                if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
-
-                runCatching { driver.cacheCreatedRoom(target.userId, room) }
-                    .onFailure { error ->
-                        if (error is CancellationException) throw error
-                        onWarning("Failed to cache newly created room", error)
+                    stage = CreateRoomStage.CHECK_PARENT_PERMISSION
+                    if (!checkParentPermission(target, current.editSessionId, requestGeneration)) {
+                        return@launch
                     }
-                if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
+                    stage = CreateRoomStage.ADD_TO_PARENT
+                    attachCreatedRoom(target, createdRoom)
+                    if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
+                }
 
                 driver.deleteDraft(avatarPath)
                 _state.value = CreateRoomState()
-                onCreated(target, room)
+                onCreated(target, createdRoom)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
                 if (!isCurrent(target, current.editSessionId, requestGeneration)) return@launch
-                onWarning("Failed to create Matrix room", error)
+                onWarning(stage.warningMessage, error)
                 _state.value = _state.value.copy(
                     isCreating = false,
                     aliasAvailability = if (stage == CreateRoomStage.CHECK_ADDRESS) {
@@ -438,8 +509,12 @@ internal class CreateRoomStore(
                     },
                     error = when (stage) {
                         CreateRoomStage.CHECK_ADDRESS -> CreateRoomError.ADDRESS_CHECK
+                        CreateRoomStage.CHECK_PARENT_PERMISSION ->
+                            CreateRoomError.PARENT_PERMISSION_CHECK
                         CreateRoomStage.UPLOAD_AVATAR -> CreateRoomError.AVATAR_UPLOAD
                         CreateRoomStage.CREATE_ROOM -> CreateRoomError.CREATE
+                        CreateRoomStage.WAIT_FOR_CHILD_ROOM -> CreateRoomError.ADD_TO_PARENT
+                        CreateRoomStage.ADD_TO_PARENT -> CreateRoomError.ADD_TO_PARENT
                     }
                 )
             }
@@ -547,7 +622,49 @@ internal class CreateRoomStore(
     }
 
     private fun editableStateOrNull(): CreateRoomState? {
-        return _state.value.takeIf { it.editSessionId != 0L && !it.isCreating }
+        return _state.value.takeIf {
+            it.editSessionId != 0L && !it.isCreating && it.pendingCreatedRoom == null
+        }
+    }
+
+    private suspend fun checkParentPermission(
+        target: CreateRoomTarget,
+        editSessionId: Long,
+        requestGeneration: Long
+    ): Boolean {
+        val parent = target.parent ?: return true
+        val canManage = driver.canManageParent(target.userId, parent.spaceId)
+        if (!isCurrent(target, editSessionId, requestGeneration)) return false
+        if (canManage) return true
+        _state.value = _state.value.copy(
+            isCreating = false,
+            error = CreateRoomError.PERMISSION_CHANGED
+        )
+        return false
+    }
+
+    private suspend fun attachCreatedRoom(
+        target: CreateRoomTarget,
+        room: MatrixRoomSummary
+    ) {
+        val parent = requireNotNull(target.parent)
+        try {
+            driver.addChildToParent(target.userId, parent.spaceId, room.id)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (writeError: Throwable) {
+            val wasApplied = try {
+                driver.reconcileChildAdded(target, room.id) == true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (refreshError: Throwable) {
+                writeError.addSuppressed(refreshError)
+                false
+            }
+            if (!wasApplied) throw writeError
+            onWarning("Space child write reported failure but hierarchy confirmed it", writeError)
+        }
+        driver.confirmChildAdded(target, room)
     }
 
     private fun CreateRoomTarget.normalizedOrNull(): CreateRoomTarget? {
@@ -559,6 +676,7 @@ internal class CreateRoomStore(
         when (mode) {
             CreateRoomMode.GROUP -> Unit
             CreateRoomMode.STORYLINE -> if (normalizedParent != null) return null
+            CreateRoomMode.TRACK -> if (normalizedParent == null) return null
         }
         return copy(userId = userId, parent = normalizedParent)
     }
@@ -574,7 +692,9 @@ internal class CreateRoomStore(
 internal fun createCreateRoomStore(
     scope: CoroutineScope,
     matrixClientService: MatrixClientService,
+    matrixSpaceService: MatrixSpaceService,
     localCacheRepository: LocalCacheRepository,
+    spaceChildrenStore: SpaceChildrenStore,
     onCreated: (target: CreateRoomTarget, room: MatrixRoomSummary) -> Unit,
     onCancelled: (target: CreateRoomTarget) -> Unit,
     onWarning: (String, Throwable) -> Unit
@@ -586,8 +706,29 @@ internal fun createCreateRoomStore(
             suggestAliasLocalPart = matrixClientService::suggestRoomAliasLocalPart,
             isAliasValid = matrixClientService::isRoomAliasValid,
             isAliasAvailable = matrixClientService::isRoomAliasAvailable,
+            canManageParent = { _, parentSpaceId ->
+                matrixClientService.canManageSpaceChildren(parentSpaceId)
+            },
             createRoom = matrixClientService::createRoom,
             cacheCreatedRoom = localCacheRepository::cacheCreatedRoomSummary,
+            awaitChildReadyForParentLink =
+                matrixClientService::awaitRoomReadyForSpaceRelationship,
+            addChildToParent = matrixSpaceService::addChildToSpace,
+            confirmChildAdded = { target, room ->
+                val child = if (room.isSpace) room.toSpaceRoom() else room.toJoinedSpaceChild()
+                spaceChildrenStore.confirmChildrenAdded(
+                    userId = target.userId,
+                    spaceId = requireNotNull(target.parent).spaceId,
+                    rooms = listOf(child)
+                )
+            },
+            reconcileChildAdded = { target, childRoomId ->
+                spaceChildrenStore.refreshAfterChildMutation(
+                    userId = target.userId,
+                    spaceId = requireNotNull(target.parent).spaceId,
+                    roomIdsToFind = setOf(childRoomId)
+                )?.contains(childRoomId)
+            },
             deleteDraft = { path ->
                 path?.takeIf { it.isNotBlank() }?.let { localPath ->
                     runCatching { File(localPath).delete() }
@@ -614,7 +755,8 @@ private fun normalizeAliasInput(value: String, serverName: String?): String {
 private fun CreateRoomMode.toMatrixKind(): MatrixRoomCreationKind {
     return when (this) {
         CreateRoomMode.GROUP -> MatrixRoomCreationKind.ROOM
-        CreateRoomMode.STORYLINE -> MatrixRoomCreationKind.SPACE
+        CreateRoomMode.STORYLINE,
+        CreateRoomMode.TRACK -> MatrixRoomCreationKind.SPACE
     }
 }
 
@@ -640,8 +782,21 @@ private fun CreateRoomPostingPermission.toMatrixPermission(): MatrixRoomPostingP
 
 private enum class CreateRoomStage {
     CHECK_ADDRESS,
+    CHECK_PARENT_PERMISSION,
     UPLOAD_AVATAR,
-    CREATE_ROOM
+    CREATE_ROOM,
+    WAIT_FOR_CHILD_ROOM,
+    ADD_TO_PARENT;
+
+    val warningMessage: String
+        get() = when (this) {
+            CHECK_ADDRESS -> "Failed to check Matrix room address"
+            CHECK_PARENT_PERMISSION -> "Failed to check Space child management permission"
+            UPLOAD_AVATAR -> "Failed to upload Matrix room avatar"
+            CREATE_ROOM -> "Failed to create Matrix room"
+            WAIT_FOR_CHILD_ROOM -> "Created room did not become ready for its parent Space"
+            ADD_TO_PARENT -> "Failed to add newly created room to its parent Space"
+        }
 }
 
 private const val DEFAULT_ROOM_AVATAR_MIME_TYPE = "image/jpeg"

@@ -1430,6 +1430,55 @@ class MatrixClientService(
             } ?: error("Matrix room is not available")
         }
 
+    /**
+     * Waits until a newly created room has reached the local SDK projection used by Spaces.
+     *
+     * SpaceService needs the child's power levels when it creates both sides of the Space
+     * relationship. Client.createRoom returns before sliding sync necessarily exposes that state,
+     * so an immediate addChildToSpace can fail even though the same call succeeds moments later.
+     */
+    suspend fun awaitRoomReadyForSpaceRelationship(
+        userId: String,
+        roomId: String
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        var lastReadError: Throwable? = null
+        val isReady = withTimeoutOrNull(SPACE_RELATIONSHIP_ROOM_READY_TIMEOUT_MS) {
+            while (true) {
+                val hasPowerLevels = try {
+                    knownRoomOrNull(
+                        userId = userId,
+                        activeClient = activeClient,
+                        roomId = normalizedRoomId
+                    )?.use { room ->
+                        val roomInfo = room.roomInfo()
+                        try {
+                            roomInfo.powerLevels != null
+                        } finally {
+                            roomInfo.destroy()
+                        }
+                    } == true
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    lastReadError = error
+                    false
+                }
+                if (hasPowerLevels) return@withTimeoutOrNull true
+                delay(SPACE_RELATIONSHIP_ROOM_READY_POLL_MS)
+            }
+        } == true
+        if (!isReady) {
+            val error = IllegalStateException(
+                "Created Matrix room did not become ready for a Space relationship"
+            )
+            lastReadError?.let(error::addSuppressed)
+            throw error
+        }
+    }
+
     suspend fun loadRoomPermissions(roomId: String): MatrixRoomPermissions =
         withContext(Dispatchers.IO) {
             val activeClient = client ?: error("Matrix client is not ready")
@@ -3911,6 +3960,8 @@ class MatrixClientService(
         const val OWN_MESSAGE_PREVIEW_SENDER = "You"
         const val DEFAULT_PUSH_NOTIFICATION_TITLE = "Zyna"
         const val PUSH_NOTIFICATION_RESOLVE_TIMEOUT_MS = 10_000L
+        const val SPACE_RELATIONSHIP_ROOM_READY_TIMEOUT_MS = 30_000L
+        const val SPACE_RELATIONSHIP_ROOM_READY_POLL_MS = 250L
         const val ZERO_WIDTH_SPACE = "\u200B"
         const val DEFAULT_AUDIO_MIME_TYPE = "audio/mpeg"
         const val MATRIX_WAVEFORM_DEFAULT_PEAK = 1024

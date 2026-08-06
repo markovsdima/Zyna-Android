@@ -67,6 +67,7 @@ import com.zyna.app.ui.contacts.createContactsStore
 import com.zyna.app.ui.contacts.createDirectRoomActionCoordinator
 import com.zyna.app.ui.createroom.CreateRoomAccess
 import com.zyna.app.ui.createroom.CreateRoomMode
+import com.zyna.app.ui.createroom.CreateRoomParent
 import com.zyna.app.ui.createroom.CreateRoomPostingPermission
 import com.zyna.app.ui.createroom.CreateRoomState
 import com.zyna.app.ui.createroom.CreateRoomTarget
@@ -326,7 +327,9 @@ class AppViewModel(
     private val createRoomStore = createCreateRoomStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
+        matrixSpaceService = matrixSpaceService,
         localCacheRepository = localCacheRepository,
+        spaceChildrenStore = spaceChildrenStore,
         onCreated = ::handleRoomCreated,
         onCancelled = ::handleCreateRoomCancelled,
         onWarning = { message, error -> Log.w(TAG, message, error) }
@@ -1371,12 +1374,39 @@ class AppViewModel(
         openCreateRoom(CreateRoomMode.STORYLINE)
     }
 
-    private fun openCreateRoom(mode: CreateRoomMode) {
+    fun openCreateTrack() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.Space ?: return
+        if (route.parentSpaceId != null) return
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val children = spaceChildrenStore.state.value
+        if (
+            children.target?.userId != userId ||
+            children.target.spaceId != route.spaceId ||
+            !children.management.canManage
+        ) {
+            return
+        }
+        openCreateRoom(
+            mode = CreateRoomMode.TRACK,
+            parent = CreateRoomParent(
+                spaceId = route.spaceId,
+                displayName = route.displayName
+            )
+        )
+    }
+
+    private fun openCreateRoom(
+        mode: CreateRoomMode,
+        parent: CreateRoomParent? = null
+    ) {
         val current = _uiState.value
         val userId = current.matrixState.userIdOrNull() ?: return
         val nextNavigation = current.navState.openCreateRoom()
         if (nextNavigation == current.navState) return
-        val didBegin = createRoomStore.begin(CreateRoomTarget(userId = userId, mode = mode))
+        val didBegin = createRoomStore.begin(
+            CreateRoomTarget(userId = userId, mode = mode, parent = parent)
+        )
         if (!didBegin) return
         _uiState.update { state -> state.withNavigationState(nextNavigation) }
     }
@@ -2918,6 +2948,10 @@ class AppViewModel(
                 val space = room.toSpaceRoom()
                 spaceRootsStore.confirmJoinedRoot(target.userId, space)
                 openSpace(space, parentSpaceId = null)
+            }
+            CreateRoomMode.TRACK -> {
+                val space = room.toSpaceRoom()
+                openSpace(space, parentSpaceId = requireNotNull(target.parent).spaceId)
             }
         }
     }

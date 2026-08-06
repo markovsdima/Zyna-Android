@@ -571,6 +571,7 @@ class MainActivity : AppCompatActivity() {
                 onLoadMore = appViewModel::loadMoreSpaceChildren,
                 onRetry = appViewModel::retrySpaceChildren,
                 onOpenDetails = appViewModel::openRoomDetails,
+                onCreateTrack = appViewModel::openCreateTrack,
                 onOpenAddRooms = appViewModel::openSpaceAddRooms,
                 onSetAddRoomsSearchQuery = appViewModel::setSpaceAddRoomsSearchQuery,
                 onToggleAddRoom = appViewModel::toggleSpaceRoomToAdd,

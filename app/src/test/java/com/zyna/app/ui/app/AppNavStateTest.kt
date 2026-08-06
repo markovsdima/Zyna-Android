@@ -334,7 +334,54 @@ class AppNavStateTest {
     }
 
     @Test
-    fun openCreateRoomIsOnlyAllowedFromChatsRoot() {
+    fun trackEditorKeepsParentActiveAndIsReplacedByCreatedTrack() {
+        val parent = AppRoute.Space(
+            spaceId = "!story:example.org",
+            parentSpaceId = null,
+            displayName = "Product",
+            avatarUrl = null,
+            topic = "Roadmap"
+        )
+        val editor = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = parent.spaceId,
+                parentSpaceId = parent.parentSpaceId,
+                displayName = parent.displayName,
+                avatarUrl = parent.avatarUrl,
+                topic = parent.topic
+            )
+            .openCreateRoom()
+
+        assertEquals(parent, editor.activeSpaceRoute)
+
+        val created = editor.openSpace(
+            spaceId = "!track:example.org",
+            parentSpaceId = parent.spaceId,
+            displayName = "Android",
+            avatarUrl = null,
+            topic = null
+        )
+
+        assertEquals(
+            listOf(
+                AppRoute.Rooms,
+                parent,
+                AppRoute.Space(
+                    spaceId = "!track:example.org",
+                    parentSpaceId = parent.spaceId,
+                    displayName = "Android",
+                    avatarUrl = null,
+                    topic = null
+                )
+            ),
+            created.chatsStack
+        )
+        assertFalse(created.chatsStack.contains(AppRoute.CreateRoom))
+    }
+
+    @Test
+    fun openCreateRoomIsRejectedOutsideChatsRootOrSpace() {
         val chatState = AppNavState()
             .enterMain()
             .openChat(roomId = "!room:example.org", displayName = "Room")

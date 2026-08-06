@@ -5,6 +5,7 @@ import com.zyna.app.data.matrix.MatrixRoomCreationKind
 import com.zyna.app.data.matrix.MatrixRoomCreationRequest
 import com.zyna.app.data.matrix.MatrixRoomPostingPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixSpaceMembership
 import com.zyna.app.data.profile.ProfileAvatarDraft
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CompletableDeferred
@@ -154,6 +155,258 @@ class CreateRoomStoreTest {
             assertEquals(target(), fixture.store.state.value.target)
             assertEquals("Existing draft", fixture.store.state.value.name)
             assertTrue(fixture.warnings.single() is IllegalArgumentException)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun trackRequiresAParentWithoutReplacingActiveSession() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        try {
+            fixture.store.begin(target())
+            fixture.store.setName("Existing draft")
+
+            val didBegin = fixture.store.begin(
+                CreateRoomTarget(userId = USER_ID, mode = CreateRoomMode.TRACK)
+            )
+
+            assertFalse(didBegin)
+            assertEquals(target(), fixture.store.state.value.target)
+            assertEquals("Existing draft", fixture.store.state.value.name)
+            assertTrue(fixture.warnings.single() is IllegalArgumentException)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun trackCreatesRestrictedSpaceLinksItAndFinishes() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        fixture.createBehavior = { request ->
+            room(request.name, request.avatarUrl).copy(
+                isSpace = true,
+                membership = MatrixSpaceMembership.JOINED
+            )
+        }
+        val trackTarget = trackTarget()
+        try {
+            fixture.store.begin(trackTarget)
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            val request = fixture.creationRequests.single()
+            assertEquals(MatrixRoomCreationKind.SPACE, request.kind)
+            assertEquals(
+                MatrixRoomCreationAccess.Restricted(PARENT_SPACE_ID),
+                request.access
+            )
+            assertEquals(
+                listOf(PARENT_SPACE_ID, PARENT_SPACE_ID),
+                fixture.parentPermissionChecks
+            )
+            assertEquals(listOf(ROOM_ID), fixture.childReadinessChecks)
+            assertEquals(listOf(PARENT_SPACE_ID to ROOM_ID), fixture.addCalls)
+            assertEquals(listOf(trackTarget to ROOM_ID), fixture.confirmedChildren)
+            assertEquals(trackTarget, fixture.createdRooms.single().first)
+            assertEquals(CreateRoomState(), fixture.store.state.value)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun trackWaitsForItsLocalRoomBeforeLinkingItToTheParent() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        val roomReady = CompletableDeferred<Unit>()
+        fixture.createBehavior = { request ->
+            room(request.name, request.avatarUrl).copy(
+                isSpace = true,
+                membership = MatrixSpaceMembership.JOINED
+            )
+        }
+        fixture.awaitChildReadyBehavior = { roomReady.await() }
+        try {
+            fixture.store.begin(trackTarget())
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.childReadinessChecks.isNotEmpty() }
+
+            assertEquals(ROOM_ID, fixture.store.state.value.pendingCreatedRoom?.id)
+            assertTrue(fixture.addCalls.isEmpty())
+            assertTrue(fixture.createdRooms.isEmpty())
+
+            roomReady.complete(Unit)
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(listOf(PARENT_SPACE_ID to ROOM_ID), fixture.addCalls)
+            assertEquals(1, fixture.creationRequests.size)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun failedTrackReadinessRetriesOnlyTheExistingSpace() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        var readinessAttempts = 0
+        fixture.createBehavior = { request ->
+            room(request.name, request.avatarUrl).copy(
+                isSpace = true,
+                membership = MatrixSpaceMembership.JOINED
+            )
+        }
+        fixture.awaitChildReadyBehavior = {
+            readinessAttempts += 1
+            if (readinessAttempts == 1) error("room not ready")
+        }
+        try {
+            fixture.store.begin(trackTarget())
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.error == CreateRoomError.ADD_TO_PARENT
+            }
+
+            assertEquals(ROOM_ID, fixture.store.state.value.pendingCreatedRoom?.id)
+            assertEquals(1, fixture.creationRequests.size)
+            assertTrue(fixture.addCalls.isEmpty())
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(1, fixture.creationRequests.size)
+            assertEquals(listOf(ROOM_ID, ROOM_ID), fixture.childReadinessChecks)
+            assertEquals(listOf(PARENT_SPACE_ID to ROOM_ID), fixture.addCalls)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun revokedParentPermissionStopsBeforeCreatingTrack() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        fixture.canManageParentBehavior = { false }
+        try {
+            fixture.store.begin(trackTarget())
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.error == CreateRoomError.PERMISSION_CHANGED
+            }
+
+            assertTrue(fixture.creationRequests.isEmpty())
+            assertTrue(fixture.addCalls.isEmpty())
+            assertTrue(fixture.store.state.value.canCreate)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun permissionRevokedAfterTrackCreationRetriesOnlyItsParentLink() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        var permissionChecks = 0
+        fixture.canManageParentBehavior = {
+            permissionChecks += 1
+            permissionChecks != 2
+        }
+        fixture.createBehavior = { request ->
+            room(request.name, request.avatarUrl).copy(
+                isSpace = true,
+                membership = MatrixSpaceMembership.JOINED
+            )
+        }
+        try {
+            fixture.store.begin(trackTarget())
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.error == CreateRoomError.PERMISSION_CHANGED
+            }
+
+            assertEquals(1, fixture.creationRequests.size)
+            assertEquals(ROOM_ID, fixture.store.state.value.pendingCreatedRoom?.id)
+            assertTrue(fixture.addCalls.isEmpty())
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(1, fixture.creationRequests.size)
+            assertEquals(listOf(PARENT_SPACE_ID to ROOM_ID), fixture.addCalls)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun failedTrackLinkRetriesOnlyTheExistingSpace() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        var addAttempts = 0
+        fixture.createBehavior = { request ->
+            room(request.name, request.avatarUrl).copy(
+                isSpace = true,
+                membership = MatrixSpaceMembership.JOINED
+            )
+        }
+        fixture.addChildBehavior = { _, _ ->
+            addAttempts += 1
+            if (addAttempts == 1) error("link failed")
+        }
+        try {
+            fixture.store.begin(trackTarget())
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition {
+                fixture.store.state.value.error == CreateRoomError.ADD_TO_PARENT
+            }
+
+            val failed = fixture.store.state.value
+            assertEquals(ROOM_ID, failed.pendingCreatedRoom?.id)
+            assertTrue(failed.canCreate)
+            assertEquals(1, fixture.creationRequests.size)
+            assertTrue(fixture.createdRooms.isEmpty())
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(1, fixture.creationRequests.size)
+            assertEquals(2, fixture.addCalls.size)
+            assertEquals(1, fixture.confirmedChildren.size)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun hierarchyReconcilesTrackLinkReportedAsFailed() = runBlocking {
+        val fixture = CreateRoomFixture(coroutineContext)
+        fixture.createBehavior = { request ->
+            room(request.name, request.avatarUrl).copy(
+                isSpace = true,
+                membership = MatrixSpaceMembership.JOINED
+            )
+        }
+        fixture.addChildBehavior = { _, _ -> error("ambiguous write") }
+        fixture.reconcileChildBehavior = { _, _ -> true }
+        try {
+            fixture.store.begin(trackTarget())
+            fixture.store.setName("Android")
+
+            fixture.store.create()
+            awaitCreateRoomCondition { fixture.createdRooms.isNotEmpty() }
+
+            assertEquals(listOf(trackTarget() to ROOM_ID), fixture.reconciledChildren)
+            assertEquals(listOf(trackTarget() to ROOM_ID), fixture.confirmedChildren)
+            assertEquals(1, fixture.warnings.size)
+            assertEquals(CreateRoomState(), fixture.store.state.value)
         } finally {
             fixture.close()
         }
@@ -513,6 +766,11 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
     val createdRooms = mutableListOf<Pair<CreateRoomTarget, MatrixRoomSummary>>()
     val cancelledTargets = mutableListOf<CreateRoomTarget>()
     val warnings = mutableListOf<Throwable>()
+    val parentPermissionChecks = mutableListOf<String>()
+    val childReadinessChecks = mutableListOf<String>()
+    val addCalls = mutableListOf<Pair<String, String>>()
+    val confirmedChildren = mutableListOf<Pair<CreateRoomTarget, String>>()
+    val reconciledChildren = mutableListOf<Pair<CreateRoomTarget, String>>()
 
     var uploadBehavior: suspend (String, String) -> String = { _, _ -> "mxc://example/avatar" }
     var aliasAvailableBehavior: suspend (String) -> Boolean = { true }
@@ -520,6 +778,10 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
         room(request.name, request.avatarUrl)
     }
     var cacheBehavior: suspend (String, MatrixRoomSummary) -> Unit = { _, _ -> }
+    var canManageParentBehavior: suspend (String) -> Boolean = { true }
+    var awaitChildReadyBehavior: suspend (String) -> Unit = { }
+    var addChildBehavior: suspend (String, String) -> Unit = { _, _ -> }
+    var reconcileChildBehavior: suspend (CreateRoomTarget, String) -> Boolean? = { _, _ -> false }
 
     val store = CreateRoomStore(
         scope = scope,
@@ -536,6 +798,10 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
                 calls += "available:$alias"
                 aliasAvailableBehavior(alias)
             },
+            canManageParent = { _, parentSpaceId ->
+                parentPermissionChecks += parentSpaceId
+                canManageParentBehavior(parentSpaceId)
+            },
             createRoom = { request ->
                 creationRequests += request
                 createBehavior(request)
@@ -543,6 +809,21 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
             cacheCreatedRoom = { userId, createdRoom ->
                 calls += "cache:${createdRoom.id}"
                 cacheBehavior(userId, createdRoom)
+            },
+            awaitChildReadyForParentLink = { _, childRoomId ->
+                childReadinessChecks += childRoomId
+                awaitChildReadyBehavior(childRoomId)
+            },
+            addChildToParent = { _, parentSpaceId, childRoomId ->
+                addCalls += parentSpaceId to childRoomId
+                addChildBehavior(parentSpaceId, childRoomId)
+            },
+            confirmChildAdded = { target, createdRoom ->
+                confirmedChildren += target to createdRoom.id
+            },
+            reconcileChildAdded = { target, childRoomId ->
+                reconciledChildren += target to childRoomId
+                reconcileChildBehavior(target, childRoomId)
             },
             deleteDraft = { path -> path?.let(deletedDrafts::add) }
         ),
@@ -568,6 +849,12 @@ private class CreateRoomFixture(parentContext: CoroutineContext) {
 }
 
 private fun target(): CreateRoomTarget = CreateRoomTarget(USER_ID)
+
+private fun trackTarget(): CreateRoomTarget = CreateRoomTarget(
+    userId = USER_ID,
+    mode = CreateRoomMode.TRACK,
+    parent = CreateRoomParent(PARENT_SPACE_ID, "Product")
+)
 
 private fun room(name: String, avatarUrl: String?): MatrixRoomSummary {
     return MatrixRoomSummary(id = ROOM_ID, displayName = name, avatarUrl = avatarUrl)

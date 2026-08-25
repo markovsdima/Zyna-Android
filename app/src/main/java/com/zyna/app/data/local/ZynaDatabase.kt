@@ -14,9 +14,14 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
     entities = [
         CachedRoomEntity::class,
         CachedTimelineMessageEntity::class,
-        OutgoingEnvelopeEntity::class
+        OutgoingEnvelopeEntity::class,
+        PendingReactionEntity::class,
+        MatrixRtcCallEntity::class,
+        MatrixRtcCallMembershipEntity::class,
+        CachedSpaceListSnapshotEntity::class,
+        CachedSpaceListEntryEntity::class
     ],
-    version = 18,
+    version = 29,
     exportSchema = true
 )
 abstract class ZynaDatabase : RoomDatabase() {
@@ -25,6 +30,12 @@ abstract class ZynaDatabase : RoomDatabase() {
     abstract fun cachedTimelineMessageDao(): CachedTimelineMessageDao
 
     abstract fun outgoingEnvelopeDao(): OutgoingEnvelopeDao
+
+    abstract fun pendingReactionDao(): PendingReactionDao
+
+    abstract fun matrixRtcCallHistoryDao(): MatrixRtcCallHistoryDao
+
+    abstract fun cachedSpaceDao(): CachedSpaceDao
 
     companion object {
         fun create(context: Context, passphraseStore: LocalDatabasePassphraseStore): ZynaDatabase {
@@ -63,7 +74,18 @@ abstract class ZynaDatabase : RoomDatabase() {
                     MIGRATION_14_15,
                     MIGRATION_15_16,
                     MIGRATION_16_17,
-                    MIGRATION_17_18
+                    MIGRATION_17_18,
+                    MIGRATION_18_19,
+                    MIGRATION_19_20,
+                    MIGRATION_20_21,
+                    MIGRATION_21_22,
+                    MIGRATION_22_23,
+                    MIGRATION_23_24,
+                    MIGRATION_24_25,
+                    MIGRATION_25_26,
+                    MIGRATION_26_27,
+                    MIGRATION_27_28,
+                    MIGRATION_28_29
                 )
                 .build()
         }
@@ -322,6 +344,268 @@ abstract class ZynaDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceWaveform TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceUploadedJson TEXT")
                 db.execSQL("ALTER TABLE outgoing_envelopes ADD COLUMN voiceUploadedAtMillis INTEGER")
+            }
+        }
+
+        private val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    ALTER TABLE timeline_messages
+                    ADD COLUMN reactionsJson TEXT NOT NULL DEFAULT '[]'
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS pending_reactions (
+                        userId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        id TEXT NOT NULL,
+                        targetEventId TEXT NOT NULL,
+                        reactionKey TEXT NOT NULL,
+                        state TEXT NOT NULL,
+                        transactionId TEXT,
+                        reactionEventId TEXT,
+                        redactionTransactionId TEXT,
+                        redactionEventId TEXT,
+                        createdAtMillis INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        failureMessage TEXT,
+                        lastAttemptAtMillis INTEGER,
+                        attemptCount INTEGER NOT NULL,
+                        PRIMARY KEY(userId, roomId, id)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_roomId_targetEventId_reactionKey
+                    ON pending_reactions(userId, roomId, targetEventId, reactionKey)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_state_updatedAtMillis
+                    ON pending_reactions(userId, state, updatedAtMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_pending_reactions_userId_roomId_reactionEventId
+                    ON pending_reactions(userId, roomId, reactionEventId)
+                    """.trimIndent()
+                )
+            }
+        }
+
+        private val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS matrix_rtc_calls (
+                        userId TEXT NOT NULL,
+                        eventId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        parentEventId TEXT,
+                        senderId TEXT NOT NULL,
+                        senderDisplayName TEXT,
+                        isOutgoing INTEGER NOT NULL,
+                        timestampMillis INTEGER NOT NULL,
+                        notificationType TEXT NOT NULL,
+                        callIntent TEXT,
+                        expiresAtMillis INTEGER,
+                        declinedByJson TEXT NOT NULL,
+                        isDirect INTEGER NOT NULL,
+                        hasOwnJoin INTEGER NOT NULL,
+                        hasRemoteJoin INTEGER NOT NULL,
+                        hasOwnLeave INTEGER NOT NULL,
+                        hasRemoteLeave INTEGER NOT NULL,
+                        lastMembershipEventTimestampMillis INTEGER,
+                        lastOwnLeaveTimestampMillis INTEGER,
+                        lastRemoteLeaveTimestampMillis INTEGER,
+                        outcome TEXT NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        PRIMARY KEY(userId, eventId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_calls_userId_timestampMillis
+                    ON matrix_rtc_calls(userId, timestampMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_calls_userId_roomId_timestampMillis
+                    ON matrix_rtc_calls(userId, roomId, timestampMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_calls_userId_outcome_expiresAtMillis
+                    ON matrix_rtc_calls(userId, outcome, expiresAtMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS matrix_rtc_call_memberships (
+                        userId TEXT NOT NULL,
+                        eventId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        eventType TEXT NOT NULL,
+                        stateKey TEXT,
+                        senderId TEXT NOT NULL,
+                        timestampMillis INTEGER NOT NULL,
+                        isLeave INTEGER NOT NULL,
+                        memberUserId TEXT,
+                        deviceId TEXT,
+                        memberId TEXT,
+                        callIntent TEXT,
+                        expiresAtMillis INTEGER,
+                        updatedAtMillis INTEGER NOT NULL,
+                        PRIMARY KEY(userId, eventId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_call_memberships_userId_roomId_timestampMillis
+                    ON matrix_rtc_call_memberships(userId, roomId, timestampMillis)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_call_memberships_userId_roomId_stateKey
+                    ON matrix_rtc_call_memberships(userId, roomId, stateKey)
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_matrix_rtc_call_memberships_userId_memberUserId_timestampMillis
+                    ON matrix_rtc_call_memberships(userId, memberUserId, timestampMillis)
+                    """.trimIndent()
+                )
+            }
+        }
+
+        private val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE timeline_messages ADD COLUMN timelineDetailsJson TEXT")
+            }
+        }
+
+        private val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN isSpace INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsTopic TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsJoinedMemberCount INTEGER")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsEncryption TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsAccess TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsHistoryVisibility TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsPinnedEventCount INTEGER")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanonicalAlias TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsUpdatedAtMillis INTEGER")
+            }
+        }
+
+        private val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanInviteMembers INTEGER")
+            }
+        }
+
+        private val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanChangeName INTEGER")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanChangeAvatar INTEGER")
+            }
+        }
+
+        private val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsRoomVersion TEXT")
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCreatorSemantics TEXT")
+            }
+        }
+
+        private val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS space_list_snapshots (
+                        userId TEXT NOT NULL,
+                        listId TEXT NOT NULL,
+                        spaceRoomId TEXT,
+                        spaceDisplayName TEXT,
+                        spaceAvatarUrl TEXT,
+                        spaceTopic TEXT,
+                        spaceMembership TEXT,
+                        spaceJoinedMemberCount INTEGER,
+                        spaceChildrenCount INTEGER,
+                        spaceCanonicalAlias TEXT,
+                        spaceJoinRule TEXT,
+                        spaceWorldReadable INTEGER,
+                        spaceGuestCanJoin INTEGER,
+                        spaceIsDirect INTEGER,
+                        spaceIsDm INTEGER,
+                        spaceViaJson TEXT,
+                        isKnown INTEGER NOT NULL,
+                        endReached INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        PRIMARY KEY(userId, listId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS space_list_entries (
+                        userId TEXT NOT NULL,
+                        listId TEXT NOT NULL,
+                        roomId TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        displayName TEXT NOT NULL,
+                        avatarUrl TEXT,
+                        topic TEXT,
+                        kind TEXT NOT NULL,
+                        membership TEXT NOT NULL,
+                        joinedMemberCount INTEGER NOT NULL,
+                        childrenCount INTEGER NOT NULL,
+                        canonicalAlias TEXT,
+                        joinRule TEXT NOT NULL,
+                        worldReadable INTEGER,
+                        guestCanJoin INTEGER NOT NULL,
+                        isDirect INTEGER,
+                        isDm INTEGER,
+                        viaJson TEXT NOT NULL,
+                        PRIMARY KEY(userId, listId, roomId)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE INDEX IF NOT EXISTS index_space_list_entries_userId_listId_position
+                    ON space_list_entries(userId, listId, position)
+                    """.trimIndent()
+                )
+            }
+        }
+
+        private val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN listPosition INTEGER")
+            }
+        }
+
+        private val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN spaceMembership TEXT")
+            }
+        }
+
+        private val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE rooms ADD COLUMN detailsCanChangeTopic INTEGER")
             }
         }
     }

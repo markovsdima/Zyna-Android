@@ -1,0 +1,306 @@
+package com.zyna.app.ui.navigation
+
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallHistoryItem
+import com.zyna.app.data.matrix.MatrixContact
+import com.zyna.app.data.matrix.MatrixEditTarget
+import com.zyna.app.data.matrix.MatrixForwardTarget
+import com.zyna.app.data.matrix.MatrixReplyInfo
+import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
+import com.zyna.app.data.matrix.MatrixRoomMember
+import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
+import com.zyna.app.data.matrix.MatrixRoomPermission
+import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixSpaceRoom
+import com.zyna.app.data.matrix.MatrixUserProfile
+import com.zyna.app.data.media.AudioPlaybackController
+import com.zyna.app.data.media.MatrixMediaLoader
+import com.zyna.app.data.media.VoiceRecorderController
+import com.zyna.app.data.presence.PresenceProviderMode
+import com.zyna.app.data.security.MatrixSessionSecurityAction
+import com.zyna.app.ui.app.AppTab
+import com.zyna.app.ui.chat.theme.ChatBubbleTheme
+import com.zyna.app.ui.createroom.CreateRoomAccess
+import com.zyna.app.ui.createroom.CreateRoomPostingPermission
+import com.zyna.app.ui.roomdetails.RoomSecurityAccessOption
+import com.zyna.app.ui.roompermissions.RoomPermissionAudience
+import com.zyna.app.ui.roomroles.RoomAssignableRole
+import com.zyna.app.ui.spaces.SpaceAccessOption
+import com.zyna.app.ui.theme.AppThemeMode
+
+data class ZynaRootActions(
+    val app: AppActions,
+    val navigation: NavigationActions,
+    val contacts: ContactsFeatureActions,
+    val calls: CallsFeatureActions,
+    val rooms: RoomsFeatureActions,
+    val spaces: SpacesFeatureActions,
+    val createRoom: CreateRoomActions,
+    val roomDetails: RoomDetailsFeatureActions,
+    val roomSecurity: RoomSecurityFeatureActions,
+    val roomPermissions: RoomPermissionsFeatureActions,
+    val roomRoles: RoomRolesFeatureActions,
+    val roomProfileEditor: RoomProfileEditorActions,
+    val roomMembers: RoomMembersFeatureActions,
+    val roomMemberModeration: RoomMemberModerationActions,
+    val inviteMembers: InviteMembersFeatureActions,
+    val chat: ChatFeatureActions,
+    val profile: ProfileFeatureActions,
+    val settings: SettingsFeatureActions
+)
+
+data class AppActions(
+    val onLogin: (homeserver: String, username: String, password: String) -> Unit,
+    val onSessionSecurityAction: (MatrixSessionSecurityAction) -> Unit
+)
+
+data class NavigationActions(
+    val onSelectTab: (AppTab) -> Unit,
+    val onNavigateBack: () -> Boolean
+)
+
+data class ContactsFeatureActions(
+    val onSearchQueryChanged: (String) -> Unit,
+    val onOpenChat: (MatrixContact) -> Unit,
+    val onCall: (MatrixContact) -> Unit
+)
+
+data class CallsFeatureActions(
+    val onOpenHistoryRoom: (MatrixRtcCallHistoryItem) -> Unit,
+    val onCallHistoryItem: (MatrixRtcCallHistoryItem) -> Unit,
+    val onConsumePendingLaunch: (Long) -> Unit,
+    val onStart: (roomId: String, roomName: String) -> Unit
+)
+
+data class RoomsFeatureActions(
+    val onOpenRoom: (MatrixRoomSummary) -> Unit,
+    val onCreateRoom: () -> Unit,
+    val onCreateStoryline: () -> Unit,
+    val onForwardRoomSelected: (MatrixRoomSummary) -> Unit,
+    val onVisibleRoomsChanged: (String, List<String>) -> Unit,
+    val onVisibleRoomsInactive: (String) -> Unit,
+    val onRetrySynchronization: () -> Unit
+)
+
+data class SpacesFeatureActions(
+    val onOpenRoom: (MatrixSpaceRoom) -> Unit,
+    val onLoadMore: () -> Unit,
+    val onRetry: () -> Unit,
+    val onOpenDetails: () -> Unit,
+    val onCreateChat: () -> Unit,
+    val onCreateTrack: () -> Unit,
+    val onOpenAddRooms: () -> Unit,
+    val onSetAddRoomsSearchQuery: (String) -> Unit,
+    val onToggleAddRoom: (String) -> Unit,
+    val onSaveAddedRooms: () -> Unit,
+    val onEnterManagement: () -> Unit,
+    val onExitManagement: () -> Unit,
+    val onToggleManagedRoom: (String) -> Unit,
+    val onToggleAllManagedRooms: () -> Unit,
+    val onRequestManagedRoomsRemoval: () -> Unit,
+    val onConfirmManagedRoomsRemoval: () -> Unit,
+    val onCancelManagedRoomsRemoval: () -> Unit,
+    val onPerformJoinAction: () -> Unit,
+    val onRetryJoinPreview: () -> Unit,
+    val onToggleLeaveRoom: (String) -> Unit,
+    val onToggleAllLeaveRooms: () -> Unit,
+    val onLeaveSpace: () -> Unit,
+    val onRetrySpaceLeave: () -> Unit,
+    val onResolveSpaceOwnership: () -> Unit,
+    val onRetryAccess: () -> Unit,
+    val onAccessChanged: (SpaceAccessOption) -> Unit,
+    val onAddressChanged: (String) -> Unit,
+    val onRetryAddressCheck: () -> Unit,
+    val onDirectoryVisibilityChanged: (Boolean) -> Unit,
+    val onSaveAccess: () -> Unit,
+    val onConfirmAccessDiscard: () -> Unit,
+    val onCancelAccessDiscard: () -> Unit
+)
+
+data class CreateRoomActions(
+    val onNameChanged: (String) -> Unit,
+    val onTopicChanged: (String) -> Unit,
+    val onAccessChanged: (CreateRoomAccess) -> Unit,
+    val onPostingPermissionChanged: (CreateRoomPostingPermission) -> Unit,
+    val onAliasChanged: (String) -> Unit,
+    val onRetryAliasCheck: () -> Unit,
+    val onPickAvatar: (Long) -> Unit,
+    val onRemoveAvatar: () -> Unit,
+    val onCreate: () -> Unit,
+    val onConfirmDiscard: () -> Unit,
+    val onCancelDiscard: () -> Unit
+)
+
+data class RoomDetailsFeatureActions(
+    val onRefresh: () -> Unit,
+    val onOpenProfileEditor: () -> Unit,
+    val onOpenMembers: () -> Unit,
+    val onOpenInviteMembers: () -> Unit,
+    val onOpenPermissions: () -> Unit,
+    val onOpenSpaceAccess: () -> Unit,
+    val onOpenRoomSecurity: () -> Unit,
+    val onRequestLeave: () -> Unit,
+    val onConfirmLeave: () -> Unit,
+    val onCancelLeave: () -> Unit
+)
+
+data class RoomSecurityFeatureActions(
+    val onRetry: () -> Unit,
+    val onAccessChanged: (RoomSecurityAccessOption) -> Unit,
+    val onAuthorizedSpaceToggled: (String) -> Unit,
+    val onHistoryChanged: (MatrixRoomHistoryVisibility) -> Unit,
+    val onEncryptionChanged: (Boolean) -> Unit,
+    val onConfirmEncryption: () -> Unit,
+    val onCancelEncryption: () -> Unit,
+    val onAddressChanged: (String) -> Unit,
+    val onRetryAddressCheck: () -> Unit,
+    val onDirectoryVisibilityChanged: (Boolean) -> Unit,
+    val onSave: () -> Unit,
+    val onConfirmDiscard: () -> Unit,
+    val onCancelDiscard: () -> Unit
+)
+
+data class RoomPermissionsFeatureActions(
+    val onRetry: () -> Unit,
+    val onOpenRoleManagement: () -> Unit,
+    val onSetPermission: (MatrixRoomPermission, RoomPermissionAudience) -> Unit
+)
+
+data class RoomRolesFeatureActions(
+    val onRetryMembers: () -> Unit,
+    val onSearchQueryChanged: (String) -> Unit,
+    val onSetRole: (MatrixRoomMember, RoomAssignableRole) -> Unit,
+    val onConfirmRoleChange: () -> Unit,
+    val onCancelRoleChange: () -> Unit
+)
+
+data class RoomProfileEditorActions(
+    val onDisplayNameChanged: (String) -> Unit,
+    val onTopicChanged: (String) -> Unit,
+    val onPickAvatar: (Long) -> Unit,
+    val onRemoveAvatar: () -> Unit,
+    val onSave: () -> Unit,
+    val onConfirmDiscard: () -> Unit,
+    val onCancelDiscard: () -> Unit
+)
+
+data class RoomMembersFeatureActions(
+    val onRetry: () -> Unit,
+    val onSearchQueryChanged: (String) -> Unit,
+    val onOpenInviteMembers: () -> Unit,
+    val onOpenMember: (MatrixRoomMember) -> Unit
+)
+
+data class RoomMemberModerationActions(
+    val onRetry: () -> Unit,
+    val onMessage: () -> Unit,
+    val onRequest: (MatrixRoomMemberModerationAction) -> Unit,
+    val onConfirm: (String?) -> Unit,
+    val onCancel: () -> Unit
+)
+
+data class InviteMembersFeatureActions(
+    val onRetryPreparation: () -> Unit,
+    val onRetrySearch: () -> Unit,
+    val onSearchQueryChanged: (String) -> Unit,
+    val onToggleSelection: (MatrixUserProfile) -> Unit,
+    val onSend: () -> Unit
+)
+
+data class ChatFeatureActions(
+    val navigation: ChatNavigationActions,
+    val timeline: ChatTimelineActions,
+    val composer: ChatComposerActions,
+    val messages: ChatMessageActions
+)
+
+data class ChatNavigationActions(
+    val onClose: () -> Unit,
+    val onOpenRoomDetails: () -> Unit
+)
+
+data class ChatTimelineActions(
+    val onLoadOlder: () -> Unit,
+    val onLoadNewer: () -> Unit,
+    val onJumpToLiveEdge: () -> Unit,
+    val onReplyHeaderClicked: (String) -> Unit,
+    val onVisibleReadReceiptCandidate: (
+        roomId: String,
+        eventId: String?,
+        canEstablishBaseline: Boolean
+    ) -> Unit,
+    val onJumpTargetConsumed: (String) -> Unit,
+    val onScrollToLiveEdgeConsumed: () -> Unit
+)
+
+data class ChatComposerActions(
+    val onSendMessage: (String) -> Boolean,
+    val onAttachPhotos: () -> Unit,
+    val onStartVoiceRecording: () -> Boolean,
+    val onStopVoiceRecording: () -> Unit,
+    val onCancelVoiceRecording: () -> Unit,
+    val onFinishVoiceRecordingForSend: () -> Boolean,
+    val onSendVoiceRecording: () -> Boolean,
+    val onToggleVoicePreviewPlayback: () -> Unit,
+    val onReplyToMessage: (MatrixReplyInfo) -> Unit,
+    val onCancelReply: () -> Unit,
+    val onEditMessage: (MatrixEditTarget) -> Unit,
+    val onCancelEdit: () -> Unit,
+    val onForwardMessage: (MatrixForwardTarget) -> Unit,
+    val onCancelForward: () -> Unit
+)
+
+data class ChatMessageActions(
+    val onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
+    val onRetryOutgoingEnvelope: (String) -> Unit,
+    val onDiscardOutgoingEnvelope: (String) -> Unit,
+    val onRedactMessage: (String) -> Unit,
+    val onRedactMessages: (List<String>) -> Unit,
+    val onDebugMarkOutgoingEnvelopeFailed: (String) -> Unit
+)
+
+data class ProfileFeatureActions(
+    val user: UserProfileActions,
+    val own: OwnProfileActions
+)
+
+data class UserProfileActions(
+    val onOpen: (userId: String, displayName: String?, avatarUrl: String?) -> Unit,
+    val onOpenChat: () -> Unit,
+    val onCall: () -> Unit,
+    val onRefresh: () -> Unit
+)
+
+data class OwnProfileActions(
+    val onOpenSettings: () -> Unit,
+    val onOpenEdit: () -> Unit,
+    val onRefresh: () -> Unit,
+    val onDisplayNameChanged: (String) -> Unit,
+    val onPickAvatar: (Long) -> Unit,
+    val onRemoveAvatar: () -> Unit,
+    val onSave: () -> Unit,
+    val onConfirmEditExit: () -> Unit,
+    val onCancelEditExit: () -> Unit
+)
+
+data class SettingsFeatureActions(
+    val onOpenChatTheme: () -> Unit,
+    val onOpenSessionSecurity: () -> Unit,
+    val onSelectChatBubbleTheme: (String) -> Unit,
+    val onSelectAppThemeMode: (AppThemeMode) -> Unit,
+    val onSelectPresenceProvider: (PresenceProviderMode) -> Unit,
+    val onLogoutRequested: () -> Unit,
+    val onLogoutConfirmed: () -> Unit,
+    val onLogoutCancelled: () -> Unit
+)
+
+data class ZynaRenderDependencies(
+    val matrixMediaLoader: MatrixMediaLoader?,
+    val audioPlaybackController: AudioPlaybackController?,
+    val voiceRecorderController: VoiceRecorderController?
+)
+
+data class ZynaRootPreferences(
+    val chatBubbleTheme: ChatBubbleTheme,
+    val appThemeMode: AppThemeMode,
+    val presenceProvider: PresenceProviderMode
+)

@@ -135,6 +135,14 @@ alignas(uint32_t) constexpr uint32_t kChatBackdropStatsCompSpv[] =
 #include "chat_backdrop_stats_comp_spv.inc"
 ;
 
+alignas(uint32_t) constexpr uint32_t kChatTeleportVertSpv[] =
+#include "chat_teleport_vert_spv.inc"
+;
+
+alignas(uint32_t) constexpr uint32_t kChatTeleportFragSpv[] =
+#include "chat_teleport_frag_spv.inc"
+;
+
 struct GpuDroplet {
     float position[2];
     float velocity[2];
@@ -280,6 +288,19 @@ struct BackdropStatsPushConstants {
     float textureOrigin[2];
     float cornerRadius;
 };
+
+struct TeleportPushConstants {
+    float outputSize[2];
+    float outputOrigin[2];
+    float viewportRect[4];
+    float sceneTextureSize[2];
+    float progress;
+    float directionSign;
+};
+
+static_assert(sizeof(TeleportPushConstants) == sizeof(float) * 12);
+static_assert(offsetof(TeleportPushConstants, viewportRect) == 16);
+static_assert(offsetof(TeleportPushConstants, progress) == 40);
 
 static_assert(offsetof(BackdropStatsPushConstants, rect) == 16);
 static_assert(offsetof(BackdropStatsPushConstants, textureOrigin) == 32);
@@ -442,9 +463,99 @@ public:
         }
         const bool imported = importBackdropHardwareBufferLocked(env, hardwareBuffer);
         if (imported) {
+            if (teleportActive_ && backdropCompositeImageView_ != VK_NULL_HANDLE) {
+                updateBackdropSourceDescriptorsLocked(backdropCompositeImageView_);
+            }
             backdropNeedsRender_ = true;
         }
         return imported;
+    }
+
+    bool setTeleportHardwareBuffers(
+        JNIEnv* env,
+        jobject oldHardwareBuffer,
+        jobject newHardwareBuffer,
+        float viewportLeft,
+        float viewportTop,
+        float viewportRight,
+        float viewportBottom,
+        float captureLeft,
+        float captureTop,
+        int captureWidth,
+        int captureHeight,
+        float directionSign
+    ) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (oldHardwareBuffer == nullptr ||
+            newHardwareBuffer == nullptr ||
+            viewportRight <= viewportLeft ||
+            viewportBottom <= viewportTop ||
+            captureWidth <= 0 ||
+            captureHeight <= 0) {
+            return false;
+        }
+
+        waitForFrameFenceLocked();
+        destroyTeleportSceneLocked(false);
+        if (!importTeleportHardwareBufferLocked(env, oldHardwareBuffer, teleportOldEntry_) ||
+            !importTeleportHardwareBufferLocked(env, newHardwareBuffer, teleportNewEntry_)) {
+            destroyTeleportSceneLocked(true);
+            return false;
+        }
+        if (teleportOldEntry_.width != teleportNewEntry_.width ||
+            teleportOldEntry_.height != teleportNewEntry_.height) {
+            logWarn("Teleport scene dimensions do not match");
+            destroyTeleportSceneLocked(true);
+            return false;
+        }
+        if (!ensureBackdropBlurSizeResourcesLocked(
+                static_cast<uint32_t>(captureWidth),
+                static_cast<uint32_t>(captureHeight)
+            )) {
+            destroyTeleportSceneLocked(true);
+            return false;
+        }
+
+        teleportViewportRect_ = {
+            viewportLeft,
+            viewportTop,
+            viewportRight,
+            viewportBottom
+        };
+        teleportCaptureOrigin_ = {captureLeft, captureTop};
+        teleportDirectionSign_ = directionSign >= 0.0f ? 1.0f : -1.0f;
+        teleportProgress_ = 0.0f;
+        teleportNeedsTransition_ = true;
+        teleportActive_ = true;
+        backdropWidth_ = captureWidth;
+        backdropHeight_ = captureHeight;
+        backdropTextureOrigin_ = {captureLeft, captureTop};
+        updateTeleportDescriptorLocked();
+        updateBackdropSourceDescriptorsLocked(backdropCompositeImageView_);
+        backdropNeedsRender_ = true;
+        return true;
+    }
+
+    bool updateTeleportProgress(float progress) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!teleportActive_) {
+            return false;
+        }
+        teleportProgress_ = std::clamp(progress, 0.0f, 1.0f);
+        backdropNeedsRender_ = true;
+        return true;
+    }
+
+    void clearTeleport() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!teleportActive_ &&
+            teleportOldEntry_.hardwareBuffer == nullptr &&
+            teleportNewEntry_.hardwareBuffer == nullptr) {
+            return;
+        }
+        waitForFrameFenceLocked();
+        destroyTeleportSceneLocked(true);
+        backdropNeedsRender_ = true;
     }
 
     bool updateBackdropRects(
@@ -1175,6 +1286,7 @@ private:
             createBlobResourcesLocked() &&
             createSplashDescriptorResourcesLocked() &&
             createBackdropDescriptorResourcesLocked() &&
+            createTeleportDescriptorResourcesLocked() &&
             createBackdropStatsResourcesLocked() &&
             createBackdropBlurResourcesLocked() &&
             createBackdropOverlayResourcesLocked() &&
@@ -1189,6 +1301,7 @@ private:
             createBackdropStatsPipelineLocked() &&
             createBackdropOverlayPipelineLocked() &&
             createBackdropBlurPipelineLocked() &&
+            createTeleportPipelinesLocked() &&
             createBackdropPipelineLocked() &&
             createCompositePipelineLocked() &&
             createFramebuffersLocked() &&
@@ -1393,7 +1506,8 @@ private:
         dependencies[1].srcSubpass = 0;
         dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
         dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[1].dstStageMask =
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
@@ -2955,6 +3069,102 @@ private:
         );
     }
 
+    bool createTeleportDescriptorResourcesLocked() {
+        if (teleportDescriptorSetLayout_ == VK_NULL_HANDLE) {
+            std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+            for (uint32_t index = 0; index < bindings.size(); ++index) {
+                bindings[index].binding = index;
+                bindings[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                bindings[index].descriptorCount = 1;
+                bindings[index].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            }
+
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+            if (!isOk(
+                    vkCreateDescriptorSetLayout(
+                        device_,
+                        &layoutInfo,
+                        nullptr,
+                        &teleportDescriptorSetLayout_
+                    ),
+                    "vkCreateDescriptorSetLayout teleport failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (teleportDescriptorPool_ == VK_NULL_HANDLE) {
+            VkDescriptorPoolSize poolSize{};
+            poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            poolSize.descriptorCount = 2;
+
+            VkDescriptorPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            poolInfo.maxSets = 1;
+            poolInfo.poolSizeCount = 1;
+            poolInfo.pPoolSizes = &poolSize;
+            if (!isOk(
+                    vkCreateDescriptorPool(device_, &poolInfo, nullptr, &teleportDescriptorPool_),
+                    "vkCreateDescriptorPool teleport failed"
+                )) {
+                return false;
+            }
+        }
+
+        if (teleportDescriptorSet_ == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo allocateInfo{};
+            allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocateInfo.descriptorPool = teleportDescriptorPool_;
+            allocateInfo.descriptorSetCount = 1;
+            allocateInfo.pSetLayouts = &teleportDescriptorSetLayout_;
+            if (!isOk(
+                    vkAllocateDescriptorSets(device_, &allocateInfo, &teleportDescriptorSet_),
+                    "vkAllocateDescriptorSets teleport failed"
+                )) {
+                return false;
+            }
+        }
+        updateTeleportDescriptorLocked();
+        return true;
+    }
+
+    void updateTeleportDescriptorLocked() {
+        if (teleportDescriptorSet_ == VK_NULL_HANDLE ||
+            backdropSampler_ == VK_NULL_HANDLE ||
+            teleportOldEntry_.imageView == VK_NULL_HANDLE ||
+            teleportNewEntry_.imageView == VK_NULL_HANDLE) {
+            return;
+        }
+
+        std::array<VkDescriptorImageInfo, 2> imageInfos{};
+        imageInfos[0].sampler = backdropSampler_;
+        imageInfos[0].imageView = teleportOldEntry_.imageView;
+        imageInfos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[1].sampler = backdropSampler_;
+        imageInfos[1].imageView = teleportNewEntry_.imageView;
+        imageInfos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        for (uint32_t index = 0; index < writes.size(); ++index) {
+            writes[index].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[index].dstSet = teleportDescriptorSet_;
+            writes[index].dstBinding = index;
+            writes[index].descriptorCount = 1;
+            writes[index].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[index].pImageInfo = &imageInfos[index];
+        }
+        vkUpdateDescriptorSets(
+            device_,
+            static_cast<uint32_t>(writes.size()),
+            writes.data(),
+            0,
+            nullptr
+        );
+    }
+
     bool createBackdropStatsResourcesLocked() {
         if (!createBackdropStatsBufferLocked()) {
             return false;
@@ -4038,6 +4248,154 @@ private:
         return true;
     }
 
+    bool importTeleportHardwareBufferLocked(
+        JNIEnv* env,
+        jobject hardwareBuffer,
+        BackdropImportEntry& outEntry
+    ) {
+        if (device_ == VK_NULL_HANDLE ||
+            !hardwareBufferImportSupported_ ||
+            getAndroidHardwareBufferProperties_ == nullptr ||
+            hardwareBuffer == nullptr) {
+            logWarn("Teleport AHB import unavailable");
+            return false;
+        }
+
+        AHardwareBuffer* nativeBuffer = AHardwareBuffer_fromHardwareBuffer(env, hardwareBuffer);
+        if (nativeBuffer == nullptr) {
+            logWarn("Teleport AHardwareBuffer_fromHardwareBuffer failed");
+            return false;
+        }
+        AHardwareBuffer_acquire(nativeBuffer);
+
+        AHardwareBuffer_Desc desc{};
+        AHardwareBuffer_describe(nativeBuffer, &desc);
+        if (desc.width == 0 || desc.height == 0 || desc.layers != 1) {
+            logWarn("Unsupported teleport AHB dimensions");
+            AHardwareBuffer_release(nativeBuffer);
+            return false;
+        }
+
+        VkAndroidHardwareBufferFormatPropertiesANDROID formatProperties{};
+        formatProperties.sType =
+            VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID;
+        VkAndroidHardwareBufferPropertiesANDROID bufferProperties{};
+        bufferProperties.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;
+        bufferProperties.pNext = &formatProperties;
+        if (!isOk(
+                getAndroidHardwareBufferProperties_(device_, nativeBuffer, &bufferProperties),
+                "vkGetAndroidHardwareBufferPropertiesANDROID teleport failed"
+            )) {
+            AHardwareBuffer_release(nativeBuffer);
+            return false;
+        }
+        if (formatProperties.format == VK_FORMAT_UNDEFINED) {
+            logWarn("Unsupported external-only teleport format");
+            AHardwareBuffer_release(nativeBuffer);
+            return false;
+        }
+
+        VkImage importedImage = VK_NULL_HANDLE;
+        VkDeviceMemory importedMemory = VK_NULL_HANDLE;
+        VkImageView importedView = VK_NULL_HANDLE;
+        auto cleanupFailedImport = [&]() {
+            if (importedView != VK_NULL_HANDLE) {
+                vkDestroyImageView(device_, importedView, nullptr);
+            }
+            if (importedImage != VK_NULL_HANDLE) {
+                vkDestroyImage(device_, importedImage, nullptr);
+            }
+            if (importedMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, importedMemory, nullptr);
+            }
+            AHardwareBuffer_release(nativeBuffer);
+        };
+
+        VkExternalMemoryImageCreateInfo externalImageInfo{};
+        externalImageInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        externalImageInfo.handleTypes =
+            VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.pNext = &externalImageInfo;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.extent = {desc.width, desc.height, 1};
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.format = formatProperties.format;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!isOk(
+                vkCreateImage(device_, &imageInfo, nullptr, &importedImage),
+                "vkCreateImage teleport import failed"
+            )) {
+            cleanupFailedImport();
+            return false;
+        }
+
+        uint32_t memoryTypeIndex = 0;
+        if (!findMemoryTypeLocked(bufferProperties.memoryTypeBits, 0, memoryTypeIndex)) {
+            logWarn("No memory type for teleport AHB");
+            cleanupFailedImport();
+            return false;
+        }
+
+        VkMemoryDedicatedAllocateInfo dedicatedInfo{};
+        dedicatedInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+        dedicatedInfo.image = importedImage;
+        VkImportAndroidHardwareBufferInfoANDROID importInfo{};
+        importInfo.sType = VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID;
+        importInfo.pNext = &dedicatedInfo;
+        importInfo.buffer = nativeBuffer;
+        VkMemoryAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocateInfo.pNext = &importInfo;
+        allocateInfo.allocationSize = bufferProperties.allocationSize;
+        allocateInfo.memoryTypeIndex = memoryTypeIndex;
+        if (!isOk(
+                vkAllocateMemory(device_, &allocateInfo, nullptr, &importedMemory),
+                "vkAllocateMemory teleport import failed"
+            ) ||
+            !isOk(
+                vkBindImageMemory(device_, importedImage, importedMemory, 0),
+                "vkBindImageMemory teleport failed"
+            )) {
+            cleanupFailedImport();
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = importedImage;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = formatProperties.format;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (!isOk(
+                vkCreateImageView(device_, &viewInfo, nullptr, &importedView),
+                "vkCreateImageView teleport failed"
+            )) {
+            cleanupFailedImport();
+            return false;
+        }
+
+        outEntry.hardwareBuffer = nativeBuffer;
+        outEntry.image = importedImage;
+        outEntry.memory = importedMemory;
+        outEntry.imageView = importedView;
+        outEntry.width = static_cast<int>(desc.width);
+        outEntry.height = static_cast<int>(desc.height);
+        outEntry.format = formatProperties.format;
+        return true;
+    }
+
     BackdropImportEntry* findBackdropImportEntryLocked(AHardwareBuffer* hardwareBuffer) const {
         if (hardwareBuffer == nullptr) {
             return nullptr;
@@ -4296,11 +4654,42 @@ private:
         backdropNeedsRender_ = false;
     }
 
-    bool hasBackdropImageLocked() const {
-        return !backdropRects_.empty() &&
+    void destroyTeleportSceneLocked(bool restoreBackdropDescriptors) {
+        destroyBackdropImportEntryLocked(teleportOldEntry_);
+        destroyBackdropImportEntryLocked(teleportNewEntry_);
+        teleportActive_ = false;
+        teleportNeedsTransition_ = false;
+        teleportProgress_ = 0.0f;
+        teleportDirectionSign_ = 1.0f;
+        teleportViewportRect_ = {};
+        teleportCaptureOrigin_ = {};
+        if (restoreBackdropDescriptors &&
             activeBackdropEntry_ != nullptr &&
-            activeBackdropEntry_->image != VK_NULL_HANDLE &&
-            activeBackdropEntry_->imageView != VK_NULL_HANDLE &&
+            activeBackdropEntry_->imageView != VK_NULL_HANDLE) {
+            backdropWidth_ = activeBackdropEntry_->width;
+            backdropHeight_ = activeBackdropEntry_->height;
+            updateBackdropSourceDescriptorsLocked(activeBackdropEntry_->imageView);
+        }
+    }
+
+    bool hasTeleportSceneLocked() const {
+        return teleportActive_ &&
+            teleportOldEntry_.image != VK_NULL_HANDLE &&
+            teleportOldEntry_.imageView != VK_NULL_HANDLE &&
+            teleportNewEntry_.image != VK_NULL_HANDLE &&
+            teleportNewEntry_.imageView != VK_NULL_HANDLE &&
+            teleportDescriptorSet_ != VK_NULL_HANDLE &&
+            teleportOldEntry_.width > 0 &&
+            teleportOldEntry_.height > 0;
+    }
+
+    bool hasBackdropImageLocked() const {
+        const bool hasSource = hasTeleportSceneLocked() ||
+            (activeBackdropEntry_ != nullptr &&
+                activeBackdropEntry_->image != VK_NULL_HANDLE &&
+                activeBackdropEntry_->imageView != VK_NULL_HANDLE);
+        return !backdropRects_.empty() &&
+            hasSource &&
             backdropDescriptorSet_ != VK_NULL_HANDLE &&
             backdropBlurImageView_ != VK_NULL_HANDLE &&
             backdropWidth_ > 0 &&
@@ -4308,7 +4697,7 @@ private:
     }
 
     void transitionBackdropImageForSamplingLocked(VkCommandBuffer commandBuffer) {
-        if (!hasBackdropImageLocked() || !backdropNeedsTransition_) {
+        if (teleportActive_ || !hasBackdropImageLocked() || !backdropNeedsTransition_) {
             return;
         }
 
@@ -4340,6 +4729,46 @@ private:
             &barrier
         );
         backdropNeedsTransition_ = false;
+    }
+
+    void transitionTeleportImagesForSamplingLocked(VkCommandBuffer commandBuffer) {
+        if (!hasTeleportSceneLocked() || !teleportNeedsTransition_) {
+            return;
+        }
+
+        std::array<VkImageMemoryBarrier, 2> barriers{};
+        const std::array<VkImage, 2> images = {
+            teleportOldEntry_.image,
+            teleportNewEntry_.image
+        };
+        for (uint32_t index = 0; index < barriers.size(); ++index) {
+            barriers[index].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[index].srcAccessMask = 0;
+            barriers[index].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barriers[index].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[index].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barriers[index].srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+            barriers[index].dstQueueFamilyIndex = queueFamilyIndex_;
+            barriers[index].image = images[index];
+            barriers[index].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barriers[index].subresourceRange.baseMipLevel = 0;
+            barriers[index].subresourceRange.levelCount = 1;
+            barriers[index].subresourceRange.baseArrayLayer = 0;
+            barriers[index].subresourceRange.layerCount = 1;
+        }
+        vkCmdPipelineBarrier(
+            commandBuffer,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0,
+            0,
+            nullptr,
+            0,
+            nullptr,
+            static_cast<uint32_t>(barriers.size()),
+            barriers.data()
+        );
+        teleportNeedsTransition_ = false;
     }
 
     bool hasBackdropStatsResourcesLocked() const {
@@ -5472,6 +5901,152 @@ private:
         return didCreatePipeline;
     }
 
+    bool createTeleportPipelinesLocked() {
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = sizeof(TeleportPushConstants);
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &teleportDescriptorSetLayout_;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges = &pushConstantRange;
+        if (!isOk(
+                vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &teleportPipelineLayout_),
+                "vkCreatePipelineLayout teleport failed"
+            )) {
+            return false;
+        }
+
+        VkShaderModule vertexShader = createShaderModuleLocked(
+            kChatTeleportVertSpv,
+            sizeof(kChatTeleportVertSpv)
+        );
+        VkShaderModule fragmentShader = createShaderModuleLocked(
+            kChatTeleportFragSpv,
+            sizeof(kChatTeleportFragSpv)
+        );
+        if (vertexShader == VK_NULL_HANDLE || fragmentShader == VK_NULL_HANDLE) {
+            if (vertexShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, vertexShader, nullptr);
+            }
+            if (fragmentShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_, fragmentShader, nullptr);
+            }
+            vkDestroyPipelineLayout(device_, teleportPipelineLayout_, nullptr);
+            teleportPipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+
+        std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
+        shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        shaderStages[0].module = vertexShader;
+        shaderStages[0].pName = "main";
+        shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        shaderStages[1].module = fragmentShader;
+        shaderStages[1].pName = "main";
+
+        VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
+        vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+        inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo viewportState{};
+        viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewportState.viewportCount = 1;
+        viewportState.scissorCount = 1;
+        VkPipelineRasterizationStateCreateInfo rasterization{};
+        rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterization.cullMode = VK_CULL_MODE_NONE;
+        rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterization.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo multisampling{};
+        multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState blendAttachment{};
+        blendAttachment.blendEnable = VK_FALSE;
+        blendAttachment.colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo colorBlending{};
+        colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        colorBlending.attachmentCount = 1;
+        colorBlending.pAttachments = &blendAttachment;
+        const std::array<VkDynamicState, 2> dynamicStates = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR
+        };
+        VkPipelineDynamicStateCreateInfo dynamicState{};
+        dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+        dynamicState.pDynamicStates = dynamicStates.data();
+
+        VkGraphicsPipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        pipelineInfo.stageCount = static_cast<uint32_t>(shaderStages.size());
+        pipelineInfo.pStages = shaderStages.data();
+        pipelineInfo.pVertexInputState = &vertexInputInfo;
+        pipelineInfo.pInputAssemblyState = &inputAssembly;
+        pipelineInfo.pViewportState = &viewportState;
+        pipelineInfo.pRasterizationState = &rasterization;
+        pipelineInfo.pMultisampleState = &multisampling;
+        pipelineInfo.pColorBlendState = &colorBlending;
+        pipelineInfo.pDynamicState = &dynamicState;
+        pipelineInfo.layout = teleportPipelineLayout_;
+        pipelineInfo.subpass = 0;
+
+        pipelineInfo.renderPass = backdropBlurRenderPass_;
+        const bool didCreateGlassPipeline = isOk(
+            vkCreateGraphicsPipelines(
+                device_,
+                VK_NULL_HANDLE,
+                1,
+                &pipelineInfo,
+                nullptr,
+                &teleportGlassPipeline_
+            ),
+            "vkCreateGraphicsPipelines teleport glass failed"
+        );
+        if (didCreateGlassPipeline) {
+            pipelineInfo.renderPass = renderPass_;
+            isOk(
+                vkCreateGraphicsPipelines(
+                    device_,
+                    VK_NULL_HANDLE,
+                    1,
+                    &pipelineInfo,
+                    nullptr,
+                    &teleportPresentPipeline_
+                ),
+                "vkCreateGraphicsPipelines teleport present failed"
+            );
+        }
+
+        vkDestroyShaderModule(device_, fragmentShader, nullptr);
+        vkDestroyShaderModule(device_, vertexShader, nullptr);
+        if (!didCreateGlassPipeline || teleportPresentPipeline_ == VK_NULL_HANDLE) {
+            if (teleportGlassPipeline_ != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device_, teleportGlassPipeline_, nullptr);
+                teleportGlassPipeline_ = VK_NULL_HANDLE;
+            }
+            if (teleportPresentPipeline_ != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device_, teleportPresentPipeline_, nullptr);
+                teleportPresentPipeline_ = VK_NULL_HANDLE;
+            }
+            vkDestroyPipelineLayout(device_, teleportPipelineLayout_, nullptr);
+            teleportPipelineLayout_ = VK_NULL_HANDLE;
+            return false;
+        }
+        return true;
+    }
+
     bool createBackdropPipelineLocked() {
         VkPushConstantRange pushConstantRange{};
         pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -6168,7 +6743,8 @@ private:
         const VkRect2D paintSplashWorkRect = hasPaintSplashes
             ? paintSplashWorkRectLocked(frameTimeNs)
             : VkRect2D{};
-        currentFrameTraceHasEffects_ = hasPaintSplashGlassSurface;
+        currentFrameTraceHasEffects_ =
+            hasPaintSplashGlassSurface || hasTeleportSceneLocked();
         currentFrameTraceFlags_.hasSplash = hasPaintSplashes;
         currentFrameTraceFlags_.hasWetSurface = hasPaintSplashGlassSurface;
         currentFrameTraceFlags_.hasBackdrop = hasBackdropImageLocked();
@@ -6189,9 +6765,12 @@ private:
                 hasPaintSplashes
             );
         }
+        transitionTeleportImagesForSamplingLocked(commandBuffer);
         transitionBackdropImageForSamplingLocked(commandBuffer);
         writeFrameTraceTimestampLocked(commandBuffer, "backdropTransition");
-        if (!recordBackdropOverlayCompositeLocked(commandBuffer, hasPaintSplashes) &&
+        if (hasTeleportSceneLocked()) {
+            recordTeleportGlassSceneLocked(commandBuffer);
+        } else if (!recordBackdropOverlayCompositeLocked(commandBuffer, hasPaintSplashes) &&
             activeBackdropEntry_ != nullptr) {
             updateBackdropSourceDescriptorsLocked(activeBackdropEntry_->imageView);
         }
@@ -7585,6 +8164,107 @@ private:
         return true;
     }
 
+    TeleportPushConstants teleportPushConstantsLocked(
+        float outputWidth,
+        float outputHeight,
+        float outputLeft,
+        float outputTop
+    ) const {
+        TeleportPushConstants pushConstants{};
+        pushConstants.outputSize[0] = outputWidth;
+        pushConstants.outputSize[1] = outputHeight;
+        pushConstants.outputOrigin[0] = outputLeft;
+        pushConstants.outputOrigin[1] = outputTop;
+        std::copy(
+            teleportViewportRect_.begin(),
+            teleportViewportRect_.end(),
+            pushConstants.viewportRect
+        );
+        pushConstants.sceneTextureSize[0] =
+            static_cast<float>(std::max(1, teleportOldEntry_.width));
+        pushConstants.sceneTextureSize[1] =
+            static_cast<float>(std::max(1, teleportOldEntry_.height));
+        pushConstants.progress = teleportProgress_;
+        pushConstants.directionSign = teleportDirectionSign_;
+        return pushConstants;
+    }
+
+    bool recordTeleportGlassSceneLocked(VkCommandBuffer commandBuffer) {
+        if (!hasTeleportSceneLocked() ||
+            backdropCompositeImage_ == VK_NULL_HANDLE ||
+            backdropCompositeFramebuffer_ == VK_NULL_HANDLE ||
+            backdropBlurRenderPass_ == VK_NULL_HANDLE ||
+            teleportGlassPipeline_ == VK_NULL_HANDLE ||
+            teleportPipelineLayout_ == VK_NULL_HANDLE ||
+            backdropWidth_ <= 0 ||
+            backdropHeight_ <= 0) {
+            return false;
+        }
+
+        transitionImageForColorAttachmentLocked(
+            commandBuffer,
+            backdropCompositeImage_,
+            backdropCompositeLayout_
+        );
+
+        VkRenderPassBeginInfo renderPassInfo{};
+        renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        renderPassInfo.renderPass = backdropBlurRenderPass_;
+        renderPassInfo.framebuffer = backdropCompositeFramebuffer_;
+        renderPassInfo.renderArea.offset = {0, 0};
+        renderPassInfo.renderArea.extent = {
+            static_cast<uint32_t>(backdropWidth_),
+            static_cast<uint32_t>(backdropHeight_)
+        };
+        vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(backdropWidth_);
+        viewport.height = static_cast<float>(backdropHeight_);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        VkRect2D scissor{};
+        scissor.offset = {0, 0};
+        scissor.extent = {
+            static_cast<uint32_t>(backdropWidth_),
+            static_cast<uint32_t>(backdropHeight_)
+        };
+        const TeleportPushConstants pushConstants = teleportPushConstantsLocked(
+            viewport.width,
+            viewport.height,
+            teleportCaptureOrigin_[0],
+            teleportCaptureOrigin_[1]
+        );
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, teleportGlassPipeline_);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            teleportPipelineLayout_,
+            0,
+            1,
+            &teleportDescriptorSet_,
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            teleportPipelineLayout_,
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(TeleportPushConstants),
+            &pushConstants
+        );
+        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+        vkCmdEndRenderPass(commandBuffer);
+        backdropCompositeLayout_ = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        return true;
+    }
+
     void recordBackdropBlurPassesLocked(VkCommandBuffer commandBuffer) {
         if (!hasBackdropImageLocked() ||
             !hasBackdropBlurResourcesLocked() ||
@@ -7661,7 +8341,8 @@ private:
         VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
             barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            srcStage =
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         }
         barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
@@ -7843,6 +8524,82 @@ private:
         vkCmdEndRenderPass(commandBuffer);
     }
 
+    void recordTeleportScenePresentLocked(VkCommandBuffer commandBuffer) {
+        if (!hasTeleportSceneLocked() ||
+            teleportPresentPipeline_ == VK_NULL_HANDLE ||
+            teleportPipelineLayout_ == VK_NULL_HANDLE ||
+            swapchainExtent_.width == 0 ||
+            swapchainExtent_.height == 0) {
+            return;
+        }
+
+        const int32_t left = static_cast<int32_t>(std::max(
+            0.0f,
+            std::floor(teleportViewportRect_[0])
+        ));
+        const int32_t top = static_cast<int32_t>(std::max(
+            0.0f,
+            std::floor(teleportViewportRect_[1])
+        ));
+        const uint32_t right = static_cast<uint32_t>(std::clamp(
+            std::ceil(std::max(teleportViewportRect_[0], teleportViewportRect_[2])),
+            0.0f,
+            static_cast<float>(swapchainExtent_.width)
+        ));
+        const uint32_t bottom = static_cast<uint32_t>(std::clamp(
+            std::ceil(std::max(teleportViewportRect_[1], teleportViewportRect_[3])),
+            0.0f,
+            static_cast<float>(swapchainExtent_.height)
+        ));
+        if (right <= static_cast<uint32_t>(left) ||
+            bottom <= static_cast<uint32_t>(top)) {
+            return;
+        }
+
+        VkViewport viewport{};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(swapchainExtent_.width);
+        viewport.height = static_cast<float>(swapchainExtent_.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        VkRect2D scissor{};
+        scissor.offset = {left, top};
+        scissor.extent = {
+            right - static_cast<uint32_t>(left),
+            bottom - static_cast<uint32_t>(top)
+        };
+        const TeleportPushConstants pushConstants = teleportPushConstantsLocked(
+            viewport.width,
+            viewport.height,
+            0.0f,
+            0.0f
+        );
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, teleportPresentPipeline_);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdBindDescriptorSets(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            teleportPipelineLayout_,
+            0,
+            1,
+            &teleportDescriptorSet_,
+            0,
+            nullptr
+        );
+        vkCmdPushConstants(
+            commandBuffer,
+            teleportPipelineLayout_,
+            VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(TeleportPushConstants),
+            &pushConstants
+        );
+        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+    }
+
     void recordCompositePassLocked(
         VkCommandBuffer commandBuffer,
         uint32_t imageIndex,
@@ -7871,6 +8628,7 @@ private:
         renderPassInfo.pClearValues = &clearValue;
 
         vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        recordTeleportScenePresentLocked(commandBuffer);
         if (shouldComposite &&
             compositePipeline_ != VK_NULL_HANDLE &&
             compositePipelineLayout_ != VK_NULL_HANDLE &&
@@ -8092,7 +8850,8 @@ private:
     }
 
     bool hasRenderableWorkLocked(int64_t nowNs) const {
-        return backdropNeedsRender_ ||
+        return teleportActive_ ||
+            backdropNeedsRender_ ||
             hasLivePaintSplashesLocked(nowNs) ||
             hasActivePaintSplashGlassSurfaceLocked(nowNs);
     }
@@ -8161,6 +8920,8 @@ private:
             vkDestroyFramebuffer(device_, framebuffer, nullptr);
         }
         framebuffers_.clear();
+
+        destroyTeleportSceneLocked(false);
 
         destroyPaintSplashItemsLocked();
         releaseCompletedSplashUploadStagingLocked();
@@ -8247,6 +9008,18 @@ private:
         if (backdropPipelineLayout_ != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device_, backdropPipelineLayout_, nullptr);
             backdropPipelineLayout_ = VK_NULL_HANDLE;
+        }
+        if (teleportGlassPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, teleportGlassPipeline_, nullptr);
+            teleportGlassPipeline_ = VK_NULL_HANDLE;
+        }
+        if (teleportPresentPipeline_ != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_, teleportPresentPipeline_, nullptr);
+            teleportPresentPipeline_ = VK_NULL_HANDLE;
+        }
+        if (teleportPipelineLayout_ != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_, teleportPipelineLayout_, nullptr);
+            teleportPipelineLayout_ = VK_NULL_HANDLE;
         }
         if (backdropOverlayPipeline_ != VK_NULL_HANDLE) {
             vkDestroyPipeline(device_, backdropOverlayPipeline_, nullptr);
@@ -8451,6 +9224,11 @@ private:
             backdropOverlayDescriptorPool_ = VK_NULL_HANDLE;
             backdropOverlayDescriptorSet_ = VK_NULL_HANDLE;
         }
+        if (teleportDescriptorPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_, teleportDescriptorPool_, nullptr);
+            teleportDescriptorPool_ = VK_NULL_HANDLE;
+            teleportDescriptorSet_ = VK_NULL_HANDLE;
+        }
         if (compositeDescriptorSetLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_, compositeDescriptorSetLayout_, nullptr);
             compositeDescriptorSetLayout_ = VK_NULL_HANDLE;
@@ -8466,6 +9244,10 @@ private:
         if (backdropOverlayDescriptorSetLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_, backdropOverlayDescriptorSetLayout_, nullptr);
             backdropOverlayDescriptorSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (teleportDescriptorSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_, teleportDescriptorSetLayout_, nullptr);
+            teleportDescriptorSetLayout_ = VK_NULL_HANDLE;
         }
 
         vkDestroyDevice(device_, nullptr);
@@ -8613,6 +9395,20 @@ private:
     VkDescriptorSet compositeDescriptorSet_ = VK_NULL_HANDLE;
     std::vector<std::unique_ptr<BackdropImportEntry>> backdropImportCache_;
     BackdropImportEntry* activeBackdropEntry_ = nullptr;
+    BackdropImportEntry teleportOldEntry_{};
+    BackdropImportEntry teleportNewEntry_{};
+    VkDescriptorSetLayout teleportDescriptorSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool teleportDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet teleportDescriptorSet_ = VK_NULL_HANDLE;
+    VkPipelineLayout teleportPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipeline teleportGlassPipeline_ = VK_NULL_HANDLE;
+    VkPipeline teleportPresentPipeline_ = VK_NULL_HANDLE;
+    std::array<float, 4> teleportViewportRect_{};
+    std::array<float, 2> teleportCaptureOrigin_{};
+    float teleportProgress_ = 0.0f;
+    float teleportDirectionSign_ = 1.0f;
+    bool teleportNeedsTransition_ = false;
+    bool teleportActive_ = false;
     VkSampler backdropSampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout backdropDescriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool backdropDescriptorPool_ = VK_NULL_HANDLE;
@@ -8927,6 +9723,70 @@ Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeUpdateBackdropRects(
     )
         ? JNI_TRUE
         : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeSetTeleportHardwareBuffers(
+    JNIEnv* env,
+    jobject,
+    jlong handle,
+    jobject oldHardwareBuffer,
+    jobject newHardwareBuffer,
+    jfloat viewportLeft,
+    jfloat viewportTop,
+    jfloat viewportRight,
+    jfloat viewportBottom,
+    jfloat captureLeft,
+    jfloat captureTop,
+    jint captureWidth,
+    jint captureHeight,
+    jfloat directionSign
+) {
+    VulkanChatRenderer* renderer = rendererFromHandle(handle);
+    if (renderer == nullptr || oldHardwareBuffer == nullptr || newHardwareBuffer == nullptr) {
+        return JNI_FALSE;
+    }
+    return renderer->setTeleportHardwareBuffers(
+        env,
+        oldHardwareBuffer,
+        newHardwareBuffer,
+        viewportLeft,
+        viewportTop,
+        viewportRight,
+        viewportBottom,
+        captureLeft,
+        captureTop,
+        captureWidth,
+        captureHeight,
+        directionSign
+    )
+        ? JNI_TRUE
+        : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeUpdateTeleportProgress(
+    JNIEnv*,
+    jobject,
+    jlong handle,
+    jfloat progress
+) {
+    VulkanChatRenderer* renderer = rendererFromHandle(handle);
+    return renderer != nullptr && renderer->updateTeleportProgress(progress)
+        ? JNI_TRUE
+        : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_zyna_app_ui_glass_NativeVulkanChat_nativeClearTeleport(
+    JNIEnv*,
+    jobject,
+    jlong handle
+) {
+    VulkanChatRenderer* renderer = rendererFromHandle(handle);
+    if (renderer != nullptr) {
+        renderer->clearTeleport();
+    }
 }
 
 extern "C" JNIEXPORT jfloatArray JNICALL

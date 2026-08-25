@@ -88,6 +88,13 @@ class ZynaTabBarView(context: Context) : LinearLayout(context) {
         isClickable = visibility == View.VISIBLE
     }
 
+    override fun setEnabled(enabled: Boolean) {
+        super.setEnabled(enabled)
+        itemViews.values.forEach { item ->
+            item.isEnabled = enabled
+        }
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration?) {
         super.onConfigurationChanged(newConfig)
         val nextPalette = TabBarPalette.from(context)

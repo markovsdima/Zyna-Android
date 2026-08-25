@@ -54,6 +54,8 @@ set(CHAT_BACKDROP_OVERLAY_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_overla
 set(CHAT_BACKDROP_BLUR_VERT_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_blur_vert_spv.inc")
 set(CHAT_BACKDROP_BLUR_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_blur_frag_spv.inc")
 set(CHAT_BACKDROP_STATS_COMP_SPV "${GENERATED_SHADER_DIR}/chat_backdrop_stats_comp_spv.inc")
+set(CHAT_TELEPORT_VERT_SPV "${GENERATED_SHADER_DIR}/chat_teleport_vert_spv.inc")
+set(CHAT_TELEPORT_FRAG_SPV "${GENERATED_SHADER_DIR}/chat_teleport_frag_spv.inc")
 
 compile_spirv_include(
     "${CMAKE_CURRENT_SOURCE_DIR}/shaders/paint_splash.vert"
@@ -150,6 +152,16 @@ compile_spirv_include(
     comp
     "${CHAT_BACKDROP_STATS_COMP_SPV}"
 )
+compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/chat_teleport.vert"
+    vert
+    "${CHAT_TELEPORT_VERT_SPV}"
+)
+compile_spirv_include(
+    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/chat_teleport.frag"
+    frag
+    "${CHAT_TELEPORT_FRAG_SPV}"
+)
 
 add_custom_target(
     zyna_vulkan_chat_shaders
@@ -173,6 +185,8 @@ add_custom_target(
         "${CHAT_BACKDROP_BLUR_VERT_SPV}"
         "${CHAT_BACKDROP_BLUR_FRAG_SPV}"
         "${CHAT_BACKDROP_STATS_COMP_SPV}"
+        "${CHAT_TELEPORT_VERT_SPV}"
+        "${CHAT_TELEPORT_FRAG_SPV}"
 )
 
 add_library(

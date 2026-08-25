@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -33,6 +34,9 @@ import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.ReplySwipeController
+import com.zyna.app.ui.chat.ReplySwipeIndicatorView
+import com.zyna.app.ui.chat.render.GradientBubbleRecyclerView
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
@@ -41,6 +45,8 @@ import com.zyna.app.ui.chat.render.MessageForwardPreview
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.PaintSplashTarget
+import com.zyna.app.ui.chat.render.toReplyPreviewOrNull
+import com.zyna.app.util.ChatScrollPerfProbe
 import com.zyna.app.util.ZynaPerfLog
 import kotlin.math.abs
 import kotlin.math.exp
@@ -55,9 +61,15 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private val rootGlassOwnerKey: String? = null,
     private val rootGlassCoordinator: RootGlassLayerCoordinator? = null
 ) : FrameLayout(context, attrs) {
+    private enum class ScrollLockOwner {
+        CONTEXT_MENU,
+        REPLY_SWIPE,
+        TELEPORT
+    }
+
     private val density = resources.displayMetrics.density
     val glassController = GlassBackdropController(this)
-    val recyclerView = RecyclerView(context)
+    val recyclerView = GradientBubbleRecyclerView(context)
     val inputBar = GlassInputBarView(context, glassController)
     var onLoadOlderMessages: () -> Unit = {}
     var onLoadNewerMessages: () -> Unit = {}
@@ -67,6 +79,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     internal var onReplyToMessage: (MessageReplyPreview) -> Unit = {}
     internal var onEditMessage: (MessageEditPreview) -> Unit = {}
     internal var onForwardMessage: (MessageForwardPreview) -> Unit = {}
+    var onToggleReaction: (messageId: String, reactionKey: String) -> Unit = { _, _ -> }
     var onRedactMessage: (String) -> Unit = {}
     var onRedactMessages: (List<String>) -> Unit = { messageIds ->
         messageIds.forEach { messageId -> onRedactMessage(messageId) }
@@ -94,6 +107,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private var isLoadingOlderMessages = false
     private var canLoadOlderMessages = false
     private var canLoadNewerMessages = false
+    private var timelineCommitPending = false
     private var isAtLiveEdge = true
     private var isScrollToLiveButtonVisible = false
     private var isScrollToLiveButtonActionPending = false
@@ -101,11 +115,20 @@ internal class GlassChatLayout @JvmOverloads constructor(
     private var prefetchCheckPosted = false
     private var isContextMenuShowing = false
     private var isContextGestureActive = false
+    private val scrollLockOwners = mutableSetOf<ScrollLockOwner>()
     private var recyclerAccessibilityBeforeMenu = IMPORTANT_FOR_ACCESSIBILITY_AUTO
     private var teleportSnapshotView: ImageView? = null
     private var teleportSnapshotBitmap: Bitmap? = null
     private var teleportAnimator: ValueAnimator? = null
     private var teleportDirection = ChatTeleportDirection.TO_OLDER
+    private var teleportGeneration = 0L
+    private var teleportGpuPreparing = false
+    private var teleportVulkanActive = false
+    private var teleportOldFrame: HardwareBufferChatCapture.CapturedFrame? = null
+    private var teleportNewFrame: HardwareBufferChatCapture.CapturedFrame? = null
+    private var teleportCompletion: (() -> Unit)? = null
+    private var teleportOldCapture: HardwareBufferChatCapture? = null
+    private var teleportNewCapture: HardwareBufferChatCapture? = null
     private var scrollToLiveButtonAnimator: ValueAnimator? = null
     private var hardwareBackdropCapture: HardwareBufferChatCapture? = null
     private var hardwareBackdropCaptureScheduled = false
@@ -159,7 +182,9 @@ internal class GlassChatLayout @JvmOverloads constructor(
         val requiresFreshImage = hardwareBackdropCaptureRequiresFreshImage
         hardwareBackdropCaptureScheduled = false
         hardwareBackdropCaptureRequiresFreshImage = false
-        captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw = requiresFreshImage)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw = requiresFreshImage)
+        }
         lastHardwareBackdropCaptureUptimeMs = SystemClock.uptimeMillis()
     }
     private val vulkanGlassAdaptiveRenderRunnable = Runnable {
@@ -172,6 +197,15 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
     private val teleportTimeoutRunnable = Runnable {
         cancelSnapshotTeleport()
+    }
+    private val teleportVulkanActivationTimeoutRunnable = Runnable {
+        if (teleportGpuPreparing) {
+            logChatTeleport("Vulkan activation timed out; using View fallback")
+            startViewSnapshotTeleport()
+        }
+    }
+    private val teleportCaptureReleaseRunnable = Runnable {
+        releaseTeleportCaptureResources()
     }
     private val recyclerDrawListener = ViewTreeObserver.OnDrawListener {
         val scrollOffset = recyclerView.computeVerticalScrollOffset()
@@ -225,6 +259,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
                 dismissMessageContextMenu()
             }
         }
+        onReactionSelected = { request, reactionKey ->
+            onToggleReaction(request.message.id, reactionKey)
+            dismissMessageContextMenu()
+        }
         onGlassGeometryChanged = {
             glassController.invalidateRegions()
             glassController.invalidateBackdrop()
@@ -238,6 +276,9 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
     }
     private val contextCellLayer = contextMenuLayer.selectedCellLayer
+    private val replySwipeIndicator = ReplySwipeIndicatorView(context).apply {
+        setColor(palette.text)
+    }
     private val backdropContentLayer = FrameLayout(context).apply {
         clipChildren = false
         clipToPadding = false
@@ -261,6 +302,26 @@ internal class GlassChatLayout @JvmOverloads constructor(
         fallbackColor = palette.background,
         overlayViews = listOf(contextCellLayer)
     )
+    private val replySwipeController = ReplySwipeController(
+        recyclerView = recyclerView,
+        indicatorView = replySwipeIndicator,
+        canStart = {
+            scrollLockOwners.isEmpty() &&
+                !isContextGestureActive &&
+                !isContextMenuShowing &&
+                teleportSnapshotView == null &&
+                teleportAnimator == null
+        },
+        indicatorTop = { REPLY_SWIPE_VERTICAL_MARGIN_DP * density },
+        indicatorBottom = {
+            val contentBottom = inputBarLocalTop.takeIf { it > 0 } ?: height
+            contentBottom - REPLY_SWIPE_VERTICAL_MARGIN_DP * density
+        },
+        onInteractionActiveChanged = { active ->
+            setScrollLocked(ScrollLockOwner.REPLY_SWIPE, active)
+        },
+        onReply = { target -> requestReplyToMessage(target) }
+    )
 
     init {
         clipChildren = false
@@ -274,14 +335,19 @@ internal class GlassChatLayout @JvmOverloads constructor(
             layoutManager = chatLayoutManager
             addOnScrollListener(object : RecyclerView.OnScrollListener() {
                 override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    ChatScrollPerfProbe.noteScroll(recyclerView, dx, dy)
+                    val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
                     glassController.invalidateBackdrop()
                     scheduleVulkanGlassBackdropCapture(VULKAN_GLASS_SCROLL_CAPTURE_DELAY_MS)
                     maybeLoadOlderMessages()
                     updateScrollToLiveButtonVisibility()
                     scheduleVisibleReadReceiptCandidateEvaluation()
+                    ChatScrollPerfProbe.recordGlassScroll(scrollPerfStart)
                 }
 
                 override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                    ChatScrollPerfProbe.noteScrollState(recyclerView, newState)
+                    val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
                     glassController.invalidateBackdrop()
                     if (
                         newState == RecyclerView.SCROLL_STATE_DRAGGING ||
@@ -296,6 +362,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
                     }
                     updateScrollToLiveButtonVisibility()
                     scheduleVisibleReadReceiptCandidateEvaluation()
+                    ChatScrollPerfProbe.recordGlassScroll(scrollPerfStart)
                 }
             })
         }
@@ -305,6 +372,13 @@ internal class GlassChatLayout @JvmOverloads constructor(
         localVulkanOverlay?.let { overlay ->
             addView(overlay)
         }
+        addView(
+            replySwipeIndicator,
+            LayoutParams(
+                REPLY_SWIPE_INDICATOR_SIZE_DP.dpToPx(density),
+                REPLY_SWIPE_INDICATOR_SIZE_DP.dpToPx(density)
+            )
+        )
         addView(emptyView)
         addView(composerErrorView)
         if (!usesExternalInputBar) {
@@ -317,7 +391,6 @@ internal class GlassChatLayout @JvmOverloads constructor(
         inputBar.setVulkanGlassBackgroundEnabled(isVulkanChatInputGlassEnabled())
         inputBar.onContentLayoutChanged = {
             requestLayout()
-            glassController.invalidateRegions()
         }
 
         ViewCompat.setOnApplyWindowInsetsListener(this) { _, insets ->
@@ -326,6 +399,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             if (imeBottomInset != ime || navBottomInset != nav) {
                 imeBottomInset = ime
                 navBottomInset = nav
+                contextMenuLayer.setBottomSafeInset(if (ime > 0) ime else nav)
                 requestLayout()
                 glassController.invalidateRegions()
             }
@@ -370,6 +444,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        timelineCommitPending = false
+        replySwipeController.cancel(immediate = true)
         cancelSnapshotTeleport()
         scrollToLiveButtonAnimator?.cancel()
         scrollToLiveButtonAnimator = null
@@ -379,6 +455,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         removeCallbacks(hardwareBackdropCaptureRunnable)
         removeCallbacks(vulkanGlassAdaptiveRenderRunnable)
         removeCallbacks(scrollToLiveButtonPendingResetRunnable)
+        removeCallbacks(teleportCaptureReleaseRunnable)
         hardwareBackdropCaptureScheduled = false
         hardwareBackdropCaptureRequiresFreshImage = false
         vulkanGlassAdaptiveRenderScheduled = false
@@ -388,6 +465,9 @@ internal class GlassChatLayout @JvmOverloads constructor(
             hardwareBackdropCapture?.close()
         }
         hardwareBackdropCapture = null
+        releaseTeleportCaptureResources()
+        scrollLockOwners.clear()
+        chatLayoutManager.isScrollLocked = false
         super.onDetachedFromWindow()
     }
 
@@ -534,8 +614,13 @@ internal class GlassChatLayout @JvmOverloads constructor(
         inputBar.setPalette(newPalette)
         contextMenuLayer.setPalette(newPalette)
         scrollToLiveButton.setPalette(newPalette)
+        replySwipeIndicator.setColor(newPalette.text)
         glassController.invalidateBackdrop()
         scheduleVulkanGlassBackdropCapture()
+    }
+
+    fun setReplySwipeIndicatorColor(color: Int) {
+        replySwipeIndicator.setColor(color)
     }
 
     private fun updateInputBarVulkanGlassEnabled() {
@@ -557,6 +642,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
         canLoadOlderMessages = canLoadOlder
         canLoadNewerMessages = canLoadNewer
         updateScrollToLiveButtonVisibility()
+    }
+
+    fun setTimelineCommitPending(isPending: Boolean) {
+        timelineCommitPending = isPending
     }
 
     fun setLiveEdgeState(isLiveEdge: Boolean) {
@@ -593,6 +682,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     fun beginSnapshotTeleport(direction: ChatTeleportDirection): Boolean {
+        replySwipeController.cancel(immediate = true)
         val blockedReason = when {
             isContextGestureActive -> "contextGestureActive"
             isContextMenuShowing -> "contextMenuShowing"
@@ -607,6 +697,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
 
         cancelSnapshotTeleport()
+        removeCallbacks(teleportCaptureReleaseRunnable)
+        releaseTeleportCaptureResources()
         val bitmap = try {
             Bitmap.createBitmap(recyclerView.width, recyclerView.height, Bitmap.Config.ARGB_8888)
         } catch (error: OutOfMemoryError) {
@@ -632,6 +724,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         teleportSnapshotBitmap = bitmap
         teleportSnapshotView = snapshotView
         teleportDirection = direction
+        val generation = ++teleportGeneration
         logChatTeleport(
             "begin snapshot direction=$direction " +
                 "size=${recyclerView.width}x${recyclerView.height} childCount=${recyclerView.childCount}"
@@ -644,15 +737,35 @@ internal class GlassChatLayout @JvmOverloads constructor(
             LayoutParams(recyclerView.width, recyclerView.height)
         )
         layoutTeleportSnapshot()
-        setContextScrollLocked(true)
+        setScrollLocked(ScrollLockOwner.TELEPORT, true)
         removeCallbacks(teleportTimeoutRunnable)
         postDelayed(teleportTimeoutRunnable, CHAT_TELEPORT_TIMEOUT_MS)
+
+        teleportGpuPreparing = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            isVulkanGlassBackdropEnabled() &&
+            !vulkanGlassCaptureBounds.isEmpty
+        if (teleportGpuPreparing && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val capture = teleportOldCapture ?: HardwareBufferChatCapture(
+                name = "ZynaTeleportOldCapture"
+            ).also { teleportOldCapture = it }
+            val didRequest = captureTeleportSceneFrame(
+                capture = capture,
+                generation = generation,
+                isOldFrame = true
+            )
+            if (!didRequest) {
+                teleportGpuPreparing = false
+            }
+        }
         return true
     }
 
+    fun isSnapshotTeleportActive(): Boolean {
+        return teleportSnapshotView != null || teleportAnimator != null
+    }
+
     fun completeSnapshotTeleport(onComplete: () -> Unit = {}) {
-        val snapshotView = teleportSnapshotView
-        if (snapshotView == null) {
+        if (teleportSnapshotView == null) {
             onComplete()
             return
         }
@@ -660,6 +773,46 @@ internal class GlassChatLayout @JvmOverloads constructor(
         removeCallbacks(teleportTimeoutRunnable)
         teleportAnimator?.removeAllListeners()
         teleportAnimator?.cancel()
+        teleportCompletion = onComplete
+
+        if (!teleportGpuPreparing || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            startViewSnapshotTeleport()
+            return
+        }
+
+        val capture = teleportNewCapture ?: HardwareBufferChatCapture(
+            name = "ZynaTeleportNewCapture"
+        ).also { teleportNewCapture = it }
+        val didRequest = captureTeleportSceneFrame(
+            capture = capture,
+            generation = teleportGeneration,
+            isOldFrame = false
+        )
+        if (!didRequest) {
+            startViewSnapshotTeleport()
+            return
+        }
+        tryActivateVulkanTeleport(teleportGeneration)
+        removeCallbacks(teleportVulkanActivationTimeoutRunnable)
+        postDelayed(
+            teleportVulkanActivationTimeoutRunnable,
+            CHAT_TELEPORT_VULKAN_ACTIVATION_TIMEOUT_MS
+        )
+    }
+
+    private fun startViewSnapshotTeleport() {
+        val snapshotView = teleportSnapshotView ?: run {
+            finishTeleportCompletion()
+            return
+        }
+        removeCallbacks(teleportVulkanActivationTimeoutRunnable)
+        val shouldClearVulkan = teleportGpuPreparing || teleportVulkanActive
+        teleportGpuPreparing = false
+        if (shouldClearVulkan) {
+            clearVulkanTeleportScene()
+        }
+        teleportVulkanActive = false
+        closePendingTeleportFrames()
 
         val distance = recyclerView.height.toFloat().takeIf { it > 0f }
             ?: height.toFloat().coerceAtLeast(1f)
@@ -683,7 +836,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             didFinish = true
             logChatTeleport("complete finish reason=$reason")
             cleanupSnapshotTeleport()
-            onComplete()
+            finishTeleportCompletion()
         }
 
         teleportAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -710,9 +863,189 @@ internal class GlassChatLayout @JvmOverloads constructor(
 
     fun cancelSnapshotTeleport() {
         removeCallbacks(teleportTimeoutRunnable)
+        removeCallbacks(teleportVulkanActivationTimeoutRunnable)
         teleportAnimator?.removeAllListeners()
         teleportAnimator?.cancel()
+        teleportGeneration += 1L
+        val shouldClearVulkan = teleportGpuPreparing ||
+            teleportVulkanActive ||
+            teleportOldFrame != null ||
+            teleportNewFrame != null
+        teleportGpuPreparing = false
+        if (shouldClearVulkan) {
+            clearVulkanTeleportScene()
+        }
+        teleportVulkanActive = false
+        closePendingTeleportFrames()
         cleanupSnapshotTeleport()
+        finishTeleportCompletion()
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun captureTeleportSceneFrame(
+        capture: HardwareBufferChatCapture,
+        generation: Long,
+        isOldFrame: Boolean
+    ): Boolean {
+        return capture.captureAsync(
+            source = recyclerView,
+            width = recyclerView.width,
+            height = recyclerView.height,
+            backgroundColor = palette.background,
+            discardPendingImagesBeforeDraw = true
+        ) { frame ->
+            if (generation != teleportGeneration ||
+                !teleportGpuPreparing ||
+                teleportSnapshotView == null) {
+                frame.closeCapturedFrame()
+                return@captureAsync
+            }
+            if (isOldFrame) {
+                teleportOldFrame?.closeCapturedFrame()
+                teleportOldFrame = frame
+            } else {
+                teleportNewFrame?.closeCapturedFrame()
+                teleportNewFrame = frame
+            }
+            tryActivateVulkanTeleport(generation)
+        }
+    }
+
+    private fun tryActivateVulkanTeleport(generation: Long) {
+        if (generation != teleportGeneration ||
+            !teleportGpuPreparing ||
+            teleportCompletion == null) {
+            return
+        }
+        val oldFrame = teleportOldFrame ?: return
+        val newFrame = teleportNewFrame ?: return
+        val captureBounds = Rect(vulkanGlassCaptureBounds)
+        if (captureBounds.isEmpty) {
+            startViewSnapshotTeleport()
+            return
+        }
+
+        teleportOldFrame = null
+        teleportNewFrame = null
+        val overlayOffset = vulkanOverlayOffset()
+        val directionSign = when (teleportDirection) {
+            ChatTeleportDirection.TO_OLDER -> 1f
+            ChatTeleportDirection.TO_NEWER -> -1f
+        }
+        val didQueue = setVulkanTeleportScene(
+            oldFrame = oldFrame,
+            newFrame = newFrame,
+            viewportLeft = (recyclerView.left + overlayOffset.x).toFloat(),
+            viewportTop = (recyclerView.top + overlayOffset.y).toFloat(),
+            viewportRight = (recyclerView.right + overlayOffset.x).toFloat(),
+            viewportBottom = (recyclerView.bottom + overlayOffset.y).toFloat(),
+            captureLeft = (captureBounds.left + overlayOffset.x).toFloat(),
+            captureTop = (captureBounds.top + overlayOffset.y).toFloat(),
+            captureWidth = captureBounds.width(),
+            captureHeight = captureBounds.height(),
+            directionSign = directionSign
+        ) { ready ->
+            if (generation != teleportGeneration ||
+                !teleportGpuPreparing ||
+                teleportSnapshotView == null) {
+                if (ready) {
+                    clearVulkanTeleportScene()
+                }
+                return@setVulkanTeleportScene
+            }
+            if (ready) {
+                removeCallbacks(teleportVulkanActivationTimeoutRunnable)
+                teleportGpuPreparing = false
+                teleportVulkanActive = true
+                startVulkanSnapshotTeleport()
+            } else {
+                startViewSnapshotTeleport()
+            }
+        }
+        if (!didQueue && teleportGpuPreparing) {
+            startViewSnapshotTeleport()
+        }
+    }
+
+    private fun startVulkanSnapshotTeleport() {
+        val snapshotView = teleportSnapshotView ?: run {
+            clearVulkanTeleportScene()
+            teleportVulkanActive = false
+            finishTeleportCompletion()
+            return
+        }
+        snapshotView.translationY = 0f
+        recyclerView.translationY = 0f
+        updateVulkanTeleportProgress(0f)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            captureVulkanGlassBackdrop(
+                discardPendingImagesBeforeDraw = true,
+                allowDuringTeleport = true
+            )
+        }
+
+        var didFinish = false
+        fun finishOnce(reason: String) {
+            if (didFinish) {
+                return
+            }
+            didFinish = true
+            logChatTeleport("Vulkan complete finish reason=$reason")
+            updateVulkanTeleportProgress(1f)
+            clearVulkanTeleportScene()
+            teleportVulkanActive = false
+            cleanupSnapshotTeleport()
+            finishTeleportCompletion()
+        }
+
+        teleportAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = CHAT_TELEPORT_DURATION_MS
+            interpolator = DecelerateInterpolator(CHAT_TELEPORT_DECELERATION)
+            addUpdateListener { animation ->
+                updateVulkanTeleportProgress(animation.animatedValue as Float)
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: Animator) {
+                    finishOnce("cancel")
+                }
+
+                override fun onAnimationEnd(animation: Animator) {
+                    finishOnce("end")
+                }
+            })
+            start()
+        }
+    }
+
+    private fun closePendingTeleportFrames() {
+        teleportOldFrame?.closeCapturedFrame()
+        teleportOldFrame = null
+        teleportNewFrame?.closeCapturedFrame()
+        teleportNewFrame = null
+    }
+
+    private fun finishTeleportCompletion() {
+        val completion = teleportCompletion
+        teleportCompletion = null
+        completion?.invoke()
+    }
+
+    private fun scheduleTeleportCaptureRelease() {
+        removeCallbacks(teleportCaptureReleaseRunnable)
+        postDelayed(
+            teleportCaptureReleaseRunnable,
+            CHAT_TELEPORT_CAPTURE_RELEASE_DELAY_MS
+        )
+    }
+
+    private fun releaseTeleportCaptureResources() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            teleportOldCapture?.close()
+            teleportNewCapture?.close()
+        }
+        teleportOldCapture = null
+        teleportNewCapture = null
     }
 
     fun highlightMessageAtAdapterPosition(position: Int, delayMillis: Long = CHAT_TARGET_HIGHLIGHT_DELAY_MS) {
@@ -728,13 +1061,14 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     internal fun beginMessageContextMenuGesture(request: MessageContextMenuRequest): Boolean {
+        replySwipeController.cancel(immediate = true)
         isContextGestureActive = true
-        setContextScrollLocked(true)
+        setScrollLocked(ScrollLockOwner.CONTEXT_MENU, true)
         syncExternalContextMenuLayerLayout()
         val didBegin = contextMenuLayer.beginPreview(request)
         if (!didBegin) {
             isContextGestureActive = false
-            setContextScrollLocked(false)
+            setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
             updateScrollToLiveButtonVisibility()
             return false
         }
@@ -744,10 +1078,15 @@ internal class GlassChatLayout @JvmOverloads constructor(
         return true
     }
 
+    internal fun requestReplyToMessage(target: MessageReplyPreview) {
+        onReplyToMessage(target)
+    }
+
     internal fun showMessageContextMenu(request: MessageContextMenuRequest): Boolean {
+        replySwipeController.cancel(immediate = true)
         if (!isContextGestureActive) {
             isContextGestureActive = true
-            setContextScrollLocked(true)
+            setScrollLocked(ScrollLockOwner.CONTEXT_MENU, true)
         }
         syncExternalContextMenuLayerLayout()
         val didShow = contextMenuLayer.show(request)
@@ -772,7 +1111,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             isContextGestureActive = false
             if (!isContextMenuShowing) {
                 contextMenuLayer.dismiss(animated = true)
-                setContextScrollLocked(false)
+                setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
                 updateScrollToLiveButtonVisibility()
             }
         }
@@ -782,7 +1121,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
         if (!isContextMenuShowing) {
             contextMenuLayer.dismiss(animated = animated)
             if (!isContextGestureActive) {
-                setContextScrollLocked(false)
+                setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
             }
             updateScrollToLiveButtonVisibility()
             post { updateVulkanGlassRects() }
@@ -791,11 +1130,19 @@ internal class GlassChatLayout @JvmOverloads constructor(
         isContextMenuShowing = false
         recyclerView.importantForAccessibility = recyclerAccessibilityBeforeMenu
         if (!isContextGestureActive) {
-            setContextScrollLocked(false)
+            setScrollLocked(ScrollLockOwner.CONTEXT_MENU, false)
         }
         contextMenuLayer.dismiss(animated)
         updateScrollToLiveButtonVisibility()
         post { updateVulkanGlassRects() }
+    }
+
+    internal fun canStartNavigationBackGesture(): Boolean {
+        return !isContextGestureActive &&
+            !isContextMenuShowing &&
+            !replySwipeController.isActive &&
+            teleportSnapshotView == null &&
+            teleportAnimator == null
     }
 
     private fun redrawGlassBackdropAfterContextMenuDismiss() {
@@ -826,7 +1173,12 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     private fun maybeLoadOlderMessages() {
-        if (isLoadingOlderMessages || teleportSnapshotView != null || teleportAnimator != null) {
+        if (
+            isLoadingOlderMessages ||
+            timelineCommitPending ||
+            teleportSnapshotView != null ||
+            teleportAnimator != null
+        ) {
             return
         }
 
@@ -1091,7 +1443,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             textureLeft = textureLeft,
             textureTop = textureTop
         ) ?: run {
-            frame.close()
+            frame.closeCapturedFrame()
             BackdropFrameResult(imported = false)
         }
     }
@@ -1133,6 +1485,81 @@ internal class GlassChatLayout @JvmOverloads constructor(
             return
         }
         localVulkanOverlay?.clearBackdropFrame()
+    }
+
+    private fun setVulkanTeleportScene(
+        oldFrame: HardwareBufferChatCapture.CapturedFrame,
+        newFrame: HardwareBufferChatCapture.CapturedFrame,
+        viewportLeft: Float,
+        viewportTop: Float,
+        viewportRight: Float,
+        viewportBottom: Float,
+        captureLeft: Float,
+        captureTop: Float,
+        captureWidth: Int,
+        captureHeight: Int,
+        directionSign: Float,
+        onReady: (Boolean) -> Unit
+    ): Boolean {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            return rootGlassCoordinator?.setTeleportScene(
+                ownerKey = ownerKey,
+                oldFrame = oldFrame,
+                newFrame = newFrame,
+                viewportLeft = viewportLeft,
+                viewportTop = viewportTop,
+                viewportRight = viewportRight,
+                viewportBottom = viewportBottom,
+                captureLeft = captureLeft,
+                captureTop = captureTop,
+                captureWidth = captureWidth,
+                captureHeight = captureHeight,
+                directionSign = directionSign,
+                onReady = onReady
+            ) ?: run {
+                oldFrame.closeCapturedFrame()
+                newFrame.closeCapturedFrame()
+                onReady(false)
+                false
+            }
+        }
+        return localVulkanOverlay?.setTeleportScene(
+            oldFrame = oldFrame,
+            newFrame = newFrame,
+            viewportLeft = viewportLeft,
+            viewportTop = viewportTop,
+            viewportRight = viewportRight,
+            viewportBottom = viewportBottom,
+            captureLeft = captureLeft,
+            captureTop = captureTop,
+            captureWidth = captureWidth,
+            captureHeight = captureHeight,
+            directionSign = directionSign,
+            onReady = onReady
+        ) ?: run {
+            oldFrame.closeCapturedFrame()
+            newFrame.closeCapturedFrame()
+            onReady(false)
+            false
+        }
+    }
+
+    private fun updateVulkanTeleportProgress(progress: Float): Boolean {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            return rootGlassCoordinator?.updateTeleportProgress(ownerKey, progress) == true
+        }
+        return localVulkanOverlay?.updateTeleportProgress(progress) == true
+    }
+
+    private fun clearVulkanTeleportScene() {
+        val ownerKey = rootGlassOwnerKey
+        if (usesRootGlassCoordinator && ownerKey != null) {
+            rootGlassCoordinator?.clearTeleportScene(ownerKey)
+            return
+        }
+        localVulkanOverlay?.clearTeleportScene()
     }
 
     private fun resetVulkanGlassCaptureState(clearNativeBackdrop: Boolean) {
@@ -1294,7 +1721,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
         delayMillis: Long = VULKAN_GLASS_CAPTURE_DELAY_MS,
         discardPendingImagesBeforeDraw: Boolean = false
     ) {
-        if (!isVulkanGlassBackdropEnabled() || vulkanGlassRects.isEmpty()) {
+        if (teleportGpuPreparing || teleportVulkanActive ||
+            !isVulkanGlassBackdropEnabled() || vulkanGlassRects.isEmpty()) {
             return
         }
 
@@ -1325,7 +1753,8 @@ internal class GlassChatLayout @JvmOverloads constructor(
     }
 
     private fun forceVulkanGlassBackdropCapture() {
-        if (!isVulkanGlassBackdropEnabled() || vulkanGlassRects.isEmpty()) {
+        if (teleportGpuPreparing || teleportVulkanActive ||
+            !isVulkanGlassBackdropEnabled() || vulkanGlassRects.isEmpty()) {
             return
         }
 
@@ -1335,8 +1764,13 @@ internal class GlassChatLayout @JvmOverloads constructor(
         postOnAnimation(hardwareBackdropCaptureRunnable)
     }
 
-    private fun captureVulkanGlassBackdrop(discardPendingImagesBeforeDraw: Boolean = false) {
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun captureVulkanGlassBackdrop(
+        discardPendingImagesBeforeDraw: Boolean = false,
+        allowDuringTeleport: Boolean = false
+    ) {
         if (
+            (!allowDuringTeleport && (teleportGpuPreparing || teleportVulkanActive)) ||
             !isVulkanGlassBackdropEnabled() ||
             vulkanGlassRects.isEmpty() ||
             !isAttachedToWindow ||
@@ -1369,7 +1803,11 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
         if (!didRequest) {
             if (ENABLE_VULKAN_CHAT_PERF_LOGGING) {
-                recordVulkanGlassPerfDrop()
+                if (ChatScrollPerfProbe.isRecording(recyclerView)) {
+                    recordVulkanGlassPerfDrop()
+                } else {
+                    resetVulkanGlassPerfWindow(0L)
+                }
             }
             if (ENABLE_VULKAN_CHAT_VERBOSE_TIMING) {
                 Log.w(HARDWARE_BUFFER_CAPTURE_TAG, "AHB glass backdrop request failed")
@@ -1388,7 +1826,7 @@ internal class GlassChatLayout @JvmOverloads constructor(
             rects.isEmpty() ||
             vulkanGlassRects.isEmpty()
         ) {
-            frame.close()
+            frame.closeCapturedFrame()
             return
         }
 
@@ -1448,13 +1886,17 @@ internal class GlassChatLayout @JvmOverloads constructor(
             )
         }
         if (ENABLE_VULKAN_CHAT_PERF_LOGGING) {
-            recordVulkanGlassPerfSample(
-                tickTotalNanos = tickTotalNanos,
-                captureCallNanos = frame.renderNanos,
-                frame = frame,
-                overlayCallNanos = overlayCallNanos,
-                overlayResult = overlayResult
-            )
+            if (ChatScrollPerfProbe.isRecording(recyclerView)) {
+                recordVulkanGlassPerfSample(
+                    tickTotalNanos = tickTotalNanos,
+                    captureCallNanos = frame.renderNanos,
+                    frame = frame,
+                    overlayCallNanos = overlayCallNanos,
+                    overlayResult = overlayResult
+                )
+            } else {
+                resetVulkanGlassPerfWindow(0L)
+            }
         }
     }
 
@@ -1783,26 +2225,6 @@ internal class GlassChatLayout @JvmOverloads constructor(
         }
     }
 
-    private fun MessageRenderModel.toReplyPreviewOrNull(): MessageReplyPreview? {
-        val eventId = eventId?.takeIf { it.isNotBlank() } ?: return null
-        if (content is MessageContent.Redacted || outgoingEnvelopeId != null) {
-            return null
-        }
-        val body = when (val currentContent = content) {
-            is MessageContent.Text -> currentContent.body
-            is MessageContent.Image -> currentContent.caption.normalizedMessageCaption() ?: "Photo"
-            is MessageContent.PhotoGroup -> currentContent.caption.normalizedMessageCaption() ?: "Photo group"
-            is MessageContent.Voice -> "Voice message"
-            MessageContent.Redacted -> return null
-        }.takeIf { it.isNotBlank() } ?: return null
-        return MessageReplyPreview(
-            eventId = eventId,
-            senderId = senderId,
-            senderText = senderText,
-            body = body
-        )
-    }
-
     private fun MessageRenderModel.toForwardPreviewOrNull(): MessageForwardPreview? {
         eventId?.takeIf { it.isNotBlank() } ?: return null
         if (!canForward || content is MessageContent.Redacted || outgoingEnvelopeId != null) {
@@ -1856,12 +2278,18 @@ internal class GlassChatLayout @JvmOverloads constructor(
         )
     }
 
-    private fun setContextScrollLocked(locked: Boolean) {
-        if (chatLayoutManager.isScrollLocked == locked) {
-            return
+    private fun setScrollLocked(owner: ScrollLockOwner, locked: Boolean) {
+        val changed = if (locked) {
+            scrollLockOwners.add(owner)
+        } else {
+            scrollLockOwners.remove(owner)
         }
-        chatLayoutManager.isScrollLocked = locked
-        if (locked) {
+        if (!changed) return
+
+        val shouldLock = scrollLockOwners.isNotEmpty()
+        if (chatLayoutManager.isScrollLocked == shouldLock) return
+        chatLayoutManager.isScrollLocked = shouldLock
+        if (shouldLock) {
             recyclerView.stopScroll()
         }
     }
@@ -1877,11 +2305,10 @@ internal class GlassChatLayout @JvmOverloads constructor(
         teleportSnapshotView = null
         teleportSnapshotBitmap?.recycle()
         teleportSnapshotBitmap = null
-        if (!isContextGestureActive && !isContextMenuShowing) {
-            setContextScrollLocked(false)
-        }
+        setScrollLocked(ScrollLockOwner.TELEPORT, false)
         updateScrollToLiveButtonVisibility()
         invalidateGlassContent()
+        scheduleTeleportCaptureRelease()
     }
 
     private fun layoutTeleportSnapshot() {
@@ -2213,11 +2640,14 @@ private const val ENABLE_VULKAN_CHAT_GLASS_BACKDROP = true
 private const val ENABLE_VULKAN_CHAT_GLASS_PREVIEW_RECT = false
 private const val ENABLE_VULKAN_CHAT_INPUT_GLASS = true
 private const val ENABLE_VULKAN_CHAT_VERBOSE_TIMING = false
-private const val ENABLE_VULKAN_CHAT_PERF_LOGGING = false
+private val ENABLE_VULKAN_CHAT_PERF_LOGGING =
+    BuildConfig.DEBUG && ChatScrollPerfProbe.ENABLED
 private const val FIRST_LAYOUT_LOG_LIMIT = 5
 private const val CHAT_TELEPORT_TAG = "ZynaChatTeleport"
 private const val CHAT_TELEPORT_DURATION_MS = 340L
 private const val CHAT_TELEPORT_TIMEOUT_MS = 900L
+private const val CHAT_TELEPORT_VULKAN_ACTIVATION_TIMEOUT_MS = 120L
+private const val CHAT_TELEPORT_CAPTURE_RELEASE_DELAY_MS = 250L
 private const val CHAT_TELEPORT_DECELERATION = 1.7f
 private const val CHAT_TARGET_HIGHLIGHT_DELAY_MS = 80L
 private const val HARDWARE_BUFFER_CAPTURE_TAG = "ZynaHwBufferCapture"
@@ -2233,6 +2663,8 @@ private const val SCROLL_TO_LIVE_BUTTON_SIZE_DP = 44
 private const val SCROLL_TO_LIVE_BUTTON_BOTTOM_GAP_DP = 12
 private const val SCROLL_TO_LIVE_BUTTON_FADE_MS = 160L
 private const val SCROLL_TO_LIVE_BUTTON_PENDING_TIMEOUT_MS = 4_000L
+private const val REPLY_SWIPE_INDICATOR_SIZE_DP = 30
+private const val REPLY_SWIPE_VERTICAL_MARGIN_DP = 14f
 private const val READ_RECEIPT_SCROLL_DEBOUNCE_MS = 150L
 private const val READ_RECEIPT_CONTENT_UPDATE_DELAY_MS = 50L
 

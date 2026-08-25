@@ -51,6 +51,7 @@ data class CachedTimelineMessageEntity(
     val replyBody: String?,
     val forwardedFrom: String?,
     val zynaAttributesJson: String?,
+    val timelineDetailsJson: String?,
     @ColumnInfo(defaultValue = "0")
     val isEdited: Boolean,
     @ColumnInfo(defaultValue = "0")
@@ -60,5 +61,7 @@ data class CachedTimelineMessageEntity(
     val latestEditEventId: String?,
     val editTransactionId: String?,
     val pendingEditBody: String?,
+    @ColumnInfo(defaultValue = "[]")
+    val reactionsJson: String,
     val updatedAtMillis: Long
 )

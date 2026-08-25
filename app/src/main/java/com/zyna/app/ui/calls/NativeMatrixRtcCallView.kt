@@ -16,6 +16,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcAudioOutputState
+import com.zyna.app.data.calls.matrixrtc.MatrixRtcCallForegroundService
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcLiveKitVideoTrackReference
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallService
 import com.zyna.app.data.calls.matrixrtc.NativeMatrixRtcCallServiceException
@@ -66,6 +67,7 @@ data class NativeMatrixRtcCallViewActions(
 )
 
 internal class NativeMatrixRtcCallController(
+    context: Context,
     private val launchContext: NativeMatrixRtcCallLaunchContext,
     private val callService: NativeMatrixRtcCallService,
     private val scope: CoroutineScope,
@@ -96,6 +98,7 @@ internal class NativeMatrixRtcCallController(
         )
     )
     val viewState: StateFlow<NativeMatrixRtcCallViewState> = _viewState.asStateFlow()
+    private val appContext = context.applicationContext
 
     private var serviceStateJob: Job? = null
     private var microphoneStateJob: Job? = null
@@ -126,6 +129,7 @@ internal class NativeMatrixRtcCallController(
             return
         }
         hasStarted = true
+        MatrixRtcCallForegroundService.start(appContext, launchContext.roomName)
         serviceStateJob = scope.launch {
             callService.state.collect { serviceState ->
                 handleServiceState(serviceState)

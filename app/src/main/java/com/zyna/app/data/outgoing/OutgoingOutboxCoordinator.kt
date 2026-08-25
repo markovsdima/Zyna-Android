@@ -9,21 +9,36 @@ import com.zyna.app.data.matrix.MatrixClientState
 import com.zyna.app.data.matrix.MatrixForwardImageItem
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.matrix.rustcomponents.sdk.ClientException
 
 data class OutgoingOutboxFailure(
     val roomId: String,
     val message: String
 )
+
+internal enum class OutgoingOutboxWorkPass {
+    COMPLETE,
+    RETRY,
+    SESSION_UNAVAILABLE
+}
 
 class OutgoingOutboxService(
     private val matrixClientService: MatrixClientService,
@@ -36,8 +51,10 @@ class OutgoingOutboxService(
     private val _sendFailures = MutableSharedFlow<OutgoingOutboxFailure>(
         extraBufferCapacity = 16
     )
+    private val _isIdle = MutableStateFlow(true)
 
     val sendFailures: SharedFlow<OutgoingOutboxFailure> = _sendFailures.asSharedFlow()
+    internal val isIdle: StateFlow<Boolean> = _isIdle.asStateFlow()
 
     private var scope: CoroutineScope? = null
     private var stateJob: Job? = null
@@ -54,17 +71,67 @@ class OutgoingOutboxService(
 
         this.scope = scope
         stateJob = scope.launch {
-            matrixClientService.state.collect { state ->
-                handleClientState(state)
+            combine(
+                matrixClientService.state,
+                matrixClientService.sessionSecurityState
+            ) { state, security ->
+                val userId = (state as? MatrixClientState.Syncing)?.userId
+                state to (
+                    userId != null &&
+                        security.userId == userId &&
+                        security.readyForEncryptedTraffic
+                )
             }
+                .distinctUntilChanged()
+                .collect { (state, sessionReady) ->
+                    handleClientState(state, sessionReady)
+                }
         }
     }
 
     fun kick(reason: String, envelopeId: String? = null) {
-        kick(reason, envelopeId?.let { setOf(it) })
+        syncingUserIdOrNull()?.let { userId ->
+            OutgoingOutboxWorkScheduler.enqueueLatest(appContext, userId)
+        }
+        kickInProcess(reason, envelopeId?.let { setOf(it) })
     }
 
-    private fun kick(reason: String, envelopeIds: Set<String>?) {
+    internal suspend fun runWorkerPass(expectedUserId: String): OutgoingOutboxWorkPass {
+        val didStart = withContext(Dispatchers.Main.immediate) {
+            if (syncingUserIdOrNull() != expectedUserId) {
+                false
+            } else {
+                kickInProcess(reason = "work-manager", envelopeIds = null)
+                true
+            }
+        }
+        if (!didStart) {
+            return workerPassResult(
+                sessionAvailable = false,
+                didBecomeIdle = false,
+                hasPersistedCandidates = false
+            )
+        }
+
+        val didBecomeIdle = withTimeoutOrNull(WORKER_PASS_TIMEOUT_MILLIS) {
+            isIdle.first { it }
+        } != null
+        if (!didBecomeIdle) {
+            return workerPassResult(
+                sessionAvailable = true,
+                didBecomeIdle = false,
+                hasPersistedCandidates = false
+            )
+        }
+
+        return workerPassResult(
+            sessionAvailable = true,
+            didBecomeIdle = true,
+            hasPersistedCandidates = hasPersistedDispatchCandidates(expectedUserId)
+        )
+    }
+
+    private fun kickInProcess(reason: String, envelopeIds: Set<String>?) {
         if (!canScan()) {
             return
         }
@@ -83,7 +150,7 @@ class OutgoingOutboxService(
     private fun scheduleWake(delayMillis: Long, reason: String) {
         val activeScope = scope ?: return
         if (delayMillis <= 0L) {
-            kick(reason)
+            kickInProcess(reason, envelopeIds = null)
             return
         }
 
@@ -99,13 +166,15 @@ class OutgoingOutboxService(
             delay(delayMillis)
             wakeJob = null
             wakeAtMillis = null
-            kick(reason)
+            kickInProcess(reason, envelopeIds = null)
         }
     }
 
-    private suspend fun handleClientState(state: MatrixClientState) {
-        if (canScan(state)) {
-            kick("syncing")
+    private suspend fun handleClientState(state: MatrixClientState, sessionReady: Boolean) {
+        if (sessionReady && canScan(state)) {
+            val userId = (state as MatrixClientState.Syncing).userId
+            OutgoingOutboxWorkScheduler.ensureScheduled(appContext, userId)
+            kickInProcess(reason = "syncing", envelopeIds = null)
         } else {
             pendingScanReason = null
             pendingEnvelopeIds = null
@@ -116,6 +185,7 @@ class OutgoingOutboxService(
             scanJob = null
             retryBackoff.clearAll()
             inFlight.clear()
+            _isIdle.value = true
         }
     }
 
@@ -132,6 +202,7 @@ class OutgoingOutboxService(
     }
 
     private fun startScan(scope: CoroutineScope, reason: String, envelopeIds: Set<String>?) {
+        _isIdle.value = false
         scanJob = scope.launch {
             try {
                 runScan(reason, envelopeIds)
@@ -143,11 +214,31 @@ class OutgoingOutboxService(
 
     private suspend fun finishScan() {
         scanJob = null
-        val reason = pendingScanReason ?: return
+        val reason = pendingScanReason
+        if (reason == null) {
+            _isIdle.value = true
+            return
+        }
         val envelopeIds = pendingEnvelopeIds
         pendingScanReason = null
         pendingEnvelopeIds = null
-        kick(reason, envelopeIds)
+        kickInProcess(reason, envelopeIds)
+        if (scanJob == null) {
+            _isIdle.value = true
+        }
+    }
+
+    /**
+     * Intentionally ignores the in-memory retry delay. A delayed candidate must keep durable
+     * WorkManager work alive because [wakeJob] disappears if this process is killed.
+     */
+    private suspend fun hasPersistedDispatchCandidates(userId: String): Boolean {
+        if (localCacheRepository.outgoingTextDispatchCandidates(userId).isNotEmpty()) return true
+        if (localCacheRepository.outgoingImageDispatchCandidates(userId).isNotEmpty()) return true
+        if (localCacheRepository.outgoingVoiceDispatchCandidates(userId).isNotEmpty()) return true
+        if (localCacheRepository.outgoingRedactionDispatchCandidates(userId).isNotEmpty()) return true
+        if (localCacheRepository.outgoingReactionDispatchCandidates(userId).isNotEmpty()) return true
+        return localCacheRepository.outgoingEditDispatchCandidates(userId).isNotEmpty()
     }
 
     private suspend fun runScan(reason: String, envelopeIds: Set<String>?) {
@@ -168,6 +259,10 @@ class OutgoingOutboxService(
             userId = userId,
             envelopeIds = envelopeIds
         )
+        val reactionCandidates = localCacheRepository.outgoingReactionDispatchCandidates(
+            userId = userId,
+            reactionIds = envelopeIds
+        )
         val editCandidates = localCacheRepository.outgoingEditDispatchCandidates(
             userId = userId
         )
@@ -176,6 +271,7 @@ class OutgoingOutboxService(
             imageCandidates.isEmpty() &&
             voiceCandidates.isEmpty() &&
             redactionCandidates.isEmpty() &&
+            reactionCandidates.isEmpty() &&
             editCandidates.isEmpty()
         ) {
             Log.d(TAG, "outbox scan reason=$reason count=0")
@@ -187,7 +283,8 @@ class OutgoingOutboxService(
             "outbox scan reason=$reason text=${textCandidates.size} " +
                 "images=${imageCandidates.size} " +
                 "voices=${voiceCandidates.size} " +
-                "redactions=${redactionCandidates.size} edits=${editCandidates.size}"
+                "redactions=${redactionCandidates.size} " +
+                "reactions=${reactionCandidates.size} edits=${editCandidates.size}"
         )
         for (candidate in textCandidates) {
             currentCoroutineContext().ensureActive()
@@ -216,6 +313,13 @@ class OutgoingOutboxService(
                 return
             }
             sendRedactionIfEligible(candidate, reason)
+        }
+        for (candidate in reactionCandidates) {
+            currentCoroutineContext().ensureActive()
+            if (!canScan()) {
+                return
+            }
+            sendReactionIfEligible(candidate, reason)
         }
         for (candidate in editCandidates) {
             currentCoroutineContext().ensureActive()
@@ -572,6 +676,114 @@ class OutgoingOutboxService(
         }
     }
 
+    private suspend fun sendReactionIfEligible(
+        candidate: OutgoingReactionEnvelope,
+        reason: String
+    ) {
+        if (!inFlight.begin(candidate.id)) {
+            return
+        }
+
+        try {
+            when (val decision = attemptDecision(OutgoingTransportState.RETRYING, candidate.id)) {
+                AttemptDecision.Send -> Unit
+                is AttemptDecision.Wait -> {
+                    Log.d(
+                        TAG,
+                        "outbox reaction wait reason=$reason id=${candidate.id} " +
+                            "state=${candidate.state} delayMillis=${decision.delayMillis}"
+                    )
+                    scheduleWake(decision.delayMillis, reason = "delayed-$reason")
+                    return
+                }
+                AttemptDecision.Skip -> return
+            }
+
+            localCacheRepository.markOutgoingReactionAttemptStarted(candidate)
+            when (candidate.state) {
+                PendingReactionState.ADD_QUEUED -> sendReactionAdd(candidate)
+                PendingReactionState.REMOVE_QUEUED -> sendReactionRemoval(candidate)
+                PendingReactionState.ADD_AFTER_REMOVE_QUEUED -> sendReactionRemoval(candidate)
+                PendingReactionState.ADD_ACCEPTED,
+                PendingReactionState.REMOVED,
+                PendingReactionState.FAILED -> Unit
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            completeReactionFailure(candidate, error)
+        } finally {
+            inFlight.end(candidate.id)
+        }
+    }
+
+    private suspend fun sendReactionAdd(candidate: OutgoingReactionEnvelope) {
+        val transactionId = candidate.transactionId
+            ?: error("Reaction add transaction id is missing")
+        val reactionEventId = matrixClientService.sendReaction(
+            roomId = candidate.roomId,
+            targetEventId = candidate.targetEventId,
+            reactionKey = candidate.reactionKey,
+            transactionId = transactionId
+        )
+        val nextCandidate = localCacheRepository.markOutgoingReactionAddAccepted(
+            candidate = candidate,
+            reactionEventId = reactionEventId
+        )
+        if (nextCandidate != null) {
+            Log.d(
+                TAG,
+                "outbox reaction added before removal id=${candidate.id} " +
+                    "reaction=$reactionEventId key=${candidate.reactionKey}"
+            )
+            sendReactionRemoval(nextCandidate)
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        Log.d(
+            TAG,
+            "outbox reaction added id=${candidate.id} target=${candidate.targetEventId} " +
+                "reaction=$reactionEventId key=${candidate.reactionKey}"
+        )
+    }
+
+    private suspend fun sendReactionRemoval(candidate: OutgoingReactionEnvelope) {
+        if (candidate.reactionEventId.isNullOrBlank()) {
+            sendReactionAdd(candidate)
+            return
+        }
+        val reactionEventId = candidate.reactionEventId
+        val transactionId = candidate.redactionTransactionId
+            ?: error("Reaction redaction transaction id is missing")
+        val redactionEventId = matrixClientService.redactMessage(
+            roomId = candidate.roomId,
+            eventId = reactionEventId,
+            transactionId = transactionId
+        )
+        val nextCandidate = localCacheRepository.markOutgoingReactionRemovalAccepted(
+            candidate = candidate,
+            redactionEventId = redactionEventId
+        )
+        if (nextCandidate != null) {
+            Log.d(
+                TAG,
+                "outbox reaction removed before re-add id=${candidate.id} " +
+                    "reaction=$reactionEventId redaction=$redactionEventId " +
+                    "key=${candidate.reactionKey}"
+            )
+            sendReactionAdd(nextCandidate)
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        Log.d(
+            TAG,
+            "outbox reaction removed id=${candidate.id} reaction=$reactionEventId " +
+                "redaction=$redactionEventId key=${candidate.reactionKey}"
+        )
+    }
+
     private suspend fun completeFailure(candidate: OutgoingTextEnvelope, error: Throwable) {
         val failureMessage = error.message ?: error.javaClass.simpleName
         if (error.isRetryableTransportError()) {
@@ -738,6 +950,61 @@ class OutgoingOutboxService(
         Log.w(TAG, "outbox edit failed edit=${candidate.id}", error)
     }
 
+    private suspend fun completeReactionFailure(
+        candidate: OutgoingReactionEnvelope,
+        error: Throwable
+    ) {
+        val failureMessage = error.message ?: error.javaClass.simpleName
+        if (
+            (
+                candidate.state == PendingReactionState.REMOVE_QUEUED ||
+                    candidate.state == PendingReactionState.ADD_AFTER_REMOVE_QUEUED
+                ) &&
+            !candidate.reactionEventId.isNullOrBlank() &&
+            error.isAlreadyRedactedError()
+        ) {
+            val nextCandidate = localCacheRepository.markOutgoingReactionRemovalAccepted(
+                candidate = candidate,
+                redactionEventId = null
+            )
+            if (nextCandidate != null) {
+                Log.d(TAG, "outbox reaction removal already resolved before re-add id=${candidate.id}")
+                sendReactionAdd(nextCandidate)
+                return
+            }
+            retryBackoff.clear(candidate.id)
+            Log.d(TAG, "outbox reaction removal already resolved id=${candidate.id}")
+            return
+        }
+
+        if (error.isRetryableTransportError()) {
+            localCacheRepository.markOutgoingReactionRetrying(
+                candidate = candidate,
+                failureMessage = failureMessage
+            )
+            val delayMillis = retryBackoff.scheduleRetry(candidate.id)
+            scheduleWake(delayMillis, reason = "retryable-reaction-failure")
+            Log.d(
+                TAG,
+                "outbox reaction retrying id=${candidate.id} delayMillis=$delayMillis"
+            )
+            return
+        }
+
+        retryBackoff.clear(candidate.id)
+        localCacheRepository.markOutgoingReactionTerminalFailure(
+            candidate = candidate,
+            failureMessage = failureMessage
+        )
+        _sendFailures.tryEmit(
+            OutgoingOutboxFailure(
+                roomId = candidate.roomId,
+                message = failureMessage
+            )
+        )
+        Log.w(TAG, "outbox reaction failed id=${candidate.id}", error)
+    }
+
     private fun attemptDecision(envelope: OutgoingTextEnvelope): AttemptDecision {
         return attemptDecision(envelope.transportState, envelope.id)
     }
@@ -761,13 +1028,13 @@ class OutgoingOutboxService(
 
     private fun canScan(state: MatrixClientState = matrixClientService.state.value): Boolean {
         val userId = (state as? MatrixClientState.Syncing)?.userId ?: return false
-        return matrixClientService.isRecoveryComplete(userId)
+        return matrixClientService.isSessionSecurityReady(userId)
     }
 
     private fun syncingUserIdOrNull(): String? {
         val state = matrixClientService.state.value
         val userId = (state as? MatrixClientState.Syncing)?.userId ?: return null
-        return userId.takeIf { matrixClientService.isRecoveryComplete(it) }
+        return userId.takeIf { matrixClientService.isSessionSecurityReady(it) }
     }
 
     private sealed interface AttemptDecision {
@@ -778,6 +1045,19 @@ class OutgoingOutboxService(
 
     private companion object {
         const val TAG = "OutgoingOutbox"
+        const val WORKER_PASS_TIMEOUT_MILLIS = 8 * 60 * 1_000L
+    }
+}
+
+internal fun workerPassResult(
+    sessionAvailable: Boolean,
+    didBecomeIdle: Boolean,
+    hasPersistedCandidates: Boolean
+): OutgoingOutboxWorkPass {
+    return when {
+        !sessionAvailable -> OutgoingOutboxWorkPass.SESSION_UNAVAILABLE
+        !didBecomeIdle || hasPersistedCandidates -> OutgoingOutboxWorkPass.RETRY
+        else -> OutgoingOutboxWorkPass.COMPLETE
     }
 }
 

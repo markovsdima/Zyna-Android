@@ -4,6 +4,7 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
+import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
@@ -17,13 +18,34 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         val view: View
     )
 
+    enum class BackInteractionStyle {
+        FullScreenDrag,
+        PredictiveBack
+    }
+
+    private data class InteractivePopState(
+        val outgoing: MountedEntry,
+        val revealed: MountedEntry,
+        val width: Float,
+        val progressTranslationLimit: Float
+    )
+
+    private data class CompletedInteractivePop(
+        val outgoingKey: String,
+        val revealedKey: String
+    )
+
     private val mountedEntries = mutableListOf<MountedEntry>()
     private var rootGlassLayerOwnerDuringTransition: MountedEntry? = null
     private var transitionAnimator: ValueAnimator? = null
     private var isTransitionRunning = false
+    private var interactivePopState: InteractivePopState? = null
+    private var completedInteractivePop: CompletedInteractivePop? = null
+    private var completedInteractivePopRecoveryRunnable: Runnable? = null
     private var pendingEntries: List<ZynaScreenEntry>? = null
     var onRootGlassLayerStateChanged: (ownerKey: String?, translationX: Float) -> Unit =
         { _, _ -> }
+    var onAppliedEntryKeysChanged: (keys: List<String>) -> Unit = {}
 
     fun topView(): View? {
         return mountedEntries.lastOrNull()?.view
@@ -38,7 +60,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
             "stack.setEntries.begin animated=$animated current=$currentKeys next=$nextKeys"
         }
 
-        if (isTransitionRunning) {
+        if (isTransitionRunning || interactivePopState != null) {
             pendingEntries = entries
             ZynaPerfLog.end(start, "stack.setEntries.deferred") { "next=$nextKeys" }
             return
@@ -46,6 +68,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
 
         if (mountedEntries.isEmpty()) {
             mountInitial(entries)
+            syncSteadyStateVisibility()
             syncRootGlassLayerTranslation()
             ZynaPerfLog.end(start, "stack.setEntries.initial") { "next=$nextKeys" }
             return
@@ -64,6 +87,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         val isPurePop = commonPrefix == nextKeys.size && currentKeys.size > nextKeys.size
 
         when {
+            isPurePop && finishCompletedInteractivePopIfNeeded(currentKeys, nextKeys) -> Unit
             animated && isPurePush -> pushEntries(entries.drop(currentKeys.size))
             animated && isPurePop -> popToSize(nextKeys.size)
             else -> replaceAll(entries)
@@ -87,7 +111,9 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
             entry.updateView(view)
             ZynaPerfLog.end(updateStart, "stack.initial.updateView") { "key=${entry.key}" }
         }
+        syncSteadyStateVisibility()
         syncRootGlassLayerTranslation()
+        notifyAppliedEntryKeysChanged()
     }
 
     private fun updateCommonEntries(entries: List<ZynaScreenEntry>) {
@@ -116,6 +142,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         ZynaPerfLog.end(createStart, "stack.push.createView") { "key=${entry.key}" }
         addFullSizeView(view)
         mountedEntries += MountedEntry(entry, view)
+        notifyAppliedEntryKeysChanged()
         val updateStart = ZynaPerfLog.start()
         entry.updateView(view)
         ZynaPerfLog.end(updateStart, "stack.push.updateView") { "key=${entry.key}" }
@@ -123,15 +150,20 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         val previousView = mountedEntries
             .getOrNull(mountedEntries.lastIndex - 1)
             ?.view
+        val remainingEntries = entries.drop(1)
         runPushAnimation(view, previousView) {
-            pushEntries(entries.drop(1))
+            if (remainingEntries.isEmpty()) {
+                syncSteadyStateVisibility()
+            }
+            pushEntries(remainingEntries)
         }
     }
 
     private fun popToSize(targetSize: Int) {
         if (mountedEntries.size <= targetSize) return
 
-        val removed = mountedEntries.removeLast()
+        val removed = mountedEntries.removeAt(mountedEntries.lastIndex)
+        notifyAppliedEntryKeysChanged()
         val revealed = mountedEntries.lastOrNull()?.view
         rootGlassLayerOwnerDuringTransition = if (removed.entry.rootGlassOwnerKey != null) {
             removed
@@ -147,7 +179,11 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
             removed.entry.onViewRemoved(removed.view)
             rootGlassLayerOwnerDuringTransition = null
             syncRootGlassLayerTranslation()
-            popToSize(targetSize)
+            if (mountedEntries.size > targetSize) {
+                popToSize(targetSize)
+            } else {
+                syncSteadyStateVisibility()
+            }
         }
     }
 
@@ -155,6 +191,8 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         transitionAnimator?.cancel()
         transitionAnimator = null
         rootGlassLayerOwnerDuringTransition = null
+        completedInteractivePop = null
+        clearCompletedInteractivePopRecovery()
         val removedEntries = mountedEntries.toList()
         removedEntries.forEach { mounted ->
             if (mounted.entry.retainViewOnRemove) {
@@ -204,6 +242,10 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         val width = max(width, resources.displayMetrics.widthPixels).toFloat()
         val outgoingStartTranslationX = outgoing.translationX
         val revealedStartTranslationX = -width * PARALLAX_RATIO
+        outgoing.visibility = View.VISIBLE
+        outgoing.isEnabled = false
+        revealed?.visibility = View.VISIBLE
+        revealed?.isEnabled = false
         revealed?.translationX = revealedStartTranslationX
         syncRootGlassLayerTranslation()
         runTransition(
@@ -224,6 +266,150 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         )
     }
 
+    fun canStartInteractivePop(): Boolean {
+        return mountedEntries.size > 1 &&
+            !isTransitionRunning &&
+            interactivePopState == null &&
+            completedInteractivePop == null
+    }
+
+    fun beginInteractivePop(style: BackInteractionStyle): Boolean {
+        if (!canStartInteractivePop()) {
+            return false
+        }
+        val outgoing = mountedEntries.last()
+        val revealed = mountedEntries[mountedEntries.lastIndex - 1]
+        val stackWidth = max(width, resources.displayMetrics.widthPixels).toFloat()
+        val progressLimit = when (style) {
+            BackInteractionStyle.FullScreenDrag -> stackWidth
+            BackInteractionStyle.PredictiveBack -> dp(PREDICTIVE_BACK_PREVIEW_DP).toFloat()
+        }
+
+        transitionAnimator?.cancel()
+        transitionAnimator = null
+        interactivePopState = InteractivePopState(
+            outgoing = outgoing,
+            revealed = revealed,
+            width = stackWidth,
+            progressTranslationLimit = progressLimit
+        )
+        rootGlassLayerOwnerDuringTransition = when {
+            outgoing.entry.rootGlassOwnerKey != null -> outgoing
+            revealed.entry.rootGlassOwnerKey != null -> revealed
+            else -> null
+        }
+        outgoing.view.visibility = View.VISIBLE
+        outgoing.view.isEnabled = false
+        revealed.view.visibility = View.VISIBLE
+        revealed.view.isEnabled = false
+        outgoing.view.translationX = 0f
+        revealed.view.translationX = -stackWidth * PARALLAX_RATIO
+        syncRootGlassLayerTranslation()
+        return true
+    }
+
+    fun updateInteractivePop(progress: Float) {
+        val state = interactivePopState ?: return
+        val clamped = progress.coerceIn(0f, 1f)
+        applyInteractivePopTranslation(
+            state = state,
+            translationX = state.progressTranslationLimit * clamped
+        )
+    }
+
+    fun finishInteractivePop(onFinished: () -> Boolean) {
+        val state = interactivePopState ?: return
+        runInteractivePopAnimation(
+            state = state,
+            targetTranslationX = state.width,
+            onEnd = {
+                val completed = CompletedInteractivePop(
+                    outgoingKey = state.outgoing.entry.key,
+                    revealedKey = state.revealed.entry.key
+                )
+                completedInteractivePop = completed
+                interactivePopState = null
+                discardPendingEntriesAfterFinishedInteractivePop()
+                val didRequestPop = onFinished()
+                if (didRequestPop) {
+                    scheduleCompletedInteractivePopRecoveryIfNeeded(completed)
+                } else {
+                    recoverCompletedInteractivePopIfStillPending(
+                        completed = completed,
+                        reason = "callback-noop"
+                    )
+                }
+            }
+        )
+    }
+
+    fun cancelInteractivePop() {
+        val state = interactivePopState ?: return
+        runInteractivePopAnimation(
+            state = state,
+            targetTranslationX = 0f,
+            onEnd = {
+                interactivePopState = null
+                rootGlassLayerOwnerDuringTransition = null
+                state.outgoing.view.translationX = 0f
+                state.revealed.view.translationX = 0f
+                syncSteadyStateVisibility()
+                syncRootGlassLayerTranslation()
+                flushPendingEntries()
+            }
+        )
+    }
+
+    private fun runInteractivePopAnimation(
+        state: InteractivePopState,
+        targetTranslationX: Float,
+        onEnd: () -> Unit
+    ) {
+        val startTranslationX = state.outgoing.view.translationX
+        isTransitionRunning = true
+        transitionAnimator?.cancel()
+        transitionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = INTERACTIVE_SETTLE_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { animator ->
+                val progress = animator.animatedValue as Float
+                applyInteractivePopTranslation(
+                    state = state,
+                    translationX = lerp(startTranslationX, targetTranslationX, progress)
+                )
+            }
+            var didCancel = false
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (didCancel) {
+                        return
+                    }
+                    transitionAnimator = null
+                    isTransitionRunning = false
+                    onEnd()
+                }
+
+                override fun onAnimationCancel(animation: Animator) {
+                    didCancel = true
+                    transitionAnimator = null
+                    isTransitionRunning = false
+                }
+            })
+        }
+        transitionAnimator?.start()
+    }
+
+    private fun applyInteractivePopTranslation(
+        state: InteractivePopState,
+        translationX: Float
+    ) {
+        val clampedTranslation = translationX.coerceIn(0f, state.width)
+        val progress = clampedTranslation / state.width
+        state.outgoing.view.translationX = clampedTranslation
+        state.revealed.view.translationX = -state.width * PARALLAX_RATIO * (1f - progress)
+        syncRootGlassLayerTranslation()
+    }
+
     private fun runTransition(
         targetTranslationX: Float,
         onFrame: (Float) -> Unit,
@@ -232,7 +418,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         isTransitionRunning = true
         ZynaPerfLog.mark {
             "stack.transition.start duration=$TRANSITION_MS " +
-                "durationScale=${ValueAnimator.getDurationScale()} targetX=$targetTranslationX"
+                "durationScale=${animatorDurationScaleForLog()} targetX=$targetTranslationX"
         }
         transitionAnimator?.cancel()
         transitionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
@@ -258,6 +444,7 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
                     transitionAnimator = null
                     rootGlassLayerOwnerDuringTransition = null
                     isTransitionRunning = false
+                    syncSteadyStateVisibility()
                     syncRootGlassLayerTranslation()
                     flushPendingEntries()
                 }
@@ -277,6 +464,53 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         )
     }
 
+    private fun syncSteadyStateVisibility() {
+        mountedEntries.forEachIndexed { index, mounted ->
+            val isTop = index == mountedEntries.lastIndex
+            mounted.view.visibility = if (isTop) View.VISIBLE else View.INVISIBLE
+            mounted.view.isEnabled = isTop
+            mounted.view.translationX = 0f
+        }
+    }
+
+    private fun finishCompletedInteractivePopIfNeeded(
+        currentKeys: List<String>,
+        nextKeys: List<String>
+    ): Boolean {
+        val completed = completedInteractivePop ?: return false
+        val matchesCompletedPop =
+            currentKeys.lastOrNull() == completed.outgoingKey &&
+                nextKeys.lastOrNull() == completed.revealedKey &&
+                nextKeys == currentKeys.dropLast(1)
+        if (!matchesCompletedPop) {
+            completedInteractivePop = null
+            clearCompletedInteractivePopRecovery()
+            rootGlassLayerOwnerDuringTransition = null
+            syncSteadyStateVisibility()
+            syncRootGlassLayerTranslation()
+            return false
+        }
+
+        val removed = mountedEntries.removeAt(mountedEntries.lastIndex)
+        if (removed.entry.retainViewOnRemove) {
+            parkRetainedView(removed.view)
+        } else {
+            removeView(removed.view)
+        }
+        removed.entry.onViewRemoved(removed.view)
+        completedInteractivePop = null
+        clearCompletedInteractivePopRecovery()
+        rootGlassLayerOwnerDuringTransition = null
+        syncSteadyStateVisibility()
+        syncRootGlassLayerTranslation()
+        notifyAppliedEntryKeysChanged()
+        return true
+    }
+
+    private fun notifyAppliedEntryKeysChanged() {
+        onAppliedEntryKeysChanged(mountedEntries.map { it.entry.key })
+    }
+
     private fun lerp(start: Float, end: Float, progress: Float): Float {
         return start + (end - start) * progress
     }
@@ -285,6 +519,52 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         val entries = pendingEntries ?: return
         pendingEntries = null
         setEntries(entries, animated = false)
+    }
+
+    private fun discardPendingEntriesAfterFinishedInteractivePop() {
+        val entries = pendingEntries ?: return
+        pendingEntries = null
+        ZynaPerfLog.mark {
+            "stack.interactivePop.finish.dropPending keys=${entries.map { it.key }}"
+        }
+    }
+
+    private fun scheduleCompletedInteractivePopRecoveryIfNeeded(completed: CompletedInteractivePop) {
+        if (completedInteractivePop != completed) {
+            return
+        }
+        clearCompletedInteractivePopRecovery()
+        val runnable = Runnable {
+            recoverCompletedInteractivePopIfStillPending(
+                completed = completed,
+                reason = "timeout"
+            )
+        }
+        completedInteractivePopRecoveryRunnable = runnable
+        postDelayed(runnable, COMPLETED_INTERACTIVE_POP_RECOVERY_MS)
+    }
+
+    private fun recoverCompletedInteractivePopIfStillPending(
+        completed: CompletedInteractivePop,
+        reason: String
+    ) {
+        if (completedInteractivePop != completed) {
+            return
+        }
+        clearCompletedInteractivePopRecovery()
+        completedInteractivePop = null
+        rootGlassLayerOwnerDuringTransition = null
+        syncSteadyStateVisibility()
+        syncRootGlassLayerTranslation()
+        ZynaPerfLog.mark {
+            "stack.interactivePop.finish.recover reason=$reason " +
+                "outgoing=${completed.outgoingKey} revealed=${completed.revealedKey}"
+        }
+    }
+
+    private fun clearCompletedInteractivePopRecovery() {
+        completedInteractivePopRecoveryRunnable?.let(::removeCallbacks)
+        completedInteractivePopRecoveryRunnable = null
     }
 
     private fun addFullSizeView(view: View) {
@@ -336,8 +616,23 @@ class ZynaNavigationStackView(context: Context) : FrameLayout(context) {
         return index
     }
 
+    private fun animatorDurationScaleForLog(): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ValueAnimator.getDurationScale().toString()
+        } else {
+            "unavailable"
+        }
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
+
     private companion object {
         const val TRANSITION_MS = 260L
+        const val INTERACTIVE_SETTLE_MS = 220L
+        const val COMPLETED_INTERACTIVE_POP_RECOVERY_MS = 500L
         const val PARALLAX_RATIO = 0.28f
+        const val PREDICTIVE_BACK_PREVIEW_DP = 56
     }
 }

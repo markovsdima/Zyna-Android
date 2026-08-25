@@ -6,15 +6,19 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.Bundle
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.DecelerateInterpolator
 import android.util.Log
 import com.zyna.app.BuildConfig
+import com.zyna.app.R
 import com.zyna.app.data.media.AudioPlaybackSnapshot
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixAudioInfo
@@ -33,9 +37,11 @@ internal class MessageCellView(
     private val imageLoader: MatrixMediaLoader? = null
 ) : View(context), PhotoViewerSource {
     private val density = resources.displayMetrics.density
+    private val scaledDensity = density * resources.configuration.fontScale
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val contextCancelDistance = touchSlop * 2f
     private val bubbleRenderer = BubbleRenderer(density)
+    private var localBubbleGradientRenderer: MessageBubbleGradientRenderer? = null
     private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
     private val textRenderer = TextMessageRenderer(context)
     private val imageRenderer = ImageMessageRenderer(context, imageLoader)
@@ -66,10 +72,16 @@ internal class MessageCellView(
     private var isContextMenuOpened = false
     private var isContextMenuSourceHidden = false
     private var isDrawingContextMenuCopy = false
+    private var hasContextMenuViewportOverride = false
+    private var contextMenuViewportWidth = 0
+    private var contextMenuViewportHeight = 0
+    private var contextMenuViewportOffsetX = 0f
+    private var contextMenuViewportOffsetY = 0f
     private var drawsContextPhotoSelection = true
     private var isPhotoTapCandidate = false
     private var isVoiceTapCandidate = false
     private var replyHeaderTapEventId: String? = null
+    private var reactionTapKey: String? = null
     private var bubbleHighlightProgress = 0f
     private var bubbleHighlightAnimator: ValueAnimator? = null
     private var imageLoadHandles: List<AutoCloseable> = emptyList()
@@ -84,6 +96,16 @@ internal class MessageCellView(
         style = Paint.Style.STROKE
         strokeWidth = 2.dpToPx(density).toFloat()
     }
+    private val reactionFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val reactionStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.dpToPx(density).toFloat()
+    }
+    private val reactionTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textSize = 14f * scaledDensity
+    }
     private val contextPhotoSelectionRadius = 10.dpToPx(density).toFloat()
     private var hasContextPhotoSelection = false
 
@@ -91,6 +113,8 @@ internal class MessageCellView(
     var onContextMenuRequested: ((request: MessageContextMenuRequest) -> Boolean)? = null
     var onContextMenuGestureEvent: ((action: Int, rawX: Float, rawY: Float) -> Unit)? = null
     var onReplyHeaderClicked: ((eventId: String) -> Unit)? = null
+    var onReplyRequested: ((MessageReplyPreview) -> Unit)? = null
+    var onReactionClicked: ((reactionKey: String) -> Unit)? = null
     var onPhotoViewerRequested: ((request: PhotoViewerOpenRequest) -> Unit)? = null
     var onVoicePlaybackRequested: ((messageId: String, audioInfo: MatrixAudioInfo) -> Unit)? = null
 
@@ -109,6 +133,12 @@ internal class MessageCellView(
     private val outerBottomPadding = 8.dpToPx(density)
     private val bubbleHorizontalInset = 14.dpToPx(density)
     private val bubbleVerticalInset = 10.dpToPx(density)
+    private val reactionTopGap = 5.dpToPx(density)
+    private val reactionPillHorizontalPadding = 8.dpToPx(density)
+    private val reactionPillVerticalPadding = 4.dpToPx(density)
+    private val reactionPillSpacing = 4.dpToPx(density)
+    private val reactionPillLineSpacing = 4.dpToPx(density)
+    private val reactionPillMinHeight = 26.dpToPx(density)
     private val minBubbleContentWidth = 28.dpToPx(density)
     private val horizontalChrome = 96.dpToPx(density)
     private val minTextMaxWidth = 180.dpToPx(density)
@@ -121,6 +151,10 @@ internal class MessageCellView(
     }
 
     fun bind(model: MessageRenderModel, theme: MessageRenderTheme) {
+        if (renderModel?.id != model.id) {
+            animate().cancel()
+            translationX = 0f
+        }
         val needsLayout = renderModel != model || renderTheme != theme
         closeImageLoadHandles()
         renderModel = model
@@ -147,6 +181,19 @@ internal class MessageCellView(
         if (previous.messageId == model.id || snapshot.messageId == model.id) {
             invalidate()
         }
+    }
+
+    fun updateReactions(reactions: List<MessageReactionRenderModel>) {
+        val model = renderModel ?: return
+        if (model.reactions == reactions) {
+            return
+        }
+        val nextModel = model.copy(reactions = reactions)
+        renderModel = nextModel
+        contentDescription = nextModel.accessibilityText()
+        layout = null
+        requestLayout()
+        invalidate()
     }
 
     fun highlightBubble() {
@@ -204,13 +251,15 @@ internal class MessageCellView(
             layout = it
         }
 
-        if (currentLayout.drawBubble) {
-            bubbleRenderer.draw(
-                canvas = canvas,
-                rect = currentLayout.bubbleRect,
-                fillColor = theme.bubbleColor(model),
-                message = model
-            )
+        if (currentLayout.drawBubble && !drawsBubbleGradientInParent(currentLayout, model, theme)) {
+            if (!drawBubbleGradientLocally(canvas, currentLayout, model, theme)) {
+                bubbleRenderer.draw(
+                    canvas = canvas,
+                    rect = currentLayout.bubbleRect,
+                    fillColor = theme.bubbleColor(model),
+                    message = model
+                )
+            }
         }
         if (bubbleHighlightProgress > 0f) {
             bubbleRenderer.drawOverlay(
@@ -225,6 +274,7 @@ internal class MessageCellView(
         canvas.translate(currentLayout.contentLeft.toFloat(), currentLayout.contentTop.toFloat())
         currentLayout.renderer.draw(canvas, currentLayout.contentLayout)
         canvas.restoreToCount(save)
+        drawReactions(canvas, currentLayout, model, theme)
         drawContextPhotoSelection(canvas)
     }
 
@@ -238,12 +288,17 @@ internal class MessageCellView(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                downTouchX = event.x
+                downTouchY = event.y
                 isPhotoTapCandidate = photoViewerRequestAt(event.x, event.y) != null
                 isVoiceTapCandidate = voicePlaybackTargetAt(event.x, event.y) != null
                 replyHeaderTapEventId = replyHeaderEventIdAt(event.x, event.y)
-                if (hitTest(event.x, event.y) == MessageHitTarget.BUBBLE && renderModel != null) {
-                    downTouchX = event.x
-                    downTouchY = event.y
+                reactionTapKey = reactionKeyAt(event.x, event.y)
+                if (
+                    reactionTapKey == null &&
+                    hitTest(event.x, event.y) == MessageHitTarget.BUBBLE &&
+                    renderModel != null
+                ) {
                     isContextMenuCandidate = true
                     isContextMenuPreviewing = false
                     isContextMenuOpened = false
@@ -256,6 +311,9 @@ internal class MessageCellView(
             MotionEvent.ACTION_MOVE -> {
                 if (replyHeaderTapEventId != null && movedPastTouchSlop(event.x, event.y)) {
                     replyHeaderTapEventId = null
+                }
+                if (reactionTapKey != null && movedPastTouchSlop(event.x, event.y)) {
+                    reactionTapKey = null
                 }
                 if (isPhotoTapCandidate && movedPastTouchSlop(event.x, event.y)) {
                     isPhotoTapCandidate = false
@@ -291,6 +349,17 @@ internal class MessageCellView(
                 } else {
                     null
                 }
+                val reactionClickKey = if (
+                    event.actionMasked == MotionEvent.ACTION_UP &&
+                    !wasContextMenuGesture &&
+                    !movedPastTouchSlop(event.x, event.y)
+                ) {
+                    val downReactionKey = reactionTapKey
+                    reactionKeyAt(event.x, event.y)
+                        ?.takeIf { it == downReactionKey }
+                } else {
+                    null
+                }
                 removeCallbacks(beginContextMenuPreviewRunnable)
                 removeCallbacks(openContextMenuRunnable)
                 if (wasContextMenuGesture) {
@@ -303,6 +372,11 @@ internal class MessageCellView(
                 }
                 if (replyHeaderClickEventId != null) {
                     onReplyHeaderClicked?.invoke(replyHeaderClickEventId)
+                    performClick()
+                    return true
+                }
+                if (reactionClickKey != null) {
+                    onReactionClicked?.invoke(reactionClickKey)
                     performClick()
                     return true
                 }
@@ -340,6 +414,29 @@ internal class MessageCellView(
         return true
     }
 
+    override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
+        super.onInitializeAccessibilityNodeInfo(info)
+        if (currentReplySwipeTarget() != null && onReplyRequested != null) {
+            info.addAction(
+                AccessibilityNodeInfo.AccessibilityAction(
+                    R.id.accessibility_action_reply,
+                    context.getString(R.string.chat_action_reply)
+                )
+            )
+        }
+    }
+
+    override fun performAccessibilityAction(action: Int, arguments: Bundle?): Boolean {
+        if (action == R.id.accessibility_action_reply) {
+            val target = currentReplySwipeTarget() ?: return false
+            val callback = onReplyRequested ?: return false
+            callback(target)
+            performClick()
+            return true
+        }
+        return super.performAccessibilityAction(action, arguments)
+    }
+
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         renderModel?.let { model ->
@@ -354,6 +451,8 @@ internal class MessageCellView(
         removeCallbacks(openContextMenuRunnable)
         bubbleHighlightAnimator?.cancel()
         bubbleHighlightAnimator = null
+        animate().cancel()
+        translationX = 0f
         closeImageLoadHandles()
         resetContextMenuTouchState()
         isContextMenuSourceHidden = false
@@ -366,6 +465,28 @@ internal class MessageCellView(
         } else {
             MessageHitTarget.OUTSIDE
         }
+    }
+
+    internal fun replySwipeTargetAt(
+        localY: Float,
+        verticalPadding: Float
+    ): MessageReplyPreview? {
+        val bubble = layout?.bubbleRect ?: return null
+        if (localY < bubble.top - verticalPadding || localY > bubble.bottom + verticalPadding) {
+            return null
+        }
+        return currentReplySwipeTarget()
+    }
+
+    internal fun currentReplySwipeTarget(): MessageReplyPreview? {
+        return renderModel?.toReplyPreviewOrNull()
+    }
+
+    internal fun isBoundToReplySwipeEvent(eventId: String): Boolean {
+        val model = renderModel ?: return false
+        return model.eventId == eventId &&
+            model.content !is MessageContent.Redacted &&
+            model.outgoingEnvelopeId == null
     }
 
     private fun replyHeaderEventIdAt(x: Float, y: Float): String? {
@@ -402,6 +523,43 @@ internal class MessageCellView(
         return true
     }
 
+    internal fun drawBubbleBackgroundInParent(
+        canvas: Canvas,
+        gradientRenderer: MessageBubbleGradientRenderer,
+        viewportWidth: Int,
+        viewportHeight: Int,
+        viewportOffsetX: Float,
+        viewportOffsetY: Float,
+        alpha: Int = 255
+    ): Boolean {
+        if (isContextMenuSourceHidden) {
+            return false
+        }
+        val model = renderModel ?: return false
+        val theme = renderTheme ?: return false
+        val currentLayout = layout ?: buildLayout(
+            lastMeasuredWidth.takeIf { it > 0 } ?: width
+        ).also {
+            layout = it
+        }
+        if (!currentLayout.drawBubble) {
+            return false
+        }
+        val gradient = theme.bubbleGradient(model) ?: return false
+        return gradientRenderer.drawBubble(
+            canvas = canvas,
+            bubbleRenderer = bubbleRenderer,
+            rect = currentLayout.bubbleRect,
+            message = model,
+            spec = gradient,
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            viewportOffsetX = viewportOffsetX,
+            viewportOffsetY = viewportOffsetY,
+            alpha = alpha
+        )
+    }
+
     override fun photoSourceBoundsInScreen(itemId: String): RectF? {
         val currentLayout = layout ?: return null
         val model = renderModel ?: return null
@@ -420,18 +578,43 @@ internal class MessageCellView(
         }
         isContextMenuSourceHidden = hidden
         invalidate()
+        (parent as? GradientBubbleRecyclerView)?.let { recyclerView ->
+            recyclerView.postInvalidateOnAnimation()
+        }
     }
 
-    fun drawForContextMenu(canvas: Canvas) {
+    fun drawForContextMenu(
+        canvas: Canvas,
+        hasViewportOverride: Boolean = false,
+        viewportWidth: Int = 0,
+        viewportHeight: Int = 0,
+        viewportOffsetX: Float = 0f,
+        viewportOffsetY: Float = 0f
+    ) {
         val wasDrawingContextMenuCopy = isDrawingContextMenuCopy
         val wasDrawingContextSelection = drawsContextPhotoSelection
+        val previousHasViewportOverride = hasContextMenuViewportOverride
+        val previousViewportWidth = contextMenuViewportWidth
+        val previousViewportHeight = contextMenuViewportHeight
+        val previousViewportOffsetX = contextMenuViewportOffsetX
+        val previousViewportOffsetY = contextMenuViewportOffsetY
         isDrawingContextMenuCopy = true
         drawsContextPhotoSelection = true
+        hasContextMenuViewportOverride = hasViewportOverride
+        contextMenuViewportWidth = viewportWidth
+        contextMenuViewportHeight = viewportHeight
+        contextMenuViewportOffsetX = viewportOffsetX
+        contextMenuViewportOffsetY = viewportOffsetY
         try {
             draw(canvas)
         } finally {
             isDrawingContextMenuCopy = wasDrawingContextMenuCopy
             drawsContextPhotoSelection = wasDrawingContextSelection
+            hasContextMenuViewportOverride = previousHasViewportOverride
+            contextMenuViewportWidth = previousViewportWidth
+            contextMenuViewportHeight = previousViewportHeight
+            contextMenuViewportOffsetX = previousViewportOffsetX
+            contextMenuViewportOffsetY = previousViewportOffsetY
         }
     }
 
@@ -632,6 +815,7 @@ internal class MessageCellView(
         isPhotoTapCandidate = false
         isVoiceTapCandidate = false
         replyHeaderTapEventId = null
+        reactionTapKey = null
     }
 
     private fun setContextPhotoSelection(boundsInView: RectF?) {
@@ -669,6 +853,106 @@ internal class MessageCellView(
             contextPhotoSelectionRadius,
             contextPhotoSelectionStrokePaint
         )
+    }
+
+    private fun drawReactions(
+        canvas: Canvas,
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel,
+        theme: MessageRenderTheme
+    ) {
+        val reactionLayout = currentLayout.reactionLayout ?: return
+        val textColor = theme.textColor(model)
+        val save = canvas.save()
+        canvas.translate(
+            currentLayout.reactionLeft.toFloat(),
+            currentLayout.reactionTop.toFloat()
+        )
+        reactionLayout.pills.forEach { pill ->
+            val radius = pill.bounds.height() / 2f
+            reactionFillPaint.color = alphaColor(
+                textColor,
+                if (pill.reaction.isOwn && !pill.reaction.isPendingRemoval) 0.22f else 0.14f
+            )
+            canvas.drawRoundRect(pill.bounds, radius, radius, reactionFillPaint)
+            if (pill.reaction.isOwn && !pill.reaction.isPendingRemoval) {
+                reactionStrokePaint.color = alphaColor(textColor, 0.36f)
+                canvas.drawRoundRect(pill.bounds, radius, radius, reactionStrokePaint)
+            }
+            reactionTextPaint.color = alphaColor(
+                textColor,
+                if (pill.reaction.isOwn && pill.reaction.isPendingRemoval) 0.55f else 1f
+            )
+            canvas.drawText(
+                pill.label,
+                pill.textX,
+                pill.textBaseline,
+                reactionTextPaint
+            )
+        }
+        canvas.restoreToCount(save)
+    }
+
+    private fun drawsBubbleGradientInParent(
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel,
+        theme: MessageRenderTheme
+    ): Boolean {
+        if (isDrawingContextMenuCopy || parent !is GradientBubbleRecyclerView) {
+            return false
+        }
+        return currentLayout.drawBubble && theme.bubbleGradient(model) != null
+    }
+
+    private fun drawBubbleGradientLocally(
+        canvas: Canvas,
+        currentLayout: MessageCellLayout,
+        model: MessageRenderModel,
+        theme: MessageRenderTheme
+    ): Boolean {
+        val gradient = theme.bubbleGradient(model) ?: return false
+        val viewport = parent as? GradientBubbleRecyclerView
+        val viewportWidth = if (hasContextMenuViewportOverride) {
+            contextMenuViewportWidth
+        } else {
+            viewport?.width ?: width
+        }
+        val viewportHeight = if (hasContextMenuViewportOverride) {
+            contextMenuViewportHeight
+        } else {
+            viewport?.height ?: height
+        }
+        val viewportOffsetX = if (hasContextMenuViewportOverride) {
+            contextMenuViewportOffsetX
+        } else if (viewport != null) {
+            left.toFloat() + translationX
+        } else {
+            0f
+        }
+        val viewportOffsetY = if (hasContextMenuViewportOverride) {
+            contextMenuViewportOffsetY
+        } else if (viewport != null) {
+            top.toFloat() + translationY
+        } else {
+            0f
+        }
+        return localBubbleGradientRenderer().drawBubble(
+            canvas = canvas,
+            bubbleRenderer = bubbleRenderer,
+            rect = currentLayout.bubbleRect,
+            message = model,
+            spec = gradient,
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            viewportOffsetX = viewportOffsetX,
+            viewportOffsetY = viewportOffsetY
+        )
+    }
+
+    private fun localBubbleGradientRenderer(): MessageBubbleGradientRenderer {
+        return localBubbleGradientRenderer ?: MessageBubbleGradientRenderer().also {
+            localBubbleGradientRenderer = it
+        }
     }
 
     private fun buildLayout(width: Int): MessageCellLayout {
@@ -716,9 +1000,17 @@ internal class MessageCellView(
             maxBubbleWidth - contentHorizontalInset * 2
         )
         val contentLayout = renderer.measure(model, theme, maxContentWidth)
-        val bubbleWidth = (contentLayout.width + contentHorizontalInset * 2)
+        val reactionLayout = measureReactions(model, maxContentWidth)
+        val reactionBlockHeight = reactionLayout?.let {
+            reactionTopGap + it.height
+        } ?: 0
+        val contentAndReactionWidth = max(
+            contentLayout.width,
+            reactionLayout?.width ?: 0
+        )
+        val bubbleWidth = (contentAndReactionWidth + contentHorizontalInset * 2)
             .coerceAtMost(maxBubbleWidth)
-        val bubbleHeight = contentLayout.height + contentVerticalInset * 2
+        val bubbleHeight = contentLayout.height + reactionBlockHeight + contentVerticalInset * 2
         val bubbleLeft = if (model.isOutgoing) {
             width - outerHorizontalPadding - bubbleWidth
         } else {
@@ -731,15 +1023,91 @@ internal class MessageCellView(
             (bubbleLeft + bubbleWidth).toFloat(),
             (bubbleTop + bubbleHeight).toFloat()
         )
+        val reactionLeft = reactionLayout?.let {
+            if (model.isOutgoing) {
+                bubbleLeft + bubbleWidth - contentHorizontalInset - it.width
+            } else {
+                bubbleLeft + contentHorizontalInset
+            }
+        } ?: 0
+        val reactionTop = reactionLayout?.let {
+            bubbleTop + contentVerticalInset + contentLayout.height + reactionTopGap
+        } ?: 0
+        val contentLeft = if (model.isOutgoing) {
+            bubbleLeft + contentHorizontalInset +
+                (contentAndReactionWidth - contentLayout.width).coerceAtLeast(0)
+        } else {
+            bubbleLeft + contentHorizontalInset
+        }
 
         return MessageCellLayout(
             height = bubbleTop + bubbleHeight + outerBottomPadding,
             bubbleRect = RectF(bubbleRect),
-            contentLeft = bubbleLeft + contentHorizontalInset,
+            contentLeft = contentLeft,
             contentTop = bubbleTop + contentVerticalInset,
-            drawBubble = chrome != MessageContentChrome.BARE,
+            drawBubble = chrome != MessageContentChrome.BARE || reactionLayout != null,
             renderer = renderer,
-            contentLayout = contentLayout
+            contentLayout = contentLayout,
+            reactionLeft = reactionLeft,
+            reactionTop = reactionTop,
+            reactionLayout = reactionLayout
+        )
+    }
+
+    private fun measureReactions(
+        model: MessageRenderModel,
+        maxWidthPx: Int
+    ): ReactionStripLayout? {
+        val reactions = model.reactions
+            .filter { it.key.isNotBlank() && it.count > 0 }
+        if (reactions.isEmpty()) {
+            return null
+        }
+        val fontMetrics = reactionTextPaint.fontMetrics
+        val pillHeight = max(
+            reactionPillMinHeight,
+            (fontMetrics.descent - fontMetrics.ascent).roundToInt() +
+                reactionPillVerticalPadding * 2
+        )
+        val baselineOffset = (pillHeight - fontMetrics.descent - fontMetrics.ascent) / 2f
+        val maxLineWidth = max(1, maxWidthPx)
+        val pills = mutableListOf<ReactionPillLayout>()
+        var x = 0
+        var y = 0
+        var width = 0
+        reactions.forEach { reaction ->
+            val label = reaction.label()
+            val pillWidth = (
+                reactionTextPaint.measureText(label).roundToInt() +
+                    reactionPillHorizontalPadding * 2
+                )
+                .coerceAtLeast(reactionPillMinHeight)
+                .coerceAtMost(maxLineWidth)
+            if (x > 0 && x + pillWidth > maxLineWidth) {
+                x = 0
+                y += pillHeight + reactionPillLineSpacing
+            }
+            val bounds = RectF(
+                x.toFloat(),
+                y.toFloat(),
+                (x + pillWidth).toFloat(),
+                (y + pillHeight).toFloat()
+            )
+            pills += ReactionPillLayout(
+                reaction = reaction,
+                label = label,
+                bounds = bounds,
+                textX = bounds.left + reactionPillHorizontalPadding,
+                textBaseline = bounds.top + baselineOffset
+            )
+            width = max(width, x + pillWidth)
+            x += pillWidth + reactionPillSpacing
+        }
+        val height = pills.lastOrNull()?.bounds?.bottom?.roundToInt() ?: return null
+        return ReactionStripLayout(
+            width = width,
+            height = height,
+            pills = pills
         )
     }
 
@@ -779,6 +1147,17 @@ internal class MessageCellView(
         } else {
             null
         }
+    }
+
+    private fun reactionKeyAt(x: Float, y: Float): String? {
+        val currentLayout = layout ?: return null
+        val reactionLayout = currentLayout.reactionLayout ?: return null
+        val localX = x - currentLayout.reactionLeft
+        val localY = y - currentLayout.reactionTop
+        return reactionLayout.pills
+            .firstOrNull { pill -> pill.bounds.contains(localX, localY) }
+            ?.reaction
+            ?.key
     }
 
     private fun photoHitTargets(
@@ -956,6 +1335,18 @@ internal class MessageCellView(
         return (baseColor and 0x00FFFFFF) or (alpha shl 24)
     }
 
+    private fun alphaColor(baseColor: Int, alphaFraction: Float): Int {
+        val alpha = (Color.alpha(baseColor) * alphaFraction)
+            .roundToInt()
+            .coerceIn(0, 255)
+        return Color.argb(
+            alpha,
+            Color.red(baseColor),
+            Color.green(baseColor),
+            Color.blue(baseColor)
+        )
+    }
+
     private fun resolveMeasuredWidth(widthMeasureSpec: Int): Int {
         val mode = MeasureSpec.getMode(widthMeasureSpec)
         val size = MeasureSpec.getSize(widthMeasureSpec)
@@ -974,7 +1365,24 @@ private data class MessageCellLayout(
     val contentTop: Int,
     val drawBubble: Boolean,
     val renderer: MessageContentRenderer,
-    val contentLayout: MessageContentLayout
+    val contentLayout: MessageContentLayout,
+    val reactionLeft: Int = 0,
+    val reactionTop: Int = 0,
+    val reactionLayout: ReactionStripLayout? = null
+)
+
+private data class ReactionStripLayout(
+    val width: Int,
+    val height: Int,
+    val pills: List<ReactionPillLayout>
+)
+
+private data class ReactionPillLayout(
+    val reaction: MessageReactionRenderModel,
+    val label: String,
+    val bounds: RectF,
+    val textX: Float,
+    val textBaseline: Float
 )
 
 private data class PhotoHitTarget(
@@ -1031,6 +1439,10 @@ private fun PhotoGroupMessageLayout.mediaFramesInView(layout: MessageCellLayout)
             offset(layout.contentLeft.toFloat(), layout.contentTop.toFloat())
         }
     }
+}
+
+private fun MessageReactionRenderModel.label(): String {
+    return if (count > 1) "$key $count" else key
 }
 
 private fun MessageContent.debugSummary(): String {

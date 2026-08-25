@@ -45,10 +45,6 @@ class RoomTimelineWindowStore(
             )
         }
 
-    fun matches(userId: String, roomId: String): Boolean {
-        return this.userId == userId && this.roomId == roomId
-    }
-
     val canLoadOlderFromCache: Boolean
         get() = hasOlderInDb
 

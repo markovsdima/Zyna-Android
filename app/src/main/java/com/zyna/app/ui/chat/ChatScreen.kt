@@ -23,6 +23,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.zyna.app.BuildConfig
+import com.zyna.app.R
 import com.zyna.app.data.local.TimelineWindowChangeOrigin
 import com.zyna.app.data.media.AudioPlaybackController
 import com.zyna.app.data.media.AudioPlaybackSnapshot
@@ -38,29 +39,38 @@ import com.zyna.app.data.matrix.MatrixMessageContentType
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.messaging.CaptionPlacement
-import com.zyna.app.ui.app.ChatCallBannerState
 import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageEditPreview
 import com.zyna.app.ui.chat.render.MessageForwardPreview
+import com.zyna.app.ui.chat.render.MessageReactionRenderModel
 import com.zyna.app.ui.chat.render.PhotoGroupLayout
 import com.zyna.app.ui.chat.render.MessageReplyPreview
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.MessageRenderTheme
+import com.zyna.app.ui.chat.render.MatrixTimelineEventPresenter
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.chat.render.SystemEventCellView
+import com.zyna.app.ui.chat.render.SystemEventRenderKind
+import com.zyna.app.ui.chat.render.SystemEventRenderModel
+import com.zyna.app.ui.chat.render.SystemEventRenderTheme
+import com.zyna.app.ui.chat.theme.ChatBubbleTheme
+import com.zyna.app.ui.chat.theme.ChatBubbleThemes
 import com.zyna.app.ui.chat.viewer.PhotoViewerLayer
 import com.zyna.app.ui.chat.viewer.PhotoViewerOpenRequest
 import com.zyna.app.ui.glass.ChatTeleportDirection
 import com.zyna.app.ui.glass.GlassComposerPreview
+import com.zyna.app.ui.glass.GlassComposerPreviewKind
 import com.zyna.app.ui.glass.GlassVoiceComposerState
 import com.zyna.app.ui.glass.GlassChatLayout
 import com.zyna.app.ui.glass.GlassPalette
 import com.zyna.app.ui.glass.RootGlassLayerCoordinator
+import com.zyna.app.ui.time.AndroidTimelineDateTextFormatter
+import com.zyna.app.ui.time.AndroidTimeTextFormatter
+import com.zyna.app.ui.time.TimeTextFormatter
+import com.zyna.app.util.ChatScrollPerfProbe
 import com.zyna.app.util.ZynaPerfLog
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -69,6 +79,8 @@ import kotlin.math.roundToInt
 data class ChatScreenViewState(
     val roomName: String,
     val roomId: String,
+    val currentUserId: String?,
+    val roomSubtitle: String,
     val messages: List<MatrixChatMessage>,
     val windowChangeOrigin: TimelineWindowChangeOrigin,
     val isLoading: Boolean,
@@ -87,13 +99,14 @@ data class ChatScreenViewState(
     val audioPlaybackController: AudioPlaybackController?,
     val voiceRecorderController: VoiceRecorderController?,
     val jumpTargetEventId: String?,
-    val callBanner: ChatCallBannerState?
+    val callBanner: ChatCallBannerState?,
+    val chatBubbleTheme: ChatBubbleTheme
 )
 
 data class ChatScreenViewActions(
-    val onRefresh: () -> Unit,
     val onStartCall: () -> Unit,
     val onBack: () -> Unit,
+    val onOpenRoomDetails: () -> Unit,
     val onLoadOlder: () -> Unit,
     val onLoadNewer: () -> Unit,
     val onJumpToLiveEdge: () -> Unit,
@@ -112,6 +125,7 @@ data class ChatScreenViewActions(
     val onCancelEdit: () -> Unit,
     val onForwardMessage: (MatrixForwardTarget) -> Unit,
     val onCancelForward: () -> Unit,
+    val onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     val onRetryOutgoingEnvelope: (String) -> Unit,
     val onDiscardOutgoingEnvelope: (String) -> Unit,
     val onRedactMessage: (String) -> Unit,
@@ -132,10 +146,20 @@ internal class ChatScreenView(
     rootGlassCoordinator: RootGlassLayerCoordinator,
     private val rootOverlayHost: FrameLayout?
 ) : FrameLayout(context) {
+    private val timeTextFormatter = AndroidTimeTextFormatter(context)
+    private val timelineDateTextFormatter = AndroidTimelineDateTextFormatter(context)
+    private val timelineEventPresenter = MatrixTimelineEventPresenter(context, timeTextFormatter)
+    private val timelinePresentationCache = ChatTimelinePresentationCache { message, currentUserId ->
+        message.toChatTimelineItem(
+            presenter = timelineEventPresenter,
+            currentUserId = currentUserId
+        )
+    }
     private val initStart = ZynaPerfLog.start()
     private val density = resources.displayMetrics.density
     private var isDarkTheme = resources.configuration.isNightMode()
-    private var nativeColors = nativeChatColors(isDarkTheme)
+    private var chatBubbleTheme = ChatBubbleThemes.fallback
+    private var nativeColors = nativeChatColors(isDarkTheme, chatBubbleTheme)
     private var palette = nativeColors.palette
     private var messageTheme = nativeColors.messageTheme
     private var sendErrorColor = nativeColors.sendError
@@ -148,6 +172,7 @@ internal class ChatScreenView(
     private var voiceRecorderListenerHandle: AutoCloseable? = null
     private var latestAudioPlaybackSnapshot = AudioPlaybackSnapshot()
     private var latestVoiceRecorderState: VoiceRecorderState = VoiceRecorderState.Idle
+    private lateinit var dateHeaderOverlayController: DateHeaderOverlayController
 
     fun canReuseForRoom(roomId: String): Boolean {
         return currentRoomId == null || currentRoomId == roomId
@@ -174,6 +199,8 @@ internal class ChatScreenView(
     private val titleColumn = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_VERTICAL
+        isClickable = true
+        isFocusable = true
     }
     private val titleText = TextView(context).apply {
         maxLines = 1
@@ -187,14 +214,6 @@ internal class ChatScreenView(
         ellipsize = TextUtils.TruncateAt.END
         textSize = 12f
         setTextColor(nativeColors.subtitleText)
-    }
-    private val refreshButton = TextView(context).apply {
-        gravity = Gravity.CENTER
-        textSize = 15f
-        typeface = Typeface.DEFAULT_BOLD
-        setTextColor(nativeColors.actionText)
-        isClickable = true
-        isFocusable = true
     }
     private val callButton = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -242,6 +261,11 @@ internal class ChatScreenView(
         includeFontPadding = true
         setTextColor(sendErrorColor)
         visibility = View.GONE
+    }
+    private val floatingDateView = SystemEventCellView(context).apply {
+        alpha = 0f
+        visibility = View.INVISIBLE
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
     }
 
     init {
@@ -299,13 +323,6 @@ internal class ChatScreenView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
-        topBar.addView(
-            refreshButton,
-            LinearLayout.LayoutParams(
-                dp(96),
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
-        )
         activeCallBanner.setPadding(dp(16), 0, dp(16), 0)
         activeCallBanner.addView(
             activeCallAccent,
@@ -351,11 +368,14 @@ internal class ChatScreenView(
         val adapterStart = ZynaPerfLog.start()
         chatLayout.recyclerView.adapter = ChatMessageAdapter(
             messageTheme = messageTheme,
+            timeTextFormatter = timeTextFormatter,
             matrixMediaLoader = null,
             onContextMenuPreviewRequested = chatLayout::beginMessageContextMenuGesture,
             onContextMenuRequested = chatLayout::showMessageContextMenu,
             onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent,
             onReplyHeaderClicked = {},
+            onReplyRequested = chatLayout::requestReplyToMessage,
+            onToggleReaction = { _, _ -> },
             onPhotoViewerRequested = {},
             onVoicePlaybackRequested = { _, _ -> }
         )
@@ -368,6 +388,23 @@ internal class ChatScreenView(
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
+        contentFrame.addView(
+            floatingDateView,
+            LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            ).apply {
+                topMargin = dp(FLOATING_DATE_VIEW_TOP_MARGIN_DP)
+            }
+        )
+        dateHeaderOverlayController = DateHeaderOverlayController(
+            recyclerView = chatLayout.recyclerView,
+            overlayView = floatingDateView,
+            initialTheme = messageTheme.toSystemEventRenderTheme(),
+            canReveal = { !chatLayout.isSnapshotTeleportActive() }
+        )
+        chatLayout.recyclerView.addOnScrollListener(dateHeaderOverlayController)
         contentFrame.addView(
             errorView,
             LayoutParams(
@@ -393,10 +430,15 @@ internal class ChatScreenView(
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        ChatScrollPerfProbe.attach(chatLayout.recyclerView)
         ViewCompat.requestApplyInsets(this)
+        dateHeaderOverlayController.onTimelineChanged()
     }
 
     override fun onDetachedFromWindow() {
+        ChatScrollPerfProbe.detach(chatLayout.recyclerView)
+        dateHeaderOverlayController.hideImmediately()
+        dateHeaderOverlayController.dispose()
         removePhotoViewer()
         audioPlaybackListenerHandle?.close()
         audioPlaybackListenerHandle = null
@@ -413,8 +455,13 @@ internal class ChatScreenView(
         return true
     }
 
+    fun canStartNavigationBackGesture(): Boolean {
+        return photoViewerLayer == null && chatLayout.canStartNavigationBackGesture()
+    }
+
     fun render(state: ChatScreenViewState, actions: ChatScreenViewActions) {
-        updateNativeThemeIfNeeded()
+        val scrollPerfStart = ChatScrollPerfProbe.beginSection(chatLayout.recyclerView)
+        updateNativeThemeIfNeeded(state.chatBubbleTheme)
         val renderStart = ZynaPerfLog.start()
         ZynaPerfLog.mark {
             "chatView.render.begin roomId=${state.roomId} messages=${state.messages.size} " +
@@ -422,15 +469,12 @@ internal class ChatScreenView(
                 "jump=${state.jumpTargetEventId != null} liveReq=${state.scrollToLiveEdgeRequested}"
         }
         titleText.text = state.roomName
-        subtitleText.text = state.roomId
+        subtitleText.text = state.roomSubtitle
         backButton.setOnClickListener { actions.onBack() }
+        titleColumn.contentDescription = "${state.roomName}. ${state.roomSubtitle}"
+        titleColumn.setOnClickListener { actions.onOpenRoomDetails() }
         callButton.setOnClickListener { actions.onStartCall() }
         renderActiveCallBanner(state.callBanner, actions)
-        refreshButton.text = if (state.isLoading) "Loading" else "Refresh"
-        refreshButton.isEnabled = !state.isLoading
-        refreshButton.alpha = if (state.isLoading) 0.54f else 1f
-        refreshButton.setOnClickListener { actions.onRefresh() }
-
         val errorMessage = state.errorMessage
         if (errorMessage != null) {
             chatLayout.visibility = View.GONE
@@ -442,6 +486,7 @@ internal class ChatScreenView(
             ) {
                 "roomId=${state.roomId} message=${errorMessage.take(80)}"
             }
+            ChatScrollPerfProbe.recordChatRender(scrollPerfStart)
             return
         }
 
@@ -454,6 +499,7 @@ internal class ChatScreenView(
         ) {
             "roomId=${state.roomId} messages=${state.messages.size}"
         }
+        ChatScrollPerfProbe.recordChatRender(scrollPerfStart)
     }
 
     private fun renderActiveCallBanner(
@@ -497,6 +543,7 @@ internal class ChatScreenView(
         chatLayout.onDiscardOutgoingEnvelope = actions.onDiscardOutgoingEnvelope
         chatLayout.onRedactMessage = actions.onRedactMessage
         chatLayout.onRedactMessages = actions.onRedactMessages
+        chatLayout.onToggleReaction = actions.onToggleReaction
         chatLayout.onDebugMarkOutgoingEnvelopeFailed = actions.onDebugMarkOutgoingEnvelopeFailed
         chatLayout.onEvaluateVisibleReadReceiptCandidate = {
             chatLayout.evaluateVisibleReadReceiptCandidate(state.isAtLiveEdge) { eventId, canEstablishBaseline ->
@@ -516,11 +563,11 @@ internal class ChatScreenView(
         }
         chatLayout.inputBar.allowEmptySend = state.forwardTarget != null
         chatLayout.inputBar.setPreview(
-            state.forwardTarget?.toComposerPreview() ?: state.replyTarget?.toComposerPreview()
+            state.forwardTarget?.toComposerPreview(context) ?: state.replyTarget?.toComposerPreview(context)
         )
         chatLayout.inputBar.onEditCancelled = actions.onCancelEdit
         chatLayout.inputBar.setEditDraft(state.editTarget?.eventId, state.editTarget?.body)
-        chatLayout.inputBar.setEditPreview(state.editTarget?.toComposerPreview())
+        chatLayout.inputBar.setEditPreview(state.editTarget?.toComposerPreview(context))
         chatLayout.setPaginationState(
             isLoadingOlder = state.isLoadingOlder,
             canLoadOlder = state.canLoadOlder &&
@@ -553,6 +600,7 @@ internal class ChatScreenView(
         adapter.onContextMenuRequested = chatLayout::showMessageContextMenu
         adapter.onContextMenuGestureEvent = chatLayout::handleMessageContextGestureEvent
         adapter.onReplyHeaderClicked = actions.onReplyHeaderClicked
+        adapter.onToggleReaction = actions.onToggleReaction
         adapter.onPhotoViewerRequested = { request ->
             openPhotoViewer(request, state.matrixMediaLoader)
         }
@@ -563,20 +611,24 @@ internal class ChatScreenView(
         bindAudioPlaybackController(state.audioPlaybackController)
         bindVoiceRecorderController(state.voiceRecorderController)
         val presentationStart = ZynaPerfLog.start()
-        val displayedMessages = state.messages
-            .asReversed()
-            .withMediaGroupPresentation(
-                hasNewerBoundary = state.canLoadNewer,
-                hasOlderBoundary = state.canLoadOlder
-            )
+        val displayedTimeline = timelinePresentationCache.present(
+            sourceMessages = state.messages,
+            currentUserId = state.currentUserId,
+            hasNewerBoundary = state.canLoadNewer,
+            hasOlderBoundary = state.canLoadOlder,
+            formatting = timelineDateTextFormatter.snapshot()
+        )
         ZynaPerfLog.end(
             presentationStart,
             "chatView.mediaPresentation"
         ) {
-            "roomId=${state.roomId} input=${state.messages.size} displayed=${displayedMessages.size}"
+            "roomId=${state.roomId} input=${state.messages.size} displayed=${displayedTimeline.size} " +
+                "wholeHit=${timelinePresentationCache.lastWholeResultHit} " +
+                "reused=${timelinePresentationCache.lastReusedItemCount} " +
+                "rebuilt=${timelinePresentationCache.lastRebuiltItemCount}"
         }
         val previousNewestMessageId = adapter.currentList.firstOrNull()?.id
-        val nextNewestMessageId = displayedMessages.firstOrNull()?.id
+        val nextNewestMessageId = displayedTimeline.firstOrNull()?.id
         val hasNewerMessage = previousNewestMessageId != null &&
             nextNewestMessageId != null &&
             previousNewestMessageId != nextNewestMessageId
@@ -596,20 +648,20 @@ internal class ChatScreenView(
         val wasEmpty = adapter.itemCount == 0
         val themeChanged = adapter.messageTheme != messageTheme
         val jumpTargetPosition = state.jumpTargetEventId?.let { targetEventId ->
-            displayedMessages.indexOfFirst { message ->
-                message.eventId == targetEventId || message.id == targetEventId
+            displayedTimeline.indexOfFirst { item ->
+                item.eventId == targetEventId || item.id == targetEventId
             }.takeIf { it != -1 }
         }
         val shouldApplyJumpTarget = jumpTargetPosition != null &&
             state.windowChangeOrigin == TimelineWindowChangeOrigin.JUMP
         val shouldApplyScrollToLiveEdge = state.scrollToLiveEdgeRequested &&
             state.windowChangeOrigin == TimelineWindowChangeOrigin.JUMP &&
-            displayedMessages.isNotEmpty()
+            displayedTimeline.isNotEmpty()
         val visibleCenterPosition = layoutManager?.visibleCenterAdapterPosition()
         val jumpDistance = jumpTargetPosition?.let { targetPosition ->
             abs(targetPosition - (visibleCenterPosition ?: targetPosition))
         } ?: 0
-        val isSameWindowJump = adapter.currentList.isSameMessageWindow(displayedMessages)
+        val isSameWindowJump = adapter.currentList.isSameTimelineWindow(displayedTimeline)
         val shouldTeleportJump = shouldApplyJumpTarget &&
             (!isSameWindowJump || jumpDistance > LOCAL_JUMP_SMOOTH_SCROLL_MAX_DISTANCE)
         val shouldSmoothLocalJump = shouldApplyJumpTarget &&
@@ -623,7 +675,7 @@ internal class ChatScreenView(
             inferTeleportDirection(
                 adapter = adapter,
                 layoutManager = layoutManager,
-                displayedMessages = displayedMessages,
+                displayedTimeline = displayedTimeline,
                 targetPosition = jumpTargetPosition
             )
         } else null
@@ -637,6 +689,9 @@ internal class ChatScreenView(
         } else {
             false
         }
+        if (didBeginTeleport || didBeginLiveEdgeTeleport) {
+            dateHeaderOverlayController.hideImmediately()
+        }
         if (state.jumpTargetEventId != null) {
             logChatTeleport(
                 "native ui update origin=${state.windowChangeOrigin} " +
@@ -645,7 +700,7 @@ internal class ChatScreenView(
                     "shouldApply=$shouldApplyJumpTarget " +
                     "sameWindow=$isSameWindowJump distance=$jumpDistance " +
                     "teleport=$shouldTeleportJump smooth=$shouldSmoothLocalJump " +
-                    "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
+                    "oldCount=${adapter.itemCount} newCount=${displayedTimeline.size} " +
                     "firstVisible=$firstVisiblePosition wasEmpty=$wasEmpty " +
                     "direction=$teleportDirection didBegin=$didBeginTeleport"
             )
@@ -654,7 +709,7 @@ internal class ChatScreenView(
             logChatTeleport(
                 "native live ui update origin=${state.windowChangeOrigin} " +
                     "shouldApply=$shouldApplyScrollToLiveEdge " +
-                    "oldCount=${adapter.itemCount} newCount=${displayedMessages.size} " +
+                    "oldCount=${adapter.itemCount} newCount=${displayedTimeline.size} " +
                     "firstVisible=$firstVisiblePosition didBegin=$didBeginLiveEdgeTeleport"
             )
         }
@@ -672,16 +727,22 @@ internal class ChatScreenView(
             return
         }
         adapter.messageTheme = messageTheme
+        dateHeaderOverlayController.setTheme(messageTheme.toSystemEventRenderTheme())
         val submitStart = ZynaPerfLog.start()
-        adapter.submitList(displayedMessages) {
+        val startsNewTimelineSubmission = adapter.willSubmitNewTimeline(displayedTimeline)
+        if (startsNewTimelineSubmission) {
+            chatLayout.setTimelineCommitPending(true)
+        }
+        adapter.submitTimeline(displayedTimeline) { didCommitNewTimeline ->
+            dateHeaderOverlayController.onTimelineChanged()
             ZynaPerfLog.end(
                 submitStart,
                 "chatView.submitList.commit"
             ) {
-                "roomId=${state.roomId} displayed=${displayedMessages.size} " +
+                "roomId=${state.roomId} displayed=${displayedTimeline.size} " +
                     "wasEmpty=$wasEmpty children=${recyclerView.childCount}"
             }
-            if (displayedMessages.isNotEmpty()) {
+            if (displayedTimeline.isNotEmpty()) {
                 if (shouldApplyScrollToLiveEdge) {
                     recyclerView.stopScroll()
                     chatLayout.scrollToBottom(animated = false)
@@ -750,7 +811,9 @@ internal class ChatScreenView(
                 ) {
                     chatLayout.scrollToBottom(animated = false)
                 } else if (viewportAnchor != null) {
-                    val anchorPosition = displayedMessages.indexOfFirst { it.id == viewportAnchor.messageId }
+                    val anchorPosition = displayedTimeline.indexOfFirst {
+                        it.stableKey == viewportAnchor.itemKey
+                    }
                     if (anchorPosition != -1) {
                         layoutManager?.scrollToPositionWithOffset(
                             anchorPosition,
@@ -760,13 +823,18 @@ internal class ChatScreenView(
                 }
             }
             chatLayout.invalidateGlassContent()
-            chatLayout.prefetchOlderMessagesIfNeeded()
             recyclerView.post {
                 recyclerView.prefetchMediaAroundVisibleWindow()
             }
             chatLayout.scheduleVisibleReadReceiptCandidateEvaluation(
                 delayMillis = READ_RECEIPT_CONTENT_UPDATE_DELAY_MS
             )
+            if (didCommitNewTimeline) {
+                recyclerView.runAfterNextPreDraw {
+                    chatLayout.setTimelineCommitPending(false)
+                    chatLayout.prefetchOlderMessagesIfNeeded()
+                }
+            }
         }
         if (themeChanged) {
             val notifyStart = ZynaPerfLog.start()
@@ -779,13 +847,13 @@ internal class ChatScreenView(
             submitStart,
             "chatView.submitList.call"
         ) {
-            "roomId=${state.roomId} displayed=${displayedMessages.size}"
+            "roomId=${state.roomId} displayed=${displayedTimeline.size}"
         }
         ZynaPerfLog.end(
             layoutRenderStart,
             "chatView.renderChatLayout.done"
         ) {
-            "roomId=${state.roomId} displayed=${displayedMessages.size}"
+            "roomId=${state.roomId} displayed=${displayedTimeline.size}"
         }
     }
 
@@ -869,13 +937,14 @@ internal class ChatScreenView(
         )
     }
 
-    private fun updateNativeThemeIfNeeded() {
+    private fun updateNativeThemeIfNeeded(nextBubbleTheme: ChatBubbleTheme) {
         val nextDarkTheme = resources.configuration.isNightMode()
-        if (nextDarkTheme == isDarkTheme) {
+        if (nextDarkTheme == isDarkTheme && nextBubbleTheme == chatBubbleTheme) {
             return
         }
         isDarkTheme = nextDarkTheme
-        nativeColors = nativeChatColors(nextDarkTheme)
+        chatBubbleTheme = nextBubbleTheme
+        nativeColors = nativeChatColors(nextDarkTheme, nextBubbleTheme)
         palette = nativeColors.palette
         messageTheme = nativeColors.messageTheme
         sendErrorColor = nativeColors.sendError
@@ -890,7 +959,6 @@ internal class ChatScreenView(
         callButton.setTextColor(nativeColors.actionText)
         titleText.setTextColor(nativeColors.titleText)
         subtitleText.setTextColor(nativeColors.subtitleText)
-        refreshButton.setTextColor(nativeColors.actionText)
         activeCallBanner.setBackgroundColor(nativeColors.callBannerBackground)
         activeCallAccent.background = roundedDrawable(
             color = nativeColors.callBannerAccent,
@@ -904,6 +972,10 @@ internal class ChatScreenView(
         )
         errorView.setTextColor(sendErrorColor)
         chatLayout.setPalette(palette)
+        chatLayout.setReplySwipeIndicatorColor(nativeColors.actionText)
+        if (::dateHeaderOverlayController.isInitialized) {
+            dateHeaderOverlayController.setTheme(messageTheme.toSystemEventRenderTheme())
+        }
     }
 
     private fun roundedDrawable(color: Int, radiusPx: Int): GradientDrawable {
@@ -950,7 +1022,8 @@ private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
 
     val candidate = (firstVisiblePosition..lastVisiblePosition).firstNotNullOfOrNull { position ->
         val message = adapter.currentList.getOrNull(position)
-            ?.takeIf { it.isReadReceiptCandidate() }
+            ?.readReceiptEventOrNull()
+            ?.takeIf(MatrixChatMessage::isReadReceiptCandidate)
             ?: return@firstNotNullOfOrNull null
         val child = layoutManager.findViewByPosition(position)
             ?: return@firstNotNullOfOrNull null
@@ -979,17 +1052,17 @@ private fun GlassChatLayout.evaluateVisibleReadReceiptCandidate(
 }
 
 private data class ViewportAnchor(
-    val messageId: String,
+    val itemKey: String,
     val top: Int
 )
 
 private fun inferTeleportDirection(
     adapter: ChatMessageAdapter,
     layoutManager: LinearLayoutManager?,
-    displayedMessages: List<MatrixChatMessage>,
+    displayedTimeline: List<ChatTimelineItem>,
     targetPosition: Int
 ): ChatTeleportDirection {
-    val target = displayedMessages.getOrNull(targetPosition)
+    val target = displayedTimeline.getOrNull(targetPosition)
         ?: return ChatTeleportDirection.TO_OLDER
     val referencePosition = layoutManager?.visibleCenterAdapterPosition()
     val reference = referencePosition?.let { adapter.currentList.getOrNull(it) }
@@ -1021,10 +1094,10 @@ private fun LinearLayoutManager.visibleCenterAdapterPosition(): Int? {
     return firstVisible + (lastVisible - firstVisible) / 2
 }
 
-private fun List<MatrixChatMessage>.isSameMessageWindow(other: List<MatrixChatMessage>): Boolean {
+private fun List<ChatTimelineItem>.isSameTimelineWindow(other: List<ChatTimelineItem>): Boolean {
     return size == other.size &&
-        firstOrNull()?.id == other.firstOrNull()?.id &&
-        lastOrNull()?.id == other.lastOrNull()?.id
+        firstOrNull()?.stableKey == other.firstOrNull()?.stableKey &&
+        lastOrNull()?.stableKey == other.lastOrNull()?.stableKey
 }
 
 private fun Int.localJumpScrollDelayMillis(): Long {
@@ -1053,12 +1126,16 @@ private fun RecyclerView.runAfterNextPreDraw(action: () -> Unit) {
 
 private object MediaPrefetchScrollListener : RecyclerView.OnScrollListener() {
     override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+        val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
         recyclerView.prefetchMediaAroundVisibleWindow()
+        ChatScrollPerfProbe.recordMediaPrefetch(scrollPerfStart)
     }
 
     override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
         if (newState == RecyclerView.SCROLL_STATE_IDLE) {
+            val scrollPerfStart = ChatScrollPerfProbe.beginSection(recyclerView)
             recyclerView.prefetchMediaAroundVisibleWindow()
+            ChatScrollPerfProbe.recordMediaPrefetch(scrollPerfStart)
         }
     }
 }
@@ -1102,9 +1179,9 @@ private fun RecyclerView.findViewportAnchor(adapter: ChatMessageAdapter): Viewpo
         return null
     }
 
-    val messageId = adapter.currentList.getOrNull(bestPosition)?.id ?: return null
+    val itemKey = adapter.currentList.getOrNull(bestPosition)?.stableKey ?: return null
     return ViewportAnchor(
-        messageId = messageId,
+        itemKey = itemKey,
         top = bestTop
     )
 }
@@ -1152,7 +1229,10 @@ private data class NativeChatColors(
     val callBannerActionText: Int
 )
 
-private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
+private fun nativeChatColors(
+    isDarkTheme: Boolean,
+    outgoingBubbleTheme: ChatBubbleTheme
+): NativeChatColors {
     return if (isDarkTheme) {
         NativeChatColors(
             palette = GlassPalette(
@@ -1164,12 +1244,15 @@ private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
                 hint = Color.argb(184, 202, 196, 208)
             ),
             messageTheme = MessageRenderTheme(
-                outgoingBubble = Color.rgb(79, 55, 139),
-                outgoingText = Color.rgb(234, 221, 255),
-                outgoingMetadata = Color.rgb(234, 221, 255),
+                outgoingBubble = outgoingBubbleTheme.actionAccentColor,
+                outgoingText = Color.WHITE,
+                outgoingMetadata = Color.argb(222, 255, 255, 255),
                 incomingBubble = Color.rgb(49, 48, 56),
                 incomingText = Color.rgb(232, 225, 229),
-                incomingMetadata = Color.rgb(202, 196, 208)
+                incomingMetadata = Color.rgb(202, 196, 208),
+                outgoingBubbleGradient = outgoingBubbleTheme.outgoingGradient,
+                systemEventBackground = Color.rgb(11, 11, 11),
+                systemEventText = Color.rgb(202, 196, 208)
             ),
             actionText = Color.rgb(208, 188, 255),
             titleText = Color.rgb(232, 225, 229),
@@ -1192,12 +1275,15 @@ private fun nativeChatColors(isDarkTheme: Boolean): NativeChatColors {
                 hint = Color.argb(153, 73, 69, 79)
             ),
             messageTheme = MessageRenderTheme(
-                outgoingBubble = Color.rgb(234, 221, 255),
-                outgoingText = Color.rgb(33, 0, 93),
-                outgoingMetadata = Color.rgb(33, 0, 93),
+                outgoingBubble = outgoingBubbleTheme.actionAccentColor,
+                outgoingText = Color.WHITE,
+                outgoingMetadata = Color.argb(222, 255, 255, 255),
                 incomingBubble = Color.rgb(231, 224, 236),
                 incomingText = Color.rgb(29, 27, 32),
-                incomingMetadata = Color.rgb(73, 69, 79)
+                incomingMetadata = Color.rgb(73, 69, 79),
+                outgoingBubbleGradient = outgoingBubbleTheme.outgoingGradient,
+                systemEventBackground = Color.rgb(238, 238, 238),
+                systemEventText = Color.rgb(73, 69, 79)
             ),
             actionText = Color.rgb(33, 0, 93),
             titleText = Color.rgb(29, 27, 32),
@@ -1218,17 +1304,26 @@ private fun Configuration.isNightMode(): Boolean {
 
 private class ChatMessageAdapter(
     var messageTheme: MessageRenderTheme,
+    private val timeTextFormatter: TimeTextFormatter,
     matrixMediaLoader: MatrixMediaLoader?,
     var onContextMenuPreviewRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
     var onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
     var onReplyHeaderClicked: (String) -> Unit,
+    var onReplyRequested: (MessageReplyPreview) -> Unit,
+    var onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
     var onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
     var onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit
-) : ListAdapter<MatrixChatMessage, ChatMessageViewHolder>(ChatMessageDiffCallback) {
+) : ListAdapter<ChatTimelineItem, RecyclerView.ViewHolder>(ChatTimelineItemDiffCallback),
+    DateHeaderTimelineLookup {
     private var lastMediaPrefetchWindowSignature: String? = null
     private var lastMediaPrefetchSignature: String? = null
     private var audioPlaybackSnapshot = AudioPlaybackSnapshot()
+    private var dateDividerByPosition: List<TimelineDateDividerModel?> = emptyList()
+    private val timelineSubmissionCoordinator =
+        LatestListSubmissionCoordinator<List<ChatTimelineItem>>(
+            submitValue = { timeline, onCommitted -> submitList(timeline, onCommitted) }
+        )
     var matrixMediaLoader: MatrixMediaLoader? = matrixMediaLoader
         set(value) {
             if (field !== value) {
@@ -1241,9 +1336,25 @@ private class ChatMessageAdapter(
         setHasStableIds(true)
     }
 
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ChatMessageViewHolder {
+    override fun getItemViewType(position: Int): Int {
+        return when (getItem(position)) {
+            is ChatTimelineItem.Message -> VIEW_TYPE_MESSAGE
+            is ChatTimelineItem.SystemEvent -> VIEW_TYPE_SYSTEM_EVENT
+            is ChatTimelineItem.CallEvent -> VIEW_TYPE_CALL_EVENT
+            is ChatTimelineItem.DateDivider -> VIEW_TYPE_DATE_DIVIDER
+        }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         val start = ZynaPerfLog.start()
-        return ChatMessageViewHolder(parent, matrixMediaLoader).also {
+        val holder = when (viewType) {
+            VIEW_TYPE_MESSAGE -> ChatMessageViewHolder(parent, matrixMediaLoader)
+            VIEW_TYPE_SYSTEM_EVENT,
+            VIEW_TYPE_CALL_EVENT,
+            VIEW_TYPE_DATE_DIVIDER -> SystemEventViewHolder(parent)
+            else -> error("Unknown chat timeline view type: $viewType")
+        }
+        return holder.also {
             ZynaPerfLog.endIfSlow(
                 start,
                 "chatAdapter.createViewHolder.slow",
@@ -1253,48 +1364,116 @@ private class ChatMessageAdapter(
     }
 
     override fun getItemId(position: Int): Long {
-        return getItem(position).id.stableItemId()
+        return getItem(position).stableKey.stableItemId()
     }
 
-    override fun onBindViewHolder(holder: ChatMessageViewHolder, position: Int) {
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        val scrollPerfStart = ChatScrollPerfProbe.beginActiveSection()
         val start = ZynaPerfLog.start()
-        holder.bind(
-            message = getItem(position).toRenderModel(),
-            theme = messageTheme,
-            onContextMenuPreviewRequested = onContextMenuPreviewRequested,
-            onContextMenuRequested = onContextMenuRequested,
-            onContextMenuGestureEvent = onContextMenuGestureEvent,
-            onReplyHeaderClicked = onReplyHeaderClicked,
-            onPhotoViewerRequested = onPhotoViewerRequested,
-            onVoicePlaybackRequested = onVoicePlaybackRequested,
-            audioPlaybackSnapshot = audioPlaybackSnapshot
-        )
+        val item = getItem(position)
+        when {
+            holder is ChatMessageViewHolder && item is ChatTimelineItem.Message -> {
+                holder.bind(
+                    message = item.source.toRenderModel(timeTextFormatter),
+                    theme = messageTheme,
+                    onContextMenuPreviewRequested = onContextMenuPreviewRequested,
+                    onContextMenuRequested = onContextMenuRequested,
+                    onContextMenuGestureEvent = onContextMenuGestureEvent,
+                    onReplyHeaderClicked = onReplyHeaderClicked,
+                    onReplyRequested = onReplyRequested,
+                    onToggleReaction = onToggleReaction,
+                    onPhotoViewerRequested = onPhotoViewerRequested,
+                    onVoicePlaybackRequested = onVoicePlaybackRequested,
+                    audioPlaybackSnapshot = audioPlaybackSnapshot
+                )
+            }
+            holder is SystemEventViewHolder && item is ChatTimelineItem.SystemEvent -> {
+                holder.bind(item.renderModel, messageTheme.toSystemEventRenderTheme())
+            }
+            holder is SystemEventViewHolder && item is ChatTimelineItem.CallEvent -> {
+                holder.bind(item.renderModel, messageTheme.toSystemEventRenderTheme())
+            }
+            holder is SystemEventViewHolder && item is ChatTimelineItem.DateDivider -> {
+                holder.bind(
+                    SystemEventRenderModel(
+                        text = item.model.title,
+                        accessibilityText = item.model.title,
+                        kind = SystemEventRenderKind.SYSTEM_EVENT
+                    ),
+                    messageTheme.toSystemEventRenderTheme()
+                )
+            }
+            else -> error(
+                "Chat timeline holder/item mismatch: ${holder::class.java.simpleName} / " +
+                    item::class.java.simpleName
+            )
+        }
         ZynaPerfLog.endIfSlow(
             start,
             "chatAdapter.bind.slow",
             thresholdMs = 4.0
         ) {
-            "position=$position id=${getItem(position).id}"
+            "position=$position key=${item.stableKey}"
         }
+        ChatScrollPerfProbe.recordAdapterBind(scrollPerfStart)
     }
 
     override fun onBindViewHolder(
-        holder: ChatMessageViewHolder,
+        holder: RecyclerView.ViewHolder,
         position: Int,
         payloads: MutableList<Any>
     ) {
-        if (payloads.isNotEmpty() && payloads.all { it === AudioPlaybackPayload }) {
+        val message = getItem(position).messageOrNull()
+        if (
+            holder is ChatMessageViewHolder &&
+            message != null &&
+            payloads.isNotEmpty() &&
+            payloads.all { it === AudioPlaybackPayload }
+        ) {
+            val scrollPerfStart = ChatScrollPerfProbe.beginActiveSection()
             holder.updateAudioPlaybackSnapshot(audioPlaybackSnapshot)
+            ChatScrollPerfProbe.recordAdapterBind(scrollPerfStart)
+            return
+        }
+        if (
+            holder is ChatMessageViewHolder &&
+            message != null &&
+            payloads.isNotEmpty() &&
+            payloads.all { it === ReactionPayload }
+        ) {
+            val scrollPerfStart = ChatScrollPerfProbe.beginActiveSection()
+            holder.updateReactions(message.toReactionRenderModels())
+            ChatScrollPerfProbe.recordAdapterBind(scrollPerfStart)
             return
         }
         super.onBindViewHolder(holder, position, payloads)
     }
 
     override fun onCurrentListChanged(
-        previousList: List<MatrixChatMessage>,
-        currentList: List<MatrixChatMessage>
+        previousList: List<ChatTimelineItem>,
+        currentList: List<ChatTimelineItem>
     ) {
+        dateDividerByPosition = currentList.dateDividersByPosition()
         resetMediaPrefetchSignature()
+    }
+
+    fun willSubmitNewTimeline(timeline: List<ChatTimelineItem>): Boolean {
+        return timelineSubmissionCoordinator.willSubmitNew(timeline)
+    }
+
+    fun submitTimeline(
+        timeline: List<ChatTimelineItem>,
+        onCommitted: (didCommitNewTimeline: Boolean) -> Unit
+    ) {
+        timelineSubmissionCoordinator.submit(timeline, onCommitted)
+    }
+
+    override fun timelineItemAt(position: Int): ChatTimelineItem? {
+        return currentList.getOrNull(position)
+    }
+
+    override fun dateDividerForPosition(position: Int): TimelineDateDividerModel? {
+        return dateDividerByPosition.getOrNull(position)
     }
 
     fun prefetchMediaAround(
@@ -1329,6 +1508,7 @@ private class ChatMessageAdapter(
         val requests = (start..end)
             .flatMap { position ->
                 currentList.getOrNull(position)
+                    ?.messageOrNull()
                     ?.prefetchImageRequests(target = target, density = density)
                     .orEmpty()
             }
@@ -1361,11 +1541,20 @@ private class ChatMessageAdapter(
         listOfNotNull(previous.messageId, snapshot.messageId)
             .distinct()
             .forEach { messageId ->
-                val position = currentList.indexOfFirst { it.id == messageId }
+                val position = currentList.indexOfFirst { item ->
+                    item.messageOrNull()?.id == messageId
+                }
                 if (position != -1) {
                     notifyItemChanged(position, AudioPlaybackPayload)
                 }
             }
+    }
+
+    private companion object {
+        const val VIEW_TYPE_MESSAGE = 0
+        const val VIEW_TYPE_SYSTEM_EVENT = 1
+        const val VIEW_TYPE_CALL_EVENT = 2
+        const val VIEW_TYPE_DATE_DIVIDER = 3
     }
 }
 
@@ -1389,6 +1578,8 @@ private class ChatMessageViewHolder(
         onContextMenuRequested: (MessageContextMenuRequest) -> Boolean,
         onContextMenuGestureEvent: (action: Int, rawX: Float, rawY: Float) -> Unit,
         onReplyHeaderClicked: (String) -> Unit,
+        onReplyRequested: (MessageReplyPreview) -> Unit,
+        onToggleReaction: (messageId: String, reactionKey: String) -> Unit,
         onPhotoViewerRequested: (PhotoViewerOpenRequest) -> Unit,
         onVoicePlaybackRequested: (messageId: String, audioInfo: MatrixAudioInfo) -> Unit,
         audioPlaybackSnapshot: AudioPlaybackSnapshot
@@ -1397,6 +1588,8 @@ private class ChatMessageViewHolder(
         messageView.onContextMenuRequested = onContextMenuRequested
         messageView.onContextMenuGestureEvent = onContextMenuGestureEvent
         messageView.onReplyHeaderClicked = onReplyHeaderClicked
+        messageView.onReplyRequested = onReplyRequested
+        messageView.onReactionClicked = { reactionKey -> onToggleReaction(message.id, reactionKey) }
         messageView.onPhotoViewerRequested = onPhotoViewerRequested
         messageView.onVoicePlaybackRequested = onVoicePlaybackRequested
         messageView.setAudioPlaybackSnapshot(audioPlaybackSnapshot)
@@ -1406,9 +1599,36 @@ private class ChatMessageViewHolder(
     fun updateAudioPlaybackSnapshot(snapshot: AudioPlaybackSnapshot) {
         messageView.setAudioPlaybackSnapshot(snapshot)
     }
+
+    fun updateReactions(reactions: List<MessageReactionRenderModel>) {
+        messageView.updateReactions(reactions)
+    }
+}
+
+private class SystemEventViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
+    SystemEventCellView(parent.context).apply {
+        layoutParams = RecyclerView.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+    }
+) {
+    private val systemEventView = itemView as SystemEventCellView
+
+    fun bind(model: SystemEventRenderModel, theme: SystemEventRenderTheme) {
+        systemEventView.bind(model, theme)
+    }
+}
+
+private fun MessageRenderTheme.toSystemEventRenderTheme(): SystemEventRenderTheme {
+    return SystemEventRenderTheme(
+        backgroundColor = systemEventBackground,
+        textColor = systemEventText
+    )
 }
 
 private object AudioPlaybackPayload
+private object ReactionPayload
 
 private fun VoiceRecorderState.toGlassVoiceState(
     playbackSnapshot: AudioPlaybackSnapshot
@@ -1437,7 +1657,9 @@ private fun Long.toComposerDisplayDurationMillis(): Long {
     return (this / 1000L).coerceAtLeast(0L) * 1000L
 }
 
-private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
+private fun MatrixChatMessage.toRenderModel(
+    timeTextFormatter: TimeTextFormatter
+): MessageRenderModel {
     return MessageRenderModel(
         id = id,
         eventId = eventId,
@@ -1449,7 +1671,7 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
             senderDisplayName?.takeIf { it.isNotBlank() } ?: sender
         },
         content = renderContent(),
-        timestampText = timestampMillis.formatMessageTime(),
+        timestampText = timeTextFormatter.format(timestampMillis),
         isOutgoing = isOwn,
         deliveryState = deliveryState.toRenderDeliveryState(),
         replyInfo = replyInfo?.toRenderReplyPreview(),
@@ -1462,8 +1684,20 @@ private fun MatrixChatMessage.toRenderModel(): MessageRenderModel {
         redactionTargetMessageId = redactionTargetMessageId(),
         canForward = canForwardMessage(),
         canRetryOutgoingEnvelope = canRetryOutgoingEnvelope,
-        canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope
+        canDiscardOutgoingEnvelope = canDiscardOutgoingEnvelope,
+        reactions = toReactionRenderModels()
     )
+}
+
+private fun MatrixChatMessage.toReactionRenderModels(): List<MessageReactionRenderModel> {
+    return reactions.map { reaction ->
+        MessageReactionRenderModel(
+            key = reaction.key,
+            count = reaction.count,
+            isOwn = reaction.isOwn,
+            isPendingRemoval = reaction.isPendingRemoval
+        )
+    }
 }
 
 private fun MatrixChatMessage.renderContent(): MessageContent {
@@ -1663,32 +1897,35 @@ private fun MessageForwardPreview.toMatrixForwardTarget(): MatrixForwardTarget {
     )
 }
 
-private fun MatrixReplyInfo.toComposerPreview(): GlassComposerPreview {
+private fun MatrixReplyInfo.toComposerPreview(context: Context): GlassComposerPreview {
     val sender = senderDisplayName
         ?.takeIf { it.isNotBlank() }
         ?: senderId.takeIf { it.isNotBlank() }
-        ?: "Unknown"
+        ?: context.getString(R.string.chat_composer_unknown_sender)
     return GlassComposerPreview(
         title = sender,
-        body = body.ifBlank { "Message" }
+        body = body.ifBlank { context.getString(R.string.chat_composer_message_fallback) },
+        kind = GlassComposerPreviewKind.REPLY
     )
 }
 
-private fun MatrixForwardTarget.toComposerPreview(): GlassComposerPreview {
+private fun MatrixForwardTarget.toComposerPreview(context: Context): GlassComposerPreview {
     val title = forwardedFrom
         ?.takeIf { it.isNotBlank() }
-        ?.let { "Forwarded from $it" }
-        ?: "Forward message"
+        ?.let { context.getString(R.string.chat_composer_forwarded_from, it) }
+        ?: context.getString(R.string.chat_composer_forward_message)
     return GlassComposerPreview(
         title = title,
-        body = body.ifBlank { "Message" }
+        body = body.ifBlank { context.getString(R.string.chat_composer_message_fallback) },
+        kind = GlassComposerPreviewKind.FORWARD
     )
 }
 
-private fun MatrixEditTarget.toComposerPreview(): GlassComposerPreview {
+private fun MatrixEditTarget.toComposerPreview(context: Context): GlassComposerPreview {
     return GlassComposerPreview(
-        title = "Edit message",
-        body = body.ifBlank { "Message" }
+        title = context.getString(R.string.chat_composer_edit_message),
+        body = body.ifBlank { context.getString(R.string.chat_composer_message_fallback) },
+        kind = GlassComposerPreviewKind.EDIT
     )
 }
 
@@ -1729,19 +1966,11 @@ private fun MatrixMessageDeliveryState.toRenderDeliveryState(): RenderDeliverySt
     }
 }
 
-private fun Long.formatMessageTime(): String {
-    return MESSAGE_TIME_FORMATTER.format(
-        Instant.ofEpochMilli(this).atZone(ZoneId.systemDefault())
-    )
-}
-
 private fun logChatTeleport(message: String) {
     if (BuildConfig.DEBUG) {
         Log.d(CHAT_TELEPORT_TAG, message)
     }
 }
-
-private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
 private const val CHAT_TELEPORT_TAG = "ZynaChatTeleport"
 private const val NEWEST_EDGE_THRESHOLD = 1
@@ -1761,6 +1990,7 @@ private const val MEDIA_PREFETCH_MAX_HEIGHT_DP = 390
 private const val MEDIA_PREFETCH_TILE_SPACING_DP = 2
 private const val NATIVE_TOP_BAR_HEIGHT_DP = 64
 private const val ACTIVE_CALL_BANNER_HEIGHT_DP = 48
+private const val FLOATING_DATE_VIEW_TOP_MARGIN_DP = 4
 private const val FNV_64_OFFSET_BASIS = -3750763034362895579L
 private const val FNV_64_PRIME = 1099511628211L
 
@@ -1781,12 +2011,25 @@ private fun String.stableItemId(): Long {
     return hash
 }
 
-private object ChatMessageDiffCallback : DiffUtil.ItemCallback<MatrixChatMessage>() {
-    override fun areItemsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {
-        return oldItem.id == newItem.id
+private object ChatTimelineItemDiffCallback : DiffUtil.ItemCallback<ChatTimelineItem>() {
+    override fun areItemsTheSame(oldItem: ChatTimelineItem, newItem: ChatTimelineItem): Boolean {
+        return oldItem.stableKey == newItem.stableKey
     }
 
-    override fun areContentsTheSame(oldItem: MatrixChatMessage, newItem: MatrixChatMessage): Boolean {
+    override fun areContentsTheSame(oldItem: ChatTimelineItem, newItem: ChatTimelineItem): Boolean {
         return oldItem == newItem
+    }
+
+    override fun getChangePayload(oldItem: ChatTimelineItem, newItem: ChatTimelineItem): Any? {
+        val oldMessage = oldItem.messageOrNull() ?: return null
+        val newMessage = newItem.messageOrNull() ?: return null
+        return if (
+            oldMessage.reactions != newMessage.reactions &&
+            oldMessage.copy(reactions = newMessage.reactions) == newMessage
+        ) {
+            ReactionPayload
+        } else {
+            null
+        }
     }
 }

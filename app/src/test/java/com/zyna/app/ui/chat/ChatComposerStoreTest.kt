@@ -1,0 +1,185 @@
+package com.zyna.app.ui.chat
+
+import com.zyna.app.data.matrix.MatrixEditTarget
+import com.zyna.app.data.matrix.MatrixForwardImageItem
+import com.zyna.app.data.matrix.MatrixForwardTarget
+import com.zyna.app.data.matrix.MatrixReplyInfo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Test
+
+class ChatComposerStoreTest {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+    private val store = ChatComposerStore(scope, noOpSendDriver())
+
+    @After
+    fun tearDown() {
+        scope.cancel()
+    }
+
+    @Test
+    fun stateFlow_exposesLatestTargetState() {
+        assertEquals(ChatComposerState(), store.state.value)
+
+        val replyState = requireNotNull(store.selectReply(REPLY))
+        assertEquals(replyState, store.state.value)
+
+        val editState = requireNotNull(store.selectEdit(EDIT))
+        assertEquals(editState, store.state.value)
+
+        val pickerState = requireNotNull(store.startForwardPicker(FORWARD))
+        assertEquals(pickerState, store.state.value)
+    }
+
+    @Test
+    fun replyEditAndForwardTargets_areMutuallyExclusive() {
+        assertEquals(REPLY, store.selectReply(REPLY)?.replyTarget)
+
+        val editState = requireNotNull(store.selectEdit(EDIT))
+        assertNull(editState.replyTarget)
+        assertEquals(EDIT, editState.editTarget)
+
+        val pickerState = requireNotNull(store.startForwardPicker(FORWARD))
+        assertNull(pickerState.replyTarget)
+        assertNull(pickerState.editTarget)
+        assertNull(pickerState.forwardTarget)
+        assertEquals(FORWARD, pickerState.pendingForwardTarget)
+
+        val roomState = store.enterRoom(TARGET, FORWARD)
+        assertNull(roomState.replyTarget)
+        assertNull(roomState.editTarget)
+        assertEquals(FORWARD, roomState.forwardTarget)
+        assertNull(roomState.pendingForwardTarget)
+    }
+
+    @Test
+    fun invalidTargets_areRejectedWithoutChangingState() {
+        store.selectReply(REPLY)
+        val previous = store.state.value
+
+        assertNull(store.selectReply(REPLY.copy(eventId = "")))
+        assertNull(store.selectEdit(EDIT.copy(eventId = "")))
+        assertNull(store.selectEdit(EDIT.copy(body = "")))
+        assertNull(store.startForwardPicker(MatrixForwardTarget(body = "", forwardedFrom = null)))
+        assertEquals(previous, store.state.value)
+    }
+
+    @Test
+    fun imageForward_isValidWithoutTextBody() {
+        val imageForward = MatrixForwardTarget(
+            body = "",
+            forwardedFrom = "Alice",
+            imageItems = listOf(FORWARD_IMAGE)
+        )
+
+        val state = requireNotNull(store.startForwardPicker(imageForward))
+
+        assertEquals(imageForward, state.pendingForwardTarget)
+    }
+
+    @Test
+    fun cancelForwardPicker_clearsOnlyPendingWorkflow() {
+        store.startForwardPicker(FORWARD)
+
+        val state = store.cancelForwardPicker()
+
+        assertNull(state.pendingForwardTarget)
+        assertNull(state.forwardTarget)
+    }
+
+    @Test
+    fun activeAndFullReset_haveDifferentScopes() {
+        store.enterRoom(TARGET, FORWARD)
+        assertEquals(ChatComposerState(roomId = TARGET.roomId), store.clearActiveTargets())
+
+        store.startForwardPicker(FORWARD)
+
+        val activeReset = store.clearActiveTargets()
+        assertEquals(FORWARD, activeReset.pendingForwardTarget)
+
+        assertEquals(ChatComposerState(), store.clearAll())
+    }
+
+    @Test
+    fun deactivateRoom_clearsRoomStateButPreservesPendingForward() {
+        store.enterRoom(TARGET, forwardTarget = null)
+        store.startForwardPicker(FORWARD)
+
+        assertEquals(
+            ChatComposerState(pendingForwardTarget = FORWARD),
+            store.deactivateRoom()
+        )
+    }
+
+    @Test
+    fun enteringRegularRoom_clearsPreviousAndPendingTargets() {
+        store.selectReply(REPLY)
+        store.startForwardPicker(FORWARD)
+
+        assertEquals(
+            ChatComposerState(roomId = TARGET.roomId),
+            store.enterRoom(target = TARGET, forwardTarget = null)
+        )
+    }
+
+    @Test
+    fun individualClearActions_removeOnlyTheirTarget() {
+        store.selectReply(REPLY)
+        assertEquals(ChatComposerState(), store.clearReply())
+
+        store.selectEdit(EDIT)
+        assertEquals(ChatComposerState(), store.clearEdit())
+
+        store.enterRoom(TARGET, FORWARD)
+        assertEquals(ChatComposerState(roomId = TARGET.roomId), store.clearForward())
+    }
+
+    private companion object {
+        val TARGET = ChatComposerSendTarget(
+            userId = "@me:example.org",
+            roomId = "!room:example.org"
+        )
+        val REPLY = MatrixReplyInfo(
+            eventId = "reply-event",
+            senderId = "@alice:example.org",
+            senderDisplayName = "Alice",
+            body = "Original"
+        )
+        val EDIT = MatrixEditTarget(
+            messageId = "message",
+            eventId = "edit-event",
+            body = "Draft"
+        )
+        val FORWARD = MatrixForwardTarget(
+            body = "Forwarded",
+            forwardedFrom = "Alice"
+        )
+        val FORWARD_IMAGE = MatrixForwardImageItem(
+            sourceJson = "{}",
+            thumbnailSourceJson = null,
+            width = 100,
+            height = 100,
+            caption = null,
+            mimeType = "image/jpeg",
+            blurhash = null
+        )
+    }
+}
+
+private fun noOpSendDriver(): ChatComposerSendDriver {
+    return ChatComposerSendDriver(
+        nextId = { "id" },
+        prepareTransactionId = { "transaction" },
+        prepareTextEdit = { _, _, _, _ -> false },
+        createTextEnvelope = { _, _, _, _, _, _ -> },
+        createForwardedImageEnvelope = { _, _, _, _, _, _ -> },
+        createImageEnvelope = { _, _, _, _, _, _ -> },
+        createVoiceEnvelope = { _, _, _, _, _ -> },
+        kickOutbox = { _, _ -> }
+    )
+}

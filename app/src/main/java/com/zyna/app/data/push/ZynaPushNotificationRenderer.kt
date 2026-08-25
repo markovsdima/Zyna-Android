@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
@@ -19,6 +20,7 @@ import com.zyna.app.R
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCall
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCallActionReceiver
 import com.zyna.app.data.calls.matrixrtc.MatrixRtcIncomingCallIntents
+import com.zyna.app.ui.app.ExternalRouteIntents
 import com.zyna.app.ui.calls.MatrixRtcIncomingCallActivity
 import kotlin.math.absoluteValue
 
@@ -56,7 +58,7 @@ class ZynaPushNotificationRenderer(private val context: Context) {
             .setContentTitle(content.title)
             .setContentText(content.body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(content.body))
-            .setContentIntent(contentIntent())
+            .setContentIntent(contentIntent(payload))
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(
@@ -177,13 +179,23 @@ class ZynaPushNotificationRenderer(private val context: Context) {
             PackageManager.PERMISSION_GRANTED
     }
 
-    private fun contentIntent(): PendingIntent {
-        val intent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-        }
+    private fun contentIntent(payload: MatrixPushPayload): PendingIntent {
+        val intent = ExternalRouteIntents.putOpenRoom(
+            intent = Intent(context, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                data = Uri.Builder()
+                    .scheme(INTERNAL_ROUTE_SCHEME)
+                    .authority(INTERNAL_NOTIFICATION_AUTHORITY)
+                    .appendPath(payload.eventId)
+                    .build()
+            },
+            commandId = "notification:${payload.roomId}:${payload.eventId}",
+            roomId = payload.roomId,
+            eventId = payload.eventId
+        )
         return PendingIntent.getActivity(
             context,
-            REQUEST_CODE_OPEN_APP,
+            requestCode(payload.eventId, REQUEST_CODE_OPEN_MESSAGE),
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -204,7 +216,9 @@ class ZynaPushNotificationRenderer(private val context: Context) {
 
     companion object {
         private const val TAG = "ZynaPushNotify"
-        private const val REQUEST_CODE_OPEN_APP = 1001
+        private const val INTERNAL_ROUTE_SCHEME = "zyna-internal"
+        private const val INTERNAL_NOTIFICATION_AUTHORITY = "notification"
+        private const val REQUEST_CODE_OPEN_MESSAGE = 1001
         private const val REQUEST_CODE_ANSWER_CALL = 2001
         private const val REQUEST_CODE_DECLINE_CALL = 2002
         private const val REQUEST_CODE_FULLSCREEN_CALL = 2003

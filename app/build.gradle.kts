@@ -18,8 +18,8 @@ android {
         applicationId = "com.zyna.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 6
+        versionName = "0.1.5"
 
         buildConfigField("boolean", "VULKAN_CHAT_GLASS_ENABLED", "true")
 
@@ -55,6 +55,7 @@ ksp {
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.appcompat)
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
@@ -73,6 +74,7 @@ dependencies {
     implementation(libs.livekit.android)
     implementation(libs.livekit.android.camerax)
     implementation(libs.matrix.sdk)
+    implementation(libs.okhttp)
     implementation(libs.sqlcipher.android)
     ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)

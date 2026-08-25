@@ -29,12 +29,15 @@ import com.zyna.app.BuildConfig
 import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.matrix.MatrixMessageDeliveryState
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.render.GradientBubbleRecyclerView
+import com.zyna.app.ui.chat.render.MessageCellView
 import com.zyna.app.ui.chat.render.MessageContent
 import com.zyna.app.ui.chat.render.MessageContextMenuRequest
 import com.zyna.app.ui.chat.render.MessageRenderModel
 import com.zyna.app.ui.chat.render.PaintSplashTarget
 import com.zyna.app.ui.chat.render.PhotoGroupContextSelection
 import com.zyna.app.ui.chat.render.RenderDeliveryState
+import com.zyna.app.ui.chat.render.toReplyPreviewOrNull
 import kotlin.math.min
 import kotlin.math.roundToInt
 
@@ -61,6 +64,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     }
     private val layerLocation = IntArray(2)
     private val cellLocation = IntArray(2)
+    private val viewportLocation = IntArray(2)
     private val bubbleBoundsInScreen = RectF()
     private val bubbleBoundsInLayer = RectF()
     private val drawingBubbleBoundsInLayer = RectF()
@@ -74,8 +78,15 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     private var isDismissing = false
     private var isGestureCancelEnabled = false
     private var isMenuOpenRequested = false
+    private var didRestoreSourceDuringDismiss = false
     private var hoveredActionView: TextView? = null
     private var selectedCellTargetOffsetY = 0f
+    private var bottomSafeInset = 0
+    private var hasSelectedViewportOverride = false
+    private var selectedViewportWidth = 0
+    private var selectedViewportHeight = 0
+    private var selectedViewportOffsetX = 0f
+    private var selectedViewportOffsetY = 0f
     private var selectedCellAnticipationScale = 1f
         set(value) {
             field = value
@@ -100,6 +111,10 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
     var onActionSelected: ((
         request: MessageContextMenuRequest,
         action: MessageContextMenuAction
+    ) -> Unit)? = null
+    var onReactionSelected: ((
+        request: MessageContextMenuRequest,
+        reactionKey: String
     ) -> Unit)? = null
     var onGlassGeometryChanged: () -> Unit = {}
     var onDismissFullyHidden: () -> Unit = {}
@@ -128,11 +143,23 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         applyPalette(nextPalette)
     }
 
+    fun setBottomSafeInset(inset: Int) {
+        val nextInset = inset.coerceAtLeast(0)
+        if (bottomSafeInset == nextInset) {
+            return
+        }
+        bottomSafeInset = nextInset
+        if (visibility == VISIBLE) {
+            requestLayout()
+        }
+    }
+
     fun beginPreview(request: MessageContextMenuRequest): Boolean {
         animator?.cancel()
         animator = null
         restoreSelectedSource()
         isDismissing = false
+        didRestoreSourceDuringDismiss = false
         isMenuOpenRequested = false
         clearHoveredActionView()
         if (!setSelectedRequest(request)) {
@@ -168,8 +195,10 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             return false
         }
         isDismissing = false
+        didRestoreSourceDuringDismiss = false
         isGestureCancelEnabled = false
         isMenuOpenRequested = true
+        request.cell.setContextMenuSourceHidden(true)
         visibility = VISIBLE
         selectedCellLayer.visibility = VISIBLE
         bringToFront()
@@ -194,6 +223,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         }
         animator?.cancel()
         isDismissing = true
+        didRestoreSourceDuringDismiss = false
         isGestureCancelEnabled = false
         isMenuOpenRequested = false
         clearHoveredActionView()
@@ -423,11 +453,7 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             emptyList()
         }
         val actions = buildList {
-            if (
-                message.eventId != null &&
-                message.content !is MessageContent.Redacted &&
-                message.outgoingEnvelopeId == null
-            ) {
+            if (message.toReplyPreviewOrNull() != null) {
                 add(MessageContextMenuAction.REPLY)
             }
             if (message.canShowForwardAction()) {
@@ -462,11 +488,64 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             }
         }
 
-        actions.forEachIndexed { index, action ->
-            if (index > 0) {
+        var hasRows = false
+        if (message.canReact()) {
+            menuContainer.addView(createReactionBar(request))
+            hasRows = true
+        }
+
+        actions.forEach { action ->
+            if (hasRows) {
                 menuContainer.addView(MenuDivider(context, palette))
             }
             menuContainer.addView(createActionView(action))
+            hasRows = true
+        }
+    }
+
+    private fun createReactionBar(request: MessageContextMenuRequest): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            minimumHeight = 44.dpToPx(density)
+            setPadding(
+                8.dpToPx(density),
+                4.dpToPx(density),
+                8.dpToPx(density),
+                4.dpToPx(density)
+            )
+            QUICK_REACTION_KEYS.forEach { reactionKey ->
+                addView(createReactionButton(request, reactionKey))
+            }
+        }
+    }
+
+    private fun createReactionButton(
+        request: MessageContextMenuRequest,
+        reactionKey: String
+    ): TextView {
+        val selectableBackground = TypedValue()
+        context.theme.resolveAttribute(
+            android.R.attr.selectableItemBackgroundBorderless,
+            selectableBackground,
+            true
+        )
+        return TextView(context).apply {
+            text = reactionKey
+            textSize = 22f
+            gravity = Gravity.CENTER
+            includeFontPadding = false
+            setTextColor(palette.text)
+            minWidth = 34.dpToPx(density)
+            minHeight = 34.dpToPx(density)
+            setBackgroundResource(selectableBackground.resourceId)
+            isClickable = true
+            isFocusable = true
+            isHapticFeedbackEnabled = true
+            contentDescription = "React $reactionKey"
+            setOnClickListener {
+                onReactionSelected?.invoke(request, reactionKey)
+            }
         }
     }
 
@@ -548,13 +627,22 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
             drawingBubbleBoundsInLayer.centerX() - layerCellX,
             drawingBubbleBoundsInLayer.centerY() - layerCellY
         )
-        cell.drawForContextMenu(canvas)
+        cell.drawForContextMenu(
+            canvas = canvas,
+            hasViewportOverride = hasSelectedViewportOverride,
+            viewportWidth = selectedViewportWidth,
+            viewportHeight = selectedViewportHeight,
+            viewportOffsetX = selectedViewportOffsetX,
+            viewportOffsetY = selectedViewportOffsetY
+        )
         canvas.restoreToCount(save)
     }
 
     private fun computeSelectedCellTargetOffsetY(menuHeight: Int, margin: Int, gap: Int): Float {
         val safeTop = margin.toFloat()
-        val safeBottom = (height - margin).toFloat()
+        val safeBottom = (height - bottomSafeInset - margin)
+            .coerceAtLeast(margin)
+            .toFloat()
         val minOffsetForTop = safeTop - bubbleBoundsInLayer.top
         val maxOffsetForMenuBottom = safeBottom - (bubbleBoundsInLayer.bottom + gap + menuHeight)
 
@@ -705,8 +793,33 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         bubbleBoundsInScreen.set(request.bubbleBoundsInScreen)
         activationRawX = request.touchRawX
         activationRawY = request.touchRawY
+        captureSelectedViewport(request.cell)
         buildMenu(request)
         return menuContainer.childCount > 0
+    }
+
+    private fun captureSelectedViewport(cell: MessageCellView) {
+        val viewport = cell.parent as? GradientBubbleRecyclerView
+        if (viewport == null || viewport.width <= 0 || viewport.height <= 0) {
+            clearSelectedViewport()
+            return
+        }
+
+        viewport.getLocationOnScreen(viewportLocation)
+        cell.getLocationOnScreen(cellLocation)
+        hasSelectedViewportOverride = true
+        selectedViewportWidth = viewport.width
+        selectedViewportHeight = viewport.height
+        selectedViewportOffsetX = (cellLocation[0] - viewportLocation[0]).toFloat()
+        selectedViewportOffsetY = (cellLocation[1] - viewportLocation[1]).toFloat()
+    }
+
+    private fun clearSelectedViewport() {
+        hasSelectedViewportOverride = false
+        selectedViewportWidth = 0
+        selectedViewportHeight = 0
+        selectedViewportOffsetX = 0f
+        selectedViewportOffsetY = 0f
     }
 
     private fun animateState(
@@ -727,6 +840,14 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
                 val animatedProgress = it.animatedValue as Float
                 pressProgress = lerp(startPressProgress, targetPressProgress, animatedProgress)
                 menuProgress = lerp(startMenuProgress, targetMenuProgress, animatedProgress)
+                if (
+                    clearAfterEnd &&
+                    !didRestoreSourceDuringDismiss &&
+                    animatedProgress >= DISMISS_SOURCE_RESTORE_PROGRESS
+                ) {
+                    restoreSelectedSource()
+                    didRestoreSourceDuringDismiss = true
+                }
                 onGlassGeometryChanged()
             }
             if (clearAfterEnd) {
@@ -757,9 +878,13 @@ internal class MessageContextMenuLayer @JvmOverloads constructor(
         isMenuOpenRequested = false
         clearHoveredActionView()
         menuContainer.removeAllViews()
-        restoreSelectedSource()
+        if (!didRestoreSourceDuringDismiss) {
+            restoreSelectedSource()
+        }
         selectedRequest = null
         selectedMessage = null
+        didRestoreSourceDuringDismiss = false
+        clearSelectedViewport()
         selectedCellTargetOffsetY = 0f
         selectedCellAnticipationScale = 1f
         visibility = GONE
@@ -808,6 +933,14 @@ internal enum class MessageContextMenuAction(
     REMOVE_FAILED_SEND("Remove Failed Send", true),
     DEBUG_MARK_FAILED("Debug Mark Failed")
 }
+
+private fun MessageRenderModel.canReact(): Boolean {
+    return eventId != null &&
+        outgoingEnvelopeId == null &&
+        content !is MessageContent.Redacted
+}
+
+private val QUICK_REACTION_KEYS = listOf("👍", "❤️", "😂", "😮", "😢", "🔥")
 
 private fun MessageContextMenuAction.textColor(palette: GlassPalette): Int {
     return if (isDestructive) DESTRUCTIVE_TEXT_COLOR else palette.text
@@ -878,6 +1011,7 @@ private const val DELETE_ANTICIPATION_DURATION_MS = 80L
 private const val PREVIEW_SHRINK_DURATION_MS = 170L
 private const val OPEN_ANIMATION_DURATION_MS = 260L
 private const val DISMISS_ANIMATION_DURATION_MS = 170L
+private const val DISMISS_SOURCE_RESTORE_PROGRESS = 0.96f
 private val DESTRUCTIVE_TEXT_COLOR = Color.rgb(211, 47, 47)
 
 private fun defaultMenuPalette(): GlassPalette {

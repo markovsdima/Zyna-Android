@@ -19,6 +19,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -28,10 +29,15 @@ import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
-import androidx.recyclerview.widget.SimpleItemAnimator
+import com.zyna.app.R
 import com.zyna.app.data.media.MatrixMediaLoader
 import com.zyna.app.data.matrix.MatrixLastOwnMessageStatus
 import com.zyna.app.data.matrix.MatrixRoomSummary
+import com.zyna.app.data.matrix.MatrixSpaceMembership
+import com.zyna.app.data.presence.UserPresenceStatus
+import com.zyna.app.ui.presence.PresenceText
+import com.zyna.app.ui.time.AndroidTimeTextFormatter
+import com.zyna.app.ui.time.TimeTextFormatter
 import com.zyna.app.util.ZynaPerfLog
 import java.time.Instant
 import java.time.LocalDate
@@ -42,11 +48,13 @@ import kotlin.math.roundToInt
 
 data class RoomsScreenViewState(
     val rooms: List<MatrixRoomSummary>,
-    val isRefreshing: Boolean,
+    val isSynchronizing: Boolean,
+    val hasSynchronizationError: Boolean,
     val title: String,
-    val showLogout: Boolean,
     val showBack: Boolean,
+    val showCreateRoom: Boolean,
     val matrixMediaLoader: MatrixMediaLoader?,
+    val presenceByUserId: Map<String, UserPresenceStatus>,
     val initialScrollAnchor: RoomsScrollAnchor?,
     val bottomContentPaddingPx: Int
 )
@@ -57,10 +65,13 @@ data class RoomsScrollAnchor(
 )
 
 data class RoomsScreenViewActions(
-    val onRefresh: () -> Unit,
     val onOpenRoom: (MatrixRoomSummary) -> Unit,
-    val onLogout: (() -> Unit)?,
-    val onBack: (() -> Unit)?
+    val onCreateRoom: (() -> Unit)?,
+    val onCreateStoryline: (() -> Unit)?,
+    val onBack: (() -> Unit)?,
+    val onRetrySynchronization: () -> Unit,
+    val onVisibleRoomsChanged: (List<String>) -> Unit,
+    val onVisibleRoomsInactive: () -> Unit
 )
 
 class RoomsScreenView(context: Context) : FrameLayout(context) {
@@ -95,29 +106,51 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         typeface = Typeface.DEFAULT_BOLD
         updatePadding(left = dp(12), right = dp(8))
     }
-    private val refreshButton = TextView(context).apply {
+    private val createRoomButton = TextView(context).apply {
         gravity = Gravity.CENTER
-        textSize = 15f
+        text = context.getString(R.string.rooms_create_group)
+        textSize = 16f
         typeface = Typeface.DEFAULT_BOLD
         isClickable = true
         isFocusable = true
     }
-    private val logoutButton = TextView(context).apply {
+    private val retrySynchronizationButton = TextView(context).apply {
         gravity = Gravity.CENTER
-        text = "Log out"
-        textSize = 15f
+        text = context.getString(R.string.common_retry)
+        textSize = 14f
         typeface = Typeface.DEFAULT_BOLD
         isClickable = true
         isFocusable = true
+        updatePadding(left = dp(12), right = dp(12), top = dp(8), bottom = dp(8))
+    }
+    private val synchronizationErrorBar = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        visibility = View.GONE
+        updatePadding(left = dp(20), right = dp(8), top = dp(5), bottom = dp(5))
+        addView(
+            TextView(context).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                text = context.getString(R.string.rooms_update_error)
+                textSize = 14f
+                tag = SYNCHRONIZATION_ERROR_TEXT_TAG
+            },
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        addView(
+            retrySynchronizationButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
     }
     private val contentFrame = FrameLayout(context)
     private val recyclerView = RecyclerView(context).apply {
         layoutManager = LinearLayoutManager(context)
         clipToPadding = false
         setHasFixedSize(true)
-        itemAnimator?.let { animator ->
-            (animator as? SimpleItemAnimator)?.supportsChangeAnimations = false
-        }
+        itemAnimator = null
     }
     private val emptyView = TextView(context).apply {
         gravity = Gravity.CENTER
@@ -126,6 +159,9 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
     private val adapter = RoomsAdapter(palette)
     private var consumedInitialScrollAnchor: RoomsScrollAnchor? = null
+    private var latestActions: RoomsScreenViewActions? = null
+    private var lastReportedVisibleRoomIds: List<String>? = null
+    private var lastReportedVisibleRange: Pair<Int, Int>? = null
 
     init {
         setBackgroundColor(palette.background)
@@ -160,17 +196,17 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         topBar.addView(
-            refreshButton,
+            createRoomButton,
             LinearLayout.LayoutParams(
-                dp(96),
+                dp(72),
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
         )
-        topBar.addView(
-            logoutButton,
+        root.addView(
+            synchronizationErrorBar,
             LinearLayout.LayoutParams(
-                dp(84),
-                ViewGroup.LayoutParams.MATCH_PARENT
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
         )
         root.addView(
@@ -182,6 +218,13 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             )
         )
         recyclerView.adapter = adapter
+        recyclerView.addOnScrollListener(
+            object : RecyclerView.OnScrollListener() {
+                override fun onScrolled(recyclerView: RecyclerView, dx: Int, dy: Int) {
+                    dispatchVisibleRooms()
+                }
+            }
+        )
         contentFrame.addView(
             recyclerView,
             LayoutParams(
@@ -218,8 +261,25 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     override fun onDetachedFromWindow() {
+        latestActions?.onVisibleRoomsInactive?.invoke()
+        lastReportedVisibleRoomIds = null
+        lastReportedVisibleRange = null
         adapter.cancelAvatarLoads()
         super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityChanged(changedView: View, visibility: Int) {
+        super.onVisibilityChanged(changedView, visibility)
+        if (changedView !== this) return
+        if (visibility == View.VISIBLE) {
+            post { dispatchVisibleRooms(force = true) }
+        } else {
+            latestActions?.onVisibleRoomsInactive?.invoke()
+            // The store has released this screen's viewport ownership. Forget the local
+            // delivery snapshot as well, so the same visible rows reclaim it on return.
+            lastReportedVisibleRoomIds = null
+            lastReportedVisibleRange = null
+        }
     }
 
     override fun onConfigurationChanged(newConfig: Configuration?) {
@@ -228,29 +288,39 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     fun render(state: RoomsScreenViewState, actions: RoomsScreenViewActions) {
+        latestActions = actions
         updateThemeIfNeeded(force = false)
         val renderStart = ZynaPerfLog.start()
         val pendingInitialScrollAnchor = state.initialScrollAnchor
             ?.takeUnless { it == consumedInitialScrollAnchor }
         val listMutationScrollAnchor = pendingInitialScrollAnchor
             ?: captureScrollAnchorForListMutation()
+        val shouldKeepListAtTop = pendingInitialScrollAnchor == null &&
+            state.rooms.isNotEmpty() &&
+            recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE &&
+            isListAtTop()
         titleText.text = state.title
         backButton.visibility = if (state.showBack) View.VISIBLE else View.GONE
         backButton.setOnClickListener { actions.onBack?.invoke() }
-        logoutButton.visibility = if (state.showLogout) View.VISIBLE else View.GONE
-        logoutButton.setOnClickListener { actions.onLogout?.invoke() }
-        refreshButton.text = if (state.isRefreshing) "Syncing" else "Refresh"
-        refreshButton.isEnabled = !state.isRefreshing
-        refreshButton.alpha = if (state.isRefreshing) 0.54f else 1f
-        refreshButton.setOnClickListener { actions.onRefresh() }
-
+        createRoomButton.visibility = if (state.showCreateRoom) View.VISIBLE else View.GONE
+        createRoomButton.setOnClickListener { showCreationMenu(actions) }
+        retrySynchronizationButton.setOnClickListener { actions.onRetrySynchronization() }
+        synchronizationErrorBar.visibility = if (state.hasSynchronizationError) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
         recyclerView.setPadding(
             recyclerView.paddingLeft,
             recyclerView.paddingTop,
             recyclerView.paddingRight,
             state.bottomContentPaddingPx
         )
-        emptyView.text = if (state.isRefreshing) "Loading chats" else "No chats"
+        emptyView.text = when {
+            state.isSynchronizing -> context.getString(R.string.rooms_loading)
+            state.hasSynchronizationError -> ""
+            else -> context.getString(R.string.rooms_empty)
+        }
         emptyView.visibility = if (state.rooms.isEmpty()) View.VISIBLE else View.GONE
         recyclerView.visibility = if (state.rooms.isEmpty()) View.GONE else View.VISIBLE
 
@@ -262,19 +332,88 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             actions.onOpenRoom(room)
         }
         adapter.setMatrixMediaLoader(state.matrixMediaLoader)
+        adapter.setPresenceStatuses(state.presenceByUserId)
         adapter.submitList(state.rooms) {
+            var didRestoreScrollAnchor = false
             if (listMutationScrollAnchor != null) {
-                val didRestore = restoreScrollAnchor(listMutationScrollAnchor, state.rooms)
+                didRestoreScrollAnchor = restoreScrollAnchor(listMutationScrollAnchor, state.rooms)
                 if (pendingInitialScrollAnchor != null) {
-                    val userStartedScrolling = recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE
-                    if (didRestore || userStartedScrolling) {
+                    val userStartedScrolling =
+                        recyclerView.scrollState != RecyclerView.SCROLL_STATE_IDLE
+                    if (didRestoreScrollAnchor || userStartedScrolling) {
                         consumedInitialScrollAnchor = pendingInitialScrollAnchor
                     }
                 }
             }
+            val shouldFallbackInvalidInitialAnchor =
+                pendingInitialScrollAnchor != null && !didRestoreScrollAnchor
+            val canAdjustScrollAfterCommit =
+                recyclerView.scrollState == RecyclerView.SCROLL_STATE_IDLE
+            if (
+                canAdjustScrollAfterCommit &&
+                (shouldKeepListAtTop || shouldFallbackInvalidInitialAnchor)
+            ) {
+                (recyclerView.layoutManager as? LinearLayoutManager)
+                    ?.scrollToPositionWithOffset(0, recyclerView.paddingTop)
+                if (pendingInitialScrollAnchor != null) {
+                    consumedInitialScrollAnchor = pendingInitialScrollAnchor
+                }
+            }
+            recyclerView.post { dispatchVisibleRooms(force = true) }
         }
         ZynaPerfLog.end(renderStart, "roomsView.render") {
-            "title=${state.title} rooms=${state.rooms.size} refreshing=${state.isRefreshing}"
+            "title=${state.title} rooms=${state.rooms.size} " +
+                "synchronizing=${state.isSynchronizing}"
+        }
+    }
+
+    private fun showCreationMenu(actions: RoomsScreenViewActions) {
+        if (actions.onCreateRoom == null && actions.onCreateStoryline == null) return
+        PopupMenu(context, createRoomButton, Gravity.END).apply {
+            actions.onCreateRoom?.let {
+                menu.add(0, CREATE_GROUP_MENU_ID, 0, R.string.create_group_title)
+            }
+            actions.onCreateStoryline?.let {
+                menu.add(0, CREATE_STORYLINE_MENU_ID, 1, R.string.create_storyline_title)
+            }
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    CREATE_GROUP_MENU_ID -> actions.onCreateRoom?.invoke()
+                    CREATE_STORYLINE_MENU_ID -> actions.onCreateStoryline?.invoke()
+                    else -> return@setOnMenuItemClickListener false
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    private fun dispatchVisibleRooms(force: Boolean = false) {
+        val actions = latestActions ?: return
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return
+        val firstVisible = layoutManager.findFirstVisibleItemPosition()
+        val lastVisible = layoutManager.findLastVisibleItemPosition()
+        val visibleRange = firstVisible to lastVisible
+        if (!force && visibleRange == lastReportedVisibleRange) return
+        lastReportedVisibleRange = visibleRange
+        val roomIds = if (
+            firstVisible == RecyclerView.NO_POSITION ||
+            lastVisible == RecyclerView.NO_POSITION
+        ) {
+            emptyList()
+        } else {
+            val fromIndex = (firstVisible - VISIBLE_PREFETCH_BEFORE).coerceAtLeast(0)
+            val toIndex = (lastVisible + VISIBLE_PREFETCH_AFTER)
+                .coerceAtMost(adapter.currentList.lastIndex)
+            if (fromIndex > toIndex) {
+                emptyList()
+            } else {
+                (fromIndex..toIndex).mapNotNull { index -> adapter.currentList.getOrNull(index)?.id }
+            }
+        }
+        if (lastReportedVisibleRoomIds != roomIds) {
+            lastReportedVisibleRoomIds = roomIds
+            actions.onVisibleRoomsChanged(roomIds)
         }
     }
 
@@ -307,9 +446,12 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
         root.setBackgroundColor(palette.background)
         topBar.setBackgroundColor(palette.background)
         backButton.setTextColor(palette.actionText)
+        createRoomButton.setTextColor(palette.actionText)
+        retrySynchronizationButton.setTextColor(palette.actionText)
+        synchronizationErrorBar.setBackgroundColor(palette.secondaryBackground)
+        synchronizationErrorBar.findViewWithTag<TextView>(SYNCHRONIZATION_ERROR_TEXT_TAG)
+            ?.setTextColor(palette.secondaryText)
         titleText.setTextColor(palette.titleText)
-        refreshButton.setTextColor(palette.actionText)
-        logoutButton.setTextColor(palette.actionText)
         emptyView.setTextColor(palette.secondaryText)
         adapter.setPalette(palette)
     }
@@ -329,6 +471,15 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
             return null
         }
         return captureScrollAnchor()
+    }
+
+    private fun isListAtTop(): Boolean {
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return true
+        val position = layoutManager.findFirstVisibleItemPosition()
+        if (position == RecyclerView.NO_POSITION) return adapter.currentList.isEmpty()
+        if (position != 0) return false
+        val child = layoutManager.findViewByPosition(position) ?: return false
+        return child.top >= recyclerView.paddingTop
     }
 
     private fun restoreScrollAnchor(anchor: RoomsScrollAnchor, rooms: List<MatrixRoomSummary>): Boolean {
@@ -352,6 +503,11 @@ class RoomsScreenView(context: Context) : FrameLayout(context) {
     }
 
     private companion object {
+        const val CREATE_GROUP_MENU_ID = 1
+        const val CREATE_STORYLINE_MENU_ID = 2
+        const val SYNCHRONIZATION_ERROR_TEXT_TAG = "rooms-sync-error-text"
+        const val VISIBLE_PREFETCH_BEFORE = 4
+        const val VISIBLE_PREFETCH_AFTER = 20
         const val TOP_BAR_HEIGHT_DP = 64
     }
 }
@@ -361,6 +517,7 @@ private class RoomsAdapter(
 ) : ListAdapter<MatrixRoomSummary, RoomViewHolder>(RoomDiffCallback) {
     var onRoomClicked: (MatrixRoomSummary) -> Unit = {}
     private var matrixMediaLoader: MatrixMediaLoader? = null
+    private var presenceByUserId: Map<String, UserPresenceStatus> = emptyMap()
     private val boundHolders = mutableSetOf<RoomViewHolder>()
 
     init {
@@ -381,6 +538,7 @@ private class RoomsAdapter(
             room = getItem(position),
             palette = palette,
             matrixMediaLoader = matrixMediaLoader,
+            presence = getItem(position).directUserPresence(),
             onClick = onRoomClicked
         )
     }
@@ -402,6 +560,7 @@ private class RoomsAdapter(
             palette = palette,
             matrixMediaLoader = matrixMediaLoader,
             payload = payload,
+            presence = getItem(position).directUserPresence(),
             onClick = onRoomClicked
         )
     }
@@ -442,6 +601,16 @@ private class RoomsAdapter(
         }
     }
 
+    fun setPresenceStatuses(nextStatuses: Map<String, UserPresenceStatus>) {
+        if (presenceByUserId == nextStatuses) {
+            return
+        }
+        presenceByUserId = nextStatuses
+        boundHolders.forEach { holder ->
+            holder.updatePresence(holder.currentRoomDirectUserId()?.let(nextStatuses::get))
+        }
+    }
+
     fun setPalette(nextPalette: RoomsPalette) {
         if (palette == nextPalette) {
             return
@@ -454,6 +623,10 @@ private class RoomsAdapter(
                 RoomRowPayload(reloadAvatar = false)
             )
         }
+    }
+
+    private fun MatrixRoomSummary.directUserPresence(): UserPresenceStatus? {
+        return directUserId?.takeIf { it.isNotBlank() }?.let(presenceByUserId::get)
     }
 }
 
@@ -471,9 +644,10 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
         room: MatrixRoomSummary,
         palette: RoomsPalette,
         matrixMediaLoader: MatrixMediaLoader?,
+        presence: UserPresenceStatus?,
         onClick: (MatrixRoomSummary) -> Unit
     ) {
-        rowView.bind(room, palette, matrixMediaLoader)
+        rowView.bind(room, palette, matrixMediaLoader, presence)
         rowView.setOnClickListener { onClick(room) }
     }
 
@@ -482,10 +656,19 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
         palette: RoomsPalette,
         matrixMediaLoader: MatrixMediaLoader?,
         payload: RoomRowPayload,
+        presence: UserPresenceStatus?,
         onClick: (MatrixRoomSummary) -> Unit
     ) {
-        rowView.update(room, palette, matrixMediaLoader, payload.reloadAvatar)
+        rowView.update(room, palette, matrixMediaLoader, payload.reloadAvatar, presence)
         rowView.setOnClickListener { onClick(room) }
+    }
+
+    fun updatePresence(presence: UserPresenceStatus?) {
+        rowView.updatePresence(presence)
+    }
+
+    fun currentRoomDirectUserId(): String? {
+        return rowView.currentRoomDirectUserId()
     }
 
     fun recycle() {
@@ -503,10 +686,17 @@ private class RoomViewHolder(parent: ViewGroup) : RecyclerView.ViewHolder(
 
 private class RoomRowView(context: Context) : View(context) {
     private val density = resources.displayMetrics.density
+    private val timeTextFormatter = AndroidTimeTextFormatter(context)
     private val avatarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
     private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val onlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val onlineBorderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
     private val dividerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -533,6 +723,7 @@ private class RoomRowView(context: Context) : View(context) {
     private val badgeRect = RectF()
     private val avatarShaderMatrix = Matrix()
     private var room: MatrixRoomSummary? = null
+    private var presence: UserPresenceStatus? = null
     private var palette = RoomsPalette.from(context.resources.configuration.isNightMode())
     private var avatarFillColor = palette.avatarColors.first()
     private var avatarBitmap: Bitmap? = null
@@ -552,13 +743,15 @@ private class RoomRowView(context: Context) : View(context) {
     fun bind(
         room: MatrixRoomSummary,
         palette: RoomsPalette,
-        matrixMediaLoader: MatrixMediaLoader?
+        matrixMediaLoader: MatrixMediaLoader?,
+        presence: UserPresenceStatus?
     ) {
         this.room = room
         this.palette = palette
+        this.presence = presence
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
-        contentDescription = room.accessibilityText()
+        contentDescription = room.accessibilityText(context, presence)
         bindAvatar(
             avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
             matrixMediaLoader = matrixMediaLoader
@@ -570,13 +763,15 @@ private class RoomRowView(context: Context) : View(context) {
         room: MatrixRoomSummary,
         palette: RoomsPalette,
         matrixMediaLoader: MatrixMediaLoader?,
-        reloadAvatar: Boolean
+        reloadAvatar: Boolean,
+        presence: UserPresenceStatus?
     ) {
         this.room = room
         this.palette = palette
+        this.presence = presence
         avatarFillColor = room.avatarColor(palette)
         setBackgroundColor(palette.background)
-        contentDescription = room.accessibilityText()
+        contentDescription = room.accessibilityText(context, presence)
         if (reloadAvatar) {
             bindAvatar(
                 avatarUrl = room.avatarUrl?.takeIf { it.isNotBlank() },
@@ -584,6 +779,20 @@ private class RoomRowView(context: Context) : View(context) {
             )
         }
         invalidate()
+    }
+
+    fun updatePresence(nextPresence: UserPresenceStatus?) {
+        val wasOnline = PresenceText.isOnline(presence)
+        val isOnline = PresenceText.isOnline(nextPresence)
+        presence = nextPresence
+        room?.let { contentDescription = it.accessibilityText(context, nextPresence) }
+        if (wasOnline != isOnline) {
+            invalidate()
+        }
+    }
+
+    fun currentRoomDirectUserId(): String? {
+        return room?.directUserId?.takeIf { it.isNotBlank() }
     }
 
     fun recycle() {
@@ -641,9 +850,18 @@ private class RoomRowView(context: Context) : View(context) {
         val avatarSize = dp(AVATAR_SIZE_DP).toFloat()
         val avatarCenterX = left + avatarSize / 2f
         val avatarCenterY = height / 2f
-        if (!drawAvatarBitmap(canvas, avatarCenterX, avatarCenterY, avatarSize)) {
+        if (!drawAvatarBitmap(canvas, avatarCenterX, avatarCenterY, avatarSize, room.isSpace)) {
             avatarPaint.color = avatarFillColor
-            canvas.drawCircle(avatarCenterX, avatarCenterY, avatarSize / 2f, avatarPaint)
+            if (room.isSpace) {
+                canvas.drawRoundRect(
+                    avatarRect(avatarCenterX, avatarCenterY, avatarSize),
+                    avatarSize * SPACE_AVATAR_CORNER_RATIO,
+                    avatarSize * SPACE_AVATAR_CORNER_RATIO,
+                    avatarPaint
+                )
+            } else {
+                canvas.drawCircle(avatarCenterX, avatarCenterY, avatarSize / 2f, avatarPaint)
+            }
             canvas.drawText(
                 room.avatarInitial(),
                 avatarCenterX,
@@ -651,14 +869,23 @@ private class RoomRowView(context: Context) : View(context) {
                 avatarTextPaint
             )
         }
+        drawOnlineIndicator(canvas, avatarCenterX, avatarCenterY, avatarSize)
 
         val textLeft = left + avatarSize + dp(12)
-        val timeText = room.lastMessageAtMillis?.formatRoomTimestamp().orEmpty()
-        val statusText = room.lastOwnMessageStatus?.label().orEmpty()
-        val badgeText = room.unreadBadgeText()
+        val timeText = room.lastMessageAtMillis
+            ?.takeUnless { room.isSpace }
+            ?.formatRoomTimestamp(timeTextFormatter)
+            .orEmpty()
+        val statusText = room.lastOwnMessageStatus
+            ?.takeUnless { room.isSpace }
+            ?.label()
+            .orEmpty()
+        val badgeText = room.unreadBadgeText().takeUnless { room.isSpace }
         val rawTrailingWidth = max(
             max(metaPaint.measureText(timeText), metaPaint.measureText(statusText)),
-            badgeText?.let { badgeTextPaint.measureText(it) + dp(14) } ?: room.unreadDotWidth()
+            badgeText?.let { badgeTextPaint.measureText(it) + dp(14) }
+                ?: room.unreadDotWidth().takeUnless { room.isSpace }
+                ?: 0f
         )
         val horizontalGap = dp(12).toFloat()
         val maxTrailingWidth = (right - textLeft - dp(48) - horizontalGap).coerceAtLeast(0f)
@@ -683,7 +910,7 @@ private class RoomRowView(context: Context) : View(context) {
             titlePaint
         )
         canvas.drawText(
-            room.previewText().ellipsize(previewPaint, textRight - textLeft),
+            room.previewText(context).ellipsize(previewPaint, textRight - textLeft),
             textLeft,
             previewBaseline,
             previewPaint
@@ -702,7 +929,9 @@ private class RoomRowView(context: Context) : View(context) {
             }
             canvas.drawText(statusText.ellipsize(metaPaint, trailingWidth), right, previewBaseline, metaPaint)
         }
-        drawUnreadIndicator(canvas, room, right, trailingWidth)
+        if (!room.isSpace) {
+            drawUnreadIndicator(canvas, room, right, trailingWidth)
+        }
         canvas.drawLine(textLeft, height - 0.5f, widthPx.toFloat(), height - 0.5f, dividerPaint)
     }
 
@@ -789,7 +1018,8 @@ private class RoomRowView(context: Context) : View(context) {
         canvas: Canvas,
         centerX: Float,
         centerY: Float,
-        size: Float
+        size: Float,
+        isSpace: Boolean
     ): Boolean {
         val bitmap = avatarBitmap?.takeIf { !it.isRecycled } ?: return false
         val shader = avatarShaderFor(bitmap)
@@ -805,9 +1035,27 @@ private class RoomRowView(context: Context) : View(context) {
         )
         shader.setLocalMatrix(avatarShaderMatrix)
         avatarPaint.shader = shader
-        canvas.drawCircle(centerX, centerY, size / 2f, avatarPaint)
+        if (isSpace) {
+            canvas.drawRoundRect(
+                avatarRect(centerX, centerY, size),
+                size * SPACE_AVATAR_CORNER_RATIO,
+                size * SPACE_AVATAR_CORNER_RATIO,
+                avatarPaint
+            )
+        } else {
+            canvas.drawCircle(centerX, centerY, size / 2f, avatarPaint)
+        }
         avatarPaint.shader = null
         return true
+    }
+
+    private fun avatarRect(centerX: Float, centerY: Float, size: Float): RectF {
+        return RectF(
+            centerX - size / 2f,
+            centerY - size / 2f,
+            centerX + size / 2f,
+            centerY + size / 2f
+        )
     }
 
     private fun avatarShaderFor(bitmap: Bitmap): BitmapShader {
@@ -871,6 +1119,25 @@ private class RoomRowView(context: Context) : View(context) {
             centerBaseline(badgeRect.centerY(), badgeTextPaint),
             badgeTextPaint
         )
+    }
+
+    private fun drawOnlineIndicator(
+        canvas: Canvas,
+        avatarCenterX: Float,
+        avatarCenterY: Float,
+        avatarSize: Float
+    ) {
+        if (!PresenceText.isOnline(presence)) {
+            return
+        }
+        onlineBorderPaint.color = palette.onlineBorder
+        onlinePaint.color = palette.onlineFill
+        val dotRadius = dp(5).toFloat()
+        val borderRadius = dotRadius + dp(2).toFloat()
+        val centerX = avatarCenterX + avatarSize / 2f - dotRadius
+        val centerY = avatarCenterY + avatarSize / 2f - dotRadius
+        canvas.drawCircle(centerX, centerY, borderRadius, onlineBorderPaint)
+        canvas.drawCircle(centerX, centerY, dotRadius, onlinePaint)
     }
 
     private fun applySelectableForeground() {
@@ -941,6 +1208,7 @@ private fun List<Any>.roomRowPayloadOrNull(): RoomRowPayload? {
 
 private data class RoomsPalette(
     val background: Int,
+    val secondaryBackground: Int,
     val titleText: Int,
     val secondaryText: Int,
     val actionText: Int,
@@ -950,13 +1218,16 @@ private data class RoomsPalette(
     val unreadFill: Int,
     val mentionFill: Int,
     val unreadText: Int,
-    val errorText: Int
+    val errorText: Int,
+    val onlineFill: Int,
+    val onlineBorder: Int
 ) {
     companion object {
         fun from(isDarkTheme: Boolean): RoomsPalette {
             return if (isDarkTheme) {
                 RoomsPalette(
                     background = Color.rgb(18, 18, 22),
+                    secondaryBackground = Color.rgb(30, 29, 34),
                     titleText = Color.rgb(232, 225, 229),
                     secondaryText = Color.rgb(202, 196, 208),
                     actionText = Color.rgb(208, 188, 255),
@@ -966,11 +1237,14 @@ private data class RoomsPalette(
                     unreadFill = Color.rgb(208, 188, 255),
                     mentionFill = Color.rgb(255, 180, 171),
                     unreadText = Color.rgb(33, 0, 93),
-                    errorText = Color.rgb(255, 180, 171)
+                    errorText = Color.rgb(255, 180, 171),
+                    onlineFill = Color.rgb(52, 199, 89),
+                    onlineBorder = Color.rgb(18, 18, 22)
                 )
             } else {
                 RoomsPalette(
                     background = Color.WHITE,
+                    secondaryBackground = Color.rgb(247, 242, 248),
                     titleText = Color.rgb(29, 27, 32),
                     secondaryText = Color.rgb(73, 69, 79),
                     actionText = Color.rgb(33, 0, 93),
@@ -980,14 +1254,24 @@ private data class RoomsPalette(
                     unreadFill = Color.rgb(103, 80, 164),
                     mentionFill = Color.rgb(186, 26, 26),
                     unreadText = Color.WHITE,
-                    errorText = Color.rgb(186, 26, 26)
+                    errorText = Color.rgb(186, 26, 26),
+                    onlineFill = Color.rgb(52, 199, 89),
+                    onlineBorder = Color.WHITE
                 )
             }
         }
     }
 }
 
-private fun MatrixRoomSummary.previewText(): String {
+private fun MatrixRoomSummary.previewText(context: Context): String {
+    if (isSpace) {
+        val storyline = context.getString(R.string.space_storyline)
+        return if (membership == MatrixSpaceMembership.INVITED) {
+            context.getString(R.string.space_invited_format, storyline)
+        } else {
+            storyline
+        }
+    }
     return lastMessageText?.takeIf { it.isNotBlank() } ?: "No messages"
 }
 
@@ -1014,9 +1298,16 @@ private fun MatrixRoomSummary.stableAvatarId(): String {
     return directUserId?.takeIf { it.isNotBlank() } ?: id
 }
 
-private fun MatrixRoomSummary.accessibilityText(): String {
-    val unread = unreadBadgeText()?.let { ", $it unread" }.orEmpty()
-    return "$displayName, ${previewText()}$unread"
+private fun MatrixRoomSummary.accessibilityText(
+    context: Context,
+    presence: UserPresenceStatus?
+): String {
+    val unread = unreadBadgeText()
+        ?.takeUnless { isSpace }
+        ?.let { ", $it unread" }
+        .orEmpty()
+    val online = if (PresenceText.isOnline(presence)) ", online" else ""
+    return "$displayName, ${previewText(context)}$unread$online"
 }
 
 private fun MatrixLastOwnMessageStatus.label(): String {
@@ -1028,12 +1319,12 @@ private fun MatrixLastOwnMessageStatus.label(): String {
     }
 }
 
-private fun Long.formatRoomTimestamp(): String {
+private fun Long.formatRoomTimestamp(timeTextFormatter: TimeTextFormatter): String {
     val zone = ZoneId.systemDefault()
     val dateTime = Instant.ofEpochMilli(this).atZone(zone)
     val today = LocalDate.now(zone)
     return when (dateTime.toLocalDate()) {
-        today -> ROOM_TIME_FORMATTER.format(dateTime)
+        today -> timeTextFormatter.format(this)
         today.minusDays(1) -> "Yesterday"
         else -> ROOM_DATE_FORMATTER.format(dateTime)
     }
@@ -1070,7 +1361,6 @@ private fun String.djb2StableHash(): Long {
     return java.lang.Long.remainderUnsigned(hash, Long.MAX_VALUE)
 }
 
-private val ROOM_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 private val ROOM_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d")
 private val LIGHT_IOS_SYSTEM_AVATAR_COLORS = listOf(
     Color.rgb(0, 122, 255),
@@ -1093,6 +1383,7 @@ private val DARK_IOS_SYSTEM_AVATAR_COLORS = listOf(
     Color.rgb(255, 55, 95)
 )
 private const val AVATAR_SIZE_DP = 46
+private const val SPACE_AVATAR_CORNER_RATIO = 0.28f
 private const val ROW_HEIGHT_DP = 76
 private const val DJB2_OFFSET = 5381L
 private const val DJB2_MULTIPLIER = 33L

@@ -7,6 +7,7 @@ import com.zyna.app.data.matrix.MatrixMediaGroupItem
 import com.zyna.app.data.messaging.CaptionPlacement
 import com.zyna.app.data.messaging.MediaGroupLayoutOverride
 import com.zyna.app.data.messaging.normalizedMessageCaption
+import com.zyna.app.ui.chat.theme.MessageBubbleGradientSpec
 
 internal data class MessageRenderModel(
     val id: String,
@@ -29,8 +30,16 @@ internal data class MessageRenderModel(
     val canForward: Boolean = false,
     val canRetryOutgoingEnvelope: Boolean = false,
     val canDiscardOutgoingEnvelope: Boolean = false,
+    val reactions: List<MessageReactionRenderModel> = emptyList(),
     val attributes: MessageRenderAttributes = MessageRenderAttributes(),
     val cluster: MessageCluster = MessageCluster()
+)
+
+internal data class MessageReactionRenderModel(
+    val key: String,
+    val count: Int,
+    val isOwn: Boolean,
+    val isPendingRemoval: Boolean = false
 )
 
 internal data class MessageEditPreview(
@@ -45,6 +54,26 @@ internal data class MessageReplyPreview(
     val senderText: String,
     val body: String
 )
+
+internal fun MessageRenderModel.toReplyPreviewOrNull(): MessageReplyPreview? {
+    val replyEventId = eventId?.takeIf { it.isNotBlank() } ?: return null
+    if (content is MessageContent.Redacted || outgoingEnvelopeId != null) {
+        return null
+    }
+    val replyBody = when (val currentContent = content) {
+        is MessageContent.Text -> currentContent.body
+        is MessageContent.Image -> currentContent.caption.normalizedMessageCaption() ?: "Photo"
+        is MessageContent.PhotoGroup -> currentContent.caption.normalizedMessageCaption() ?: "Photo group"
+        is MessageContent.Voice -> "Voice message"
+        MessageContent.Redacted -> return null
+    }.takeIf { it.isNotBlank() } ?: return null
+    return MessageReplyPreview(
+        eventId = replyEventId,
+        senderId = senderId,
+        senderText = senderText,
+        body = replyBody
+    )
+}
 
 internal data class MessageForwardPreview(
     val body: String,
@@ -94,11 +123,19 @@ internal data class MessageRenderTheme(
     val outgoingMetadata: Int,
     val incomingBubble: Int,
     val incomingText: Int,
-    val incomingMetadata: Int
+    val incomingMetadata: Int,
+    val outgoingBubbleGradient: MessageBubbleGradientSpec? = null,
+    val systemEventBackground: Int = incomingBubble,
+    val systemEventText: Int = incomingMetadata
 ) {
     fun bubbleColor(message: MessageRenderModel): Int {
         return message.attributes.bubbleColor
             ?: if (message.isOutgoing) outgoingBubble else incomingBubble
+    }
+
+    fun bubbleGradient(message: MessageRenderModel): MessageBubbleGradientSpec? {
+        return outgoingBubbleGradient
+            ?.takeIf { message.isOutgoing && message.attributes.bubbleColor == null }
     }
 
     fun textColor(message: MessageRenderModel): Int {
@@ -144,7 +181,11 @@ internal fun MessageRenderModel.accessibilityText(): String {
         RenderDeliveryState.FAILED -> ", failed"
     }
     val sender = senderText.takeIf { it.isNotBlank() } ?: if (isOutgoing) "You" else "Unknown sender"
-    return "$sender$reply$forward, $body, $timestampText$state"
+    val reactionCount = reactions.sumOf { it.count }
+        .takeIf { it > 0 }
+        ?.let { ", $it reactions" }
+        .orEmpty()
+    return "$sender$reply$forward, $body, $timestampText$state$reactionCount"
 }
 
 internal val MessageRenderModel.isRedacted: Boolean

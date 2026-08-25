@@ -67,6 +67,25 @@ internal object NativeVulkanChat {
         textureTop: Float
     ): Boolean
 
+    external fun nativeSetTeleportHardwareBuffers(
+        handle: Long,
+        oldHardwareBuffer: HardwareBuffer,
+        newHardwareBuffer: HardwareBuffer,
+        viewportLeft: Float,
+        viewportTop: Float,
+        viewportRight: Float,
+        viewportBottom: Float,
+        captureLeft: Float,
+        captureTop: Float,
+        captureWidth: Int,
+        captureHeight: Int,
+        directionSign: Float
+    ): Boolean
+
+    external fun nativeUpdateTeleportProgress(handle: Long, progress: Float): Boolean
+
+    external fun nativeClearTeleport(handle: Long)
+
     external fun nativePollBackdropStats(handle: Long): FloatArray?
 
     external fun nativeClearBackdropHardwareBuffer(handle: Long)

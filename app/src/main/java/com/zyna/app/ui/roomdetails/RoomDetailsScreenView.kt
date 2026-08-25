@@ -58,6 +58,7 @@ internal data class RoomDetailsScreenViewActions(
     val onOpenInviteMembers: () -> Unit,
     val onOpenPermissions: () -> Unit,
     val onOpenSpaceAccess: () -> Unit,
+    val onOpenRoomSecurity: () -> Unit,
     val onRetry: () -> Unit,
     val onRequestLeave: () -> Unit,
     val onConfirmLeave: () -> Unit,
@@ -215,10 +216,9 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
     private val pinnedRow = disabledRow("Pinned Messages")
     private val mediaRow = disabledRow("Shared Media")
     private val securityRow = RoomDetailsRowView(context).apply {
-        title = "Security & Privacy"
+        title = context.getString(R.string.room_security_title)
         showsAccessory = true
     }
-    private val historyRow = disabledRow("Room History")
     private val leaveRow = RoomDetailsRowView(context).apply {
         title = context.getString(R.string.room_leave_action)
         showsAccessory = false
@@ -363,7 +363,6 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         content.addView(pinnedRow, rowLayoutParams())
         content.addView(mediaRow, rowLayoutParams())
         content.addView(securityRow, rowLayoutParams())
-        content.addView(historyRow, rowLayoutParams())
         content.addView(
             leaveRow,
             rowLayoutParams().apply { topMargin = dp(18) }
@@ -448,21 +447,24 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
         permissionsRow.visibility = if (showsMembers) VISIBLE else GONE
         permissionsRow.isFocusable = showsMembers
         val showsSpaceAccess = state.kind == MatrixRoomKind.SPACE
+        val showsRoomSecurity = state.kind == MatrixRoomKind.GROUP
+        val showsSecurity = showsSpaceAccess || showsRoomSecurity
         securityRow.title = if (showsSpaceAccess) {
             context.getString(R.string.room_details_access_visibility)
         } else {
-            "Security & Privacy"
+            context.getString(R.string.room_security_title)
         }
-        securityRow.isEnabled = showsSpaceAccess
-        securityRow.isClickable = showsSpaceAccess
-        securityRow.isFocusable = showsSpaceAccess
-        securityRow.showsAccessory = showsSpaceAccess
-        securityRow.alpha = if (showsSpaceAccess) 1f else DISABLED_ALPHA
+        securityRow.visibility = if (showsSecurity) VISIBLE else GONE
+        securityRow.isEnabled = showsSecurity
+        securityRow.isClickable = showsSecurity
+        securityRow.isFocusable = showsSecurity
+        securityRow.showsAccessory = showsSecurity
+        securityRow.alpha = if (showsSecurity) 1f else DISABLED_ALPHA
         securityRow.setOnClickListener(
-            if (showsSpaceAccess) {
-                View.OnClickListener { actions.onOpenSpaceAccess() }
-            } else {
-                null
+            when {
+                showsSpaceAccess -> View.OnClickListener { actions.onOpenSpaceAccess() }
+                showsRoomSecurity -> View.OnClickListener { actions.onOpenRoomSecurity() }
+                else -> null
             }
         )
         inviteAction.visibility = if (showsInvite) VISIBLE else GONE
@@ -513,7 +515,6 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             state.encryption?.label(),
             state.access?.label()
         ).joinToString(separator = " · ").ifBlank { loadingValue(state) }
-        historyRow.detail = state.historyVisibility?.label() ?: loadingValue(state)
         statusText.text = state.errorMessage.orEmpty()
         statusText.visibility = if (statusText.text.isNullOrBlank()) GONE else VISIBLE
         retryButton.visibility = if (state.errorMessage != null) VISIBLE else GONE
@@ -563,7 +564,6 @@ internal class RoomDetailsScreenView(context: Context) : FrameLayout(context) {
             pinnedRow,
             mediaRow,
             securityRow,
-            historyRow,
             leaveRow
         ).forEach { row ->
             row.setPalette(palette)

@@ -77,6 +77,11 @@ import com.zyna.app.ui.roomdetails.RoomDetailsScreenViewState
 import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.roomdetails.RoomFeatureState
 import com.zyna.app.ui.roomdetails.RoomLeaveState
+import com.zyna.app.ui.roomdetails.RoomSecurityError
+import com.zyna.app.ui.roomdetails.RoomSecurityScreenView
+import com.zyna.app.ui.roomdetails.RoomSecurityScreenViewActions
+import com.zyna.app.ui.roomdetails.RoomSecurityScreenViewState
+import com.zyna.app.ui.roomdetails.RoomSecurityState
 import com.zyna.app.ui.roommembers.RoomMembersScreenView
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewActions
 import com.zyna.app.ui.roommembers.RoomMembersScreenViewState
@@ -169,6 +174,23 @@ private fun SpaceAccessError?.localizedMessage(context: Context): String? {
         SpaceAccessError.SAVE -> com.zyna.app.R.string.space_access_save_error
         SpaceAccessError.PARTIAL_SAVE ->
             com.zyna.app.R.string.space_access_partial_save_error
+    }
+    return context.getString(stringId)
+}
+
+private fun RoomSecurityError?.localizedMessage(context: Context): String? {
+    val stringId = when (this) {
+        null -> return null
+        RoomSecurityError.LOAD -> com.zyna.app.R.string.room_security_load_error
+        RoomSecurityError.ADDRESS_CHECK ->
+            com.zyna.app.R.string.room_security_address_check_save_error
+        RoomSecurityError.PERMISSION_CHANGED ->
+            com.zyna.app.R.string.room_security_permission_changed
+        RoomSecurityError.REMOTE_CHANGED ->
+            com.zyna.app.R.string.room_security_remote_changed
+        RoomSecurityError.SAVE -> com.zyna.app.R.string.room_security_save_error
+        RoomSecurityError.PARTIAL_SAVE ->
+            com.zyna.app.R.string.room_security_partial_save_error
     }
     return context.getString(stringId)
 }
@@ -782,6 +804,14 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                 return false
             }
         }
+        if (state.route is AppRoute.RoomSecurity) {
+            if (
+                latestRoom?.security?.isSaving == true ||
+                latestRoom?.security?.hasUnsavedChanges == true
+            ) {
+                return false
+            }
+        }
         if (state.route == AppRoute.CreateRoom) {
             if (
                 latestRoom?.createRoom?.isCreating == true ||
@@ -1094,6 +1124,11 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                     permissions = room.permissions,
                     roomDetails = room.details,
                     roomList = roomList,
+                    actions = actions,
+                    route = route
+                )
+                is AppRoute.RoomSecurity -> roomSecurityEntry(
+                    security = room.security,
                     actions = actions,
                     route = route
                 )
@@ -1613,6 +1648,46 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
         )
     }
 
+    private fun roomSecurityEntry(
+        security: RoomSecurityState,
+        actions: ZynaRootActions,
+        route: AppRoute.RoomSecurity
+    ): ZynaScreenEntry {
+        return ZynaScreenEntry(
+            key = "room-security:${route.roomId}",
+            createView = { context -> RoomSecurityScreenView(context) },
+            updateView = { view ->
+                val routeState = security.takeIf { state ->
+                    state.target?.roomId == route.roomId
+                } ?: RoomSecurityState(isLoading = true)
+                (view as RoomSecurityScreenView).render(
+                    state = RoomSecurityScreenViewState(
+                        security = routeState,
+                        errorMessage = routeState.error.localizedMessage(context)
+                    ),
+                    actions = RoomSecurityScreenViewActions(
+                        onBack = { actions.navigation.onNavigateBack() },
+                        onRetry = actions.roomSecurity.onRetry,
+                        onAccessChanged = actions.roomSecurity.onAccessChanged,
+                        onAuthorizedSpaceToggled =
+                            actions.roomSecurity.onAuthorizedSpaceToggled,
+                        onHistoryChanged = actions.roomSecurity.onHistoryChanged,
+                        onEncryptionChanged = actions.roomSecurity.onEncryptionChanged,
+                        onConfirmEncryption = actions.roomSecurity.onConfirmEncryption,
+                        onCancelEncryption = actions.roomSecurity.onCancelEncryption,
+                        onAddressChanged = actions.roomSecurity.onAddressChanged,
+                        onRetryAddressCheck = actions.roomSecurity.onRetryAddressCheck,
+                        onDirectoryVisibilityChanged =
+                            actions.roomSecurity.onDirectoryVisibilityChanged,
+                        onSave = actions.roomSecurity.onSave,
+                        onConfirmDiscard = actions.roomSecurity.onConfirmDiscard,
+                        onCancelDiscard = actions.roomSecurity.onCancelDiscard
+                    )
+                )
+            }
+        )
+    }
+
     private fun roomsEntryKey(title: String, onBack: (() -> Unit)?): String {
         return "rooms:$title:${onBack != null}"
     }
@@ -1993,6 +2068,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
                         onOpenInviteMembers = actions.roomDetails.onOpenInviteMembers,
                         onOpenPermissions = actions.roomDetails.onOpenPermissions,
                         onOpenSpaceAccess = actions.roomDetails.onOpenSpaceAccess,
+                        onOpenRoomSecurity = actions.roomDetails.onOpenRoomSecurity,
                         onRetry = actions.roomDetails.onRefresh,
                         onRequestLeave = actions.roomDetails.onRequestLeave,
                         onConfirmLeave = actions.roomDetails.onConfirmLeave,
@@ -2541,6 +2617,7 @@ class ZynaRootHostView(context: Context) : FrameLayout(context) {
             is AppRoute.RoomMemberDetails ->
                 "RoomMemberDetails(${roomId.takeLast(10)},${userId.takeLast(10)})"
             is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.takeLast(10)})"
+            is AppRoute.RoomSecurity -> "RoomSecurity(${roomId.takeLast(10)})"
             is AppRoute.RoomRoleManagement ->
                 "RoomRoleManagement(${roomId.takeLast(10)})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.takeLast(10)})"

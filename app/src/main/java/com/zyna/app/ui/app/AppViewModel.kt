@@ -20,6 +20,7 @@ import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
 import com.zyna.app.data.matrix.MatrixRoomKind
+import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
 import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
 import com.zyna.app.data.matrix.MatrixRoomPermission
@@ -84,8 +85,12 @@ import com.zyna.app.ui.roomdetails.RoomDetailsState
 import com.zyna.app.ui.roomdetails.RoomDetailsTarget
 import com.zyna.app.ui.roomdetails.RoomLeaveState
 import com.zyna.app.ui.roomdetails.RoomLeaveTarget
+import com.zyna.app.ui.roomdetails.RoomSecurityAccessOption
+import com.zyna.app.ui.roomdetails.RoomSecurityState
+import com.zyna.app.ui.roomdetails.RoomSecurityTarget
 import com.zyna.app.ui.roomdetails.createRoomDetailsStore
 import com.zyna.app.ui.roomdetails.createRoomLeaveStore
+import com.zyna.app.ui.roomdetails.createRoomSecurityStore
 import com.zyna.app.ui.roommembers.RoomMembersState
 import com.zyna.app.ui.roommembers.RoomMembersTarget
 import com.zyna.app.ui.roommembers.RoomMemberModerationState
@@ -360,6 +365,14 @@ class AppViewModel(
         onWarning = { message, error -> Log.w(TAG, message, error) }
     )
     val roomLeaveState: StateFlow<RoomLeaveState> = roomLeaveStore.state
+    private val roomSecurityStore = createRoomSecurityStore(
+        scope = viewModelScope,
+        matrixClientService = matrixClientService,
+        matrixSpaceService = matrixSpaceService,
+        onFinished = ::handleRoomSecurityFinished,
+        onWarning = { message, error -> Log.w(TAG, message, error) }
+    )
+    val roomSecurityState: StateFlow<RoomSecurityState> = roomSecurityStore.state
     private val roomProfileEditorStore = createRoomProfileEditorStore(
         scope = viewModelScope,
         matrixClientService = matrixClientService,
@@ -491,6 +504,10 @@ class AppViewModel(
 
         viewModelScope.launch {
             observeSpaceAccessRouteInputs()
+        }
+
+        viewModelScope.launch {
+            observeRoomSecurityRouteInputs()
         }
 
         viewModelScope.launch {
@@ -1190,6 +1207,10 @@ class AppViewModel(
             spaceAccessStore.requestExit()
             return true
         }
+        if (route is AppRoute.RoomSecurity) {
+            roomSecurityStore.requestExit()
+            return true
+        }
         if (route is AppRoute.RoomDetails && roomLeaveStore.state.value.isBusy) {
             return true
         }
@@ -1743,6 +1764,75 @@ class AppViewModel(
         _uiState.update { state ->
             state.withNavigationState(state.navState.openRoomPermissions())
         }
+    }
+
+    fun openRoomSecurity() {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomDetails ?: return
+        val userId = current.matrixState.userIdOrNull() ?: return
+        val details = roomDetailsStore.state.value
+            .takeIf { it.target == RoomDetailsTarget(userId, route.roomId) }
+            ?.details
+            ?: roomListStore.state.value.roomForId(route.roomId)?.roomDetails
+            ?: return
+        if (details.kind != MatrixRoomKind.GROUP) return
+        _uiState.update { state ->
+            state.withNavigationState(
+                state.navState.openRoomSecurity(details.displayName)
+            )
+        }
+    }
+
+    fun retryRoomSecurity() {
+        roomSecurityStore.retry()
+    }
+
+    fun setRoomSecurityAccess(access: RoomSecurityAccessOption) {
+        roomSecurityStore.setAccess(access)
+    }
+
+    fun toggleRoomSecurityAuthorizedSpace(spaceId: String) {
+        roomSecurityStore.toggleAuthorizedSpace(spaceId)
+    }
+
+    fun setRoomSecurityHistoryVisibility(visibility: MatrixRoomHistoryVisibility) {
+        roomSecurityStore.setHistoryVisibility(visibility)
+    }
+
+    fun setRoomSecurityEncryption(enabled: Boolean) {
+        roomSecurityStore.requestEncryptionChange(enabled)
+    }
+
+    fun confirmRoomSecurityEncryption() {
+        roomSecurityStore.confirmEncryption()
+    }
+
+    fun cancelRoomSecurityEncryption() {
+        roomSecurityStore.cancelEncryptionConfirmation()
+    }
+
+    fun setRoomSecurityAddress(value: String) {
+        roomSecurityStore.setAddressLocalPart(value)
+    }
+
+    fun retryRoomSecurityAddressCheck() {
+        roomSecurityStore.retryAddressCheck()
+    }
+
+    fun setRoomSecurityDirectoryVisibility(isVisible: Boolean) {
+        roomSecurityStore.setDirectoryVisibility(isVisible)
+    }
+
+    fun saveRoomSecurity() {
+        roomSecurityStore.save()
+    }
+
+    fun confirmRoomSecurityDiscard() {
+        roomSecurityStore.confirmDiscard()
+    }
+
+    fun cancelRoomSecurityDiscard() {
+        roomSecurityStore.cancelDiscardConfirmation()
     }
 
     fun retryRoomPermissions() {
@@ -2764,6 +2854,27 @@ class AppViewModel(
             }
     }
 
+    private suspend fun observeRoomSecurityRouteInputs() {
+        _uiState
+            .map { state ->
+                val route = state.navState.activeRoomSecurityRoute ?: return@map null
+                val userId = state.matrixState.userIdOrNull() ?: return@map null
+                RoomSecurityTarget(
+                    userId = userId,
+                    roomId = route.roomId,
+                    displayName = route.displayName
+                )
+            }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null) {
+                    roomSecurityStore.deactivate()
+                } else {
+                    roomSecurityStore.activate(target)
+                }
+            }
+    }
+
     private fun handleSpaceAccessFinished(
         target: SpaceAccessTarget,
         didSave: Boolean
@@ -2785,6 +2896,26 @@ class AppViewModel(
         if (didSave) {
             roomDetailsStore.refresh()
         }
+    }
+
+    private fun handleRoomSecurityFinished(
+        target: RoomSecurityTarget,
+        didSave: Boolean
+    ) {
+        val current = _uiState.value
+        val route = current.route as? AppRoute.RoomSecurity ?: return
+        if (
+            current.matrixState.userIdOrNull() != target.userId ||
+            route.roomId != target.roomId
+        ) {
+            return
+        }
+        _uiState.update { state ->
+            state.navState.popActiveStack()
+                ?.let(state::withNavigationState)
+                ?: state
+        }
+        if (didSave) roomDetailsStore.refresh()
     }
 
     private fun handleSpaceRoomsAdded(
@@ -3461,6 +3592,7 @@ class AppViewModel(
             is AppRoute.RoomMemberDetails ->
                 "RoomMemberDetails(${roomId.shortLogId()},${userId.shortLogId()})"
             is AppRoute.RoomPermissions -> "RoomPermissions(${roomId.shortLogId()})"
+            is AppRoute.RoomSecurity -> "RoomSecurity(${roomId.shortLogId()})"
             is AppRoute.RoomRoleManagement ->
                 "RoomRoleManagement(${roomId.shortLogId()})"
             is AppRoute.InviteRoomMembers -> "InviteRoomMembers(${roomId.shortLogId()})"

@@ -22,6 +22,23 @@ import org.junit.Test
 
 class SpaceAccessStoreTest {
     @Test
+    fun serverNameCaseDoesNotCreateAnAddressDraft() = runBlocking {
+        val fixture = SpaceAccessFixture(coroutineContext)
+        fixture.snapshot = snapshot(canonicalAlias = "#Track:Example.ORG")
+        try {
+            fixture.activate()
+
+            val state = fixture.store.state.value
+            assertEquals("#Track:example.org", state.localAddress)
+            assertEquals("#Track:example.org", state.editFullAddress)
+            assertFalse(state.hasAddressChange)
+            assertFalse(state.hasUnsavedChanges)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
     fun restrictedRuleIsEditableOnlyForTheActiveParent() = runBlocking {
         val fixture = SpaceAccessFixture(coroutineContext)
         fixture.snapshot = snapshot(

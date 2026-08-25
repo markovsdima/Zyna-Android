@@ -2,7 +2,9 @@ package com.zyna.app.data.matrix
 
 import org.matrix.rustcomponents.sdk.AllowRule
 import org.matrix.rustcomponents.sdk.JoinRule
+import org.matrix.rustcomponents.sdk.RoomPowerLevels
 import org.matrix.rustcomponents.sdk.RoomVisibility
+import org.matrix.rustcomponents.sdk.StateEventType
 
 sealed interface MatrixSpaceAccessJoinRule {
     data object InviteOnly : MatrixSpaceAccessJoinRule
@@ -25,6 +27,20 @@ data class MatrixSpaceAccessPermissions(
     val canChangeAddress: Boolean,
     val canChangeDirectoryVisibility: Boolean
 )
+
+internal data class MatrixRoomAddressPermissions(
+    val canChangeAddress: Boolean,
+    val canChangeDirectoryVisibility: Boolean
+)
+
+internal fun RoomPowerLevels.toMatrixRoomAddressPermissions(): MatrixRoomAddressPermissions {
+    val canChangeAddress = canOwnUserSendState(StateEventType.RoomCanonicalAlias)
+    return MatrixRoomAddressPermissions(
+        canChangeAddress = canChangeAddress,
+        // Matrix exposes no distinct power-level capability for room-directory publication.
+        canChangeDirectoryVisibility = canChangeAddress
+    )
+}
 
 /**
  * Matrix-independent projection used by the Space access editor.

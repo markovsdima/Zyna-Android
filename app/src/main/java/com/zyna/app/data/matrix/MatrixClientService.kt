@@ -803,16 +803,14 @@ class MatrixClientService(
             try {
                 check(roomInfo.isSpace) { "Matrix room is not a Space" }
                 val permissions = room.getPowerLevels().use { powerLevels ->
-                    val canChangeAddress = powerLevels.canOwnUserSendState(
-                        StateEventType.RoomCanonicalAlias
-                    )
+                    val addressPermissions = powerLevels.toMatrixRoomAddressPermissions()
                     MatrixSpaceAccessPermissions(
                         canChangeJoinRule = powerLevels.canOwnUserSendState(
                             StateEventType.RoomJoinRules
                         ),
-                        canChangeAddress = canChangeAddress,
-                        // Matrix exposes no distinct room-directory power-level capability.
-                        canChangeDirectoryVisibility = canChangeAddress
+                        canChangeAddress = addressPermissions.canChangeAddress,
+                        canChangeDirectoryVisibility =
+                            addressPermissions.canChangeDirectoryVisibility
                     )
                 }
                 MatrixSpaceAccessSnapshot(
@@ -860,18 +858,122 @@ class MatrixClientService(
         fun emit(roomInfo: RoomInfo) {
             val permissions = try {
                 roomInfo.powerLevels?.let { powerLevels ->
-                    val canChangeAddress = powerLevels.canOwnUserSendState(
-                        StateEventType.RoomCanonicalAlias
-                    )
+                    val addressPermissions = powerLevels.toMatrixRoomAddressPermissions()
                     MatrixSpaceAccessPermissions(
                         canChangeJoinRule = powerLevels.canOwnUserSendState(
                             StateEventType.RoomJoinRules
                         ),
-                        canChangeAddress = canChangeAddress,
-                        // Keep the product capability separate even though its proxy is shared.
-                        canChangeDirectoryVisibility = canChangeAddress
+                        canChangeAddress = addressPermissions.canChangeAddress,
+                        canChangeDirectoryVisibility =
+                            addressPermissions.canChangeDirectoryVisibility
                     )
                 }
+            } finally {
+                roomInfo.destroy()
+            }
+            permissions?.let { trySendBlocking(it) }
+        }
+
+        fun cleanup() {
+            if (hasCleanedUp.compareAndSet(false, true)) {
+                listenerHandle?.cancelAndDestroy()
+                room.destroy()
+            }
+        }
+
+        try {
+            emit(room.roomInfo())
+            listenerHandle = room.subscribeToRoomInfoUpdates(
+                object : RoomInfoListener {
+                    override fun call(roomInfo: RoomInfo) {
+                        emit(roomInfo)
+                    }
+                }
+            )
+        } catch (error: Throwable) {
+            cleanup()
+            close(error)
+            return@callbackFlow
+        }
+
+        awaitClose(::cleanup)
+    }.buffer(Channel.CONFLATED)
+        .distinctUntilChanged()
+        .flowOn(Dispatchers.IO)
+
+    suspend fun loadRoomSecurity(
+        userId: String,
+        roomId: String
+    ): MatrixRoomSecuritySnapshot = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        val serverName = activeClient.userId().matrixServerNameOrNull()
+            ?: error("Matrix homeserver name is unavailable")
+        knownRoomOrNull(userId, activeClient, normalizedRoomId)?.use { room ->
+            val roomInfo = room.roomInfo()
+            try {
+                check(!roomInfo.isSpace) { "Matrix room is a Space" }
+                MatrixRoomSecuritySnapshot(
+                    roomId = normalizedRoomId,
+                    joinRule = roomInfo.joinRule.toMatrixRoomSecurityJoinRule(),
+                    historyVisibility = when (roomInfo.historyVisibility) {
+                        RoomHistoryVisibility.Shared -> MatrixRoomHistoryVisibility.SHARED
+                        RoomHistoryVisibility.Invited -> MatrixRoomHistoryVisibility.INVITED
+                        RoomHistoryVisibility.Joined -> MatrixRoomHistoryVisibility.JOINED
+                        RoomHistoryVisibility.WorldReadable ->
+                            MatrixRoomHistoryVisibility.WORLD_READABLE
+                        is RoomHistoryVisibility.Custom -> MatrixRoomHistoryVisibility.CUSTOM
+                    },
+                    isEncrypted = when (roomInfo.encryptionState) {
+                        EncryptionState.ENCRYPTED -> true
+                        EncryptionState.NOT_ENCRYPTED -> false
+                        EncryptionState.UNKNOWN -> null
+                    },
+                    canonicalAlias = roomInfo.canonicalAlias?.takeIf(String::isNotBlank),
+                    alternativeAliases = roomInfo.alternativeAliases
+                        .filter(String::isNotBlank)
+                        .distinct(),
+                    directoryVisibility = room.getRoomVisibility()
+                        .toMatrixRoomDirectoryVisibility(),
+                    serverName = serverName,
+                    permissions = room.getPowerLevels().use {
+                        it.toMatrixRoomSecurityPermissions()
+                    }
+                )
+            } finally {
+                roomInfo.destroy()
+            }
+        } ?: error("Matrix room is not available")
+    }
+
+    fun roomSecurityPermissionUpdates(
+        userId: String,
+        roomId: String
+    ): Flow<MatrixRoomSecurityPermissions> = callbackFlow {
+        val activeClient = try {
+            requireActiveClient(userId)
+        } catch (error: Throwable) {
+            close(error)
+            return@callbackFlow
+        }
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+        if (normalizedRoomId == null) {
+            close(IllegalArgumentException("Room id is empty"))
+            return@callbackFlow
+        }
+        val room = knownRoomOrNull(userId, activeClient, normalizedRoomId)
+        if (room == null) {
+            close(IllegalStateException("Matrix room is not available"))
+            return@callbackFlow
+        }
+
+        var listenerHandle: TaskHandle? = null
+        val hasCleanedUp = AtomicBoolean(false)
+
+        fun emit(roomInfo: RoomInfo) {
+            val permissions = try {
+                roomInfo.powerLevels?.toMatrixRoomSecurityPermissions()
             } finally {
                 roomInfo.destroy()
             }
@@ -999,41 +1101,241 @@ class MatrixClientService(
             val oldLocalAlias = aliases.firstOrNull {
                 it.endsWith(":$serverName", ignoreCase = true)
             }
-            val resolved = activeClient.resolveRoomAlias(normalizedAlias)
-            if (resolved == null) {
-                check(room.publishRoomAliasInRoomDirectory(normalizedAlias)) {
-                    "Failed to publish Space alias"
-                }
-            } else {
-                check(resolved.roomId == normalizedSpaceId) {
-                    "Space alias is already in use"
-                }
-            }
-
             val retainedAlternatives = alternativeAliases
                 .filterNot { alias ->
-                    alias == oldLocalAlias || alias == normalizedAlias
+                    matrixRoomAliasesEqual(alias, oldLocalAlias) ||
+                        matrixRoomAliasesEqual(alias, normalizedAlias)
                 }
                 .toMutableList()
             val nextCanonicalAlias = when {
                 canonicalAlias == null -> normalizedAlias
-                canonicalAlias == oldLocalAlias -> normalizedAlias
+                matrixRoomAliasesEqual(canonicalAlias, oldLocalAlias) -> normalizedAlias
                 else -> canonicalAlias
             }
-            if (nextCanonicalAlias != normalizedAlias) {
+            if (!matrixRoomAliasesEqual(nextCanonicalAlias, normalizedAlias)) {
                 retainedAlternatives.add(0, normalizedAlias)
             }
-            room.updateCanonicalAlias(
-                alias = nextCanonicalAlias,
-                altAliases = retainedAlternatives.distinct()
-            )
-
-            if (oldLocalAlias != null && oldLocalAlias != normalizedAlias) {
-                check(room.removeRoomAliasFromRoomDirectory(oldLocalAlias)) {
-                    "Failed to remove the previous Space alias"
+            replaceOwnedRoomAliasSafely(
+                roomId = normalizedSpaceId,
+                previousAlias = oldLocalAlias,
+                desiredAlias = normalizedAlias,
+                ensureDesiredAliasMapping = {
+                    ensureRoomAliasMapping(
+                        activeClient = activeClient,
+                        room = room,
+                        roomId = normalizedSpaceId,
+                        alias = normalizedAlias
+                    )
+                },
+                updateAliasState = {
+                    room.updateCanonicalAlias(
+                        alias = nextCanonicalAlias,
+                        altAliases = retainedAlternatives.distinct()
+                    )
+                },
+                resolvePreviousAliasRoomId = {
+                    activeClient.resolveRoomAlias(requireNotNull(oldLocalAlias))?.roomId
+                },
+                removePreviousAliasMapping = {
+                    room.removeRoomAliasFromRoomDirectory(requireNotNull(oldLocalAlias))
                 }
-            }
+            )
         } ?: error("Matrix Space is not available")
+    }
+
+    suspend fun setRoomSecurityJoinRule(
+        userId: String,
+        roomId: String,
+        joinRule: MatrixRoomSecurityJoinRule
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        knownRoomOrNull(userId, activeClient, roomId)?.use { room ->
+            val sdkRule = when (joinRule) {
+                MatrixRoomSecurityJoinRule.InviteOnly -> JoinRule.Invite
+                MatrixRoomSecurityJoinRule.Public -> JoinRule.Public
+                is MatrixRoomSecurityJoinRule.Restricted -> {
+                    require(!joinRule.hasUnsupportedRules && joinRule.spaceIds.isNotEmpty()) {
+                        "Restricted room access requires supported parent Spaces"
+                    }
+                    JoinRule.Restricted(
+                        rules = joinRule.spaceIds.sorted().map(AllowRule::RoomMembership)
+                    )
+                }
+                MatrixRoomSecurityJoinRule.Unsupported ->
+                    error("Unsupported room join rule cannot be written")
+            }
+            room.updateJoinRules(sdkRule)
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun setRoomSecurityHistoryVisibility(
+        userId: String,
+        roomId: String,
+        visibility: MatrixRoomHistoryVisibility
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val sdkVisibility = when (visibility) {
+            MatrixRoomHistoryVisibility.SHARED -> RoomHistoryVisibility.Shared
+            MatrixRoomHistoryVisibility.INVITED -> RoomHistoryVisibility.Invited
+            MatrixRoomHistoryVisibility.JOINED -> RoomHistoryVisibility.Joined
+            MatrixRoomHistoryVisibility.WORLD_READABLE ->
+                RoomHistoryVisibility.WorldReadable
+            MatrixRoomHistoryVisibility.CUSTOM ->
+                error("Custom room history visibility cannot be written")
+        }
+        knownRoomOrNull(userId, activeClient, roomId)?.use { room ->
+            room.updateHistoryVisibility(sdkVisibility)
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun enableRoomSecurityEncryption(
+        userId: String,
+        roomId: String
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        knownRoomOrNull(userId, activeClient, roomId)?.use { room ->
+            room.enableEncryption()
+        } ?: error("Matrix room is not available")
+    }
+
+    suspend fun setRoomSecurityDirectoryVisibility(
+        userId: String,
+        roomId: String,
+        isVisible: Boolean
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        knownRoomOrNull(userId, activeClient, roomId)?.use { room ->
+            room.updateRoomVisibility(
+                if (isVisible) RoomVisibility.Public else RoomVisibility.Private
+            )
+        } ?: error("Matrix room is not available")
+    }
+
+    /**
+     * Changes or removes the alias owned by the active homeserver for an ordinary room.
+     *
+     * Replacement creates the new mapping before publishing state and removes the old mapping
+     * last. Removal deletes the mapping first so retry can still discover the alias from state. If
+     * clearing state then fails, the old mapping and state are restored together before returning
+     * the error, avoiding a visible alias that no longer resolves.
+     */
+    suspend fun setRoomSecurityAddress(
+        userId: String,
+        roomId: String,
+        desiredAlias: String?
+    ) = withContext(Dispatchers.IO) {
+        val activeClient = requireActiveClient(userId)
+        val normalizedRoomId = roomId.trim().takeIf(String::isNotEmpty)
+            ?: error("Room id is empty")
+        val normalizedAlias = desiredAlias?.trim()?.takeIf(String::isNotEmpty)
+        if (normalizedAlias != null) {
+            require(isRoomAliasFormatValid(normalizedAlias)) { "Room alias is invalid" }
+        }
+        val serverName = activeClient.userId().matrixServerNameOrNull()
+            ?: error("Matrix homeserver name is unavailable")
+        if (normalizedAlias != null) {
+            require(normalizedAlias.endsWith(":$serverName", ignoreCase = true)) {
+                "Room alias must belong to the active homeserver"
+            }
+        }
+
+        knownRoomOrNull(userId, activeClient, normalizedRoomId)?.use { room ->
+            val roomInfo = room.roomInfo()
+            val canonicalAlias: String?
+            val alternativeAliases: List<String>
+            try {
+                check(!roomInfo.isSpace) { "Matrix room is a Space" }
+                canonicalAlias = roomInfo.canonicalAlias?.takeIf(String::isNotBlank)
+                alternativeAliases = roomInfo.alternativeAliases
+                    .filter(String::isNotBlank)
+                    .distinct()
+            } finally {
+                roomInfo.destroy()
+            }
+
+            val aliases = listOfNotNull(canonicalAlias) + alternativeAliases
+            val oldLocalAlias = aliases.firstOrNull {
+                it.endsWith(":$serverName", ignoreCase = true)
+            }
+
+            if (normalizedAlias == null) {
+                if (oldLocalAlias == null) return@use
+                val retainedAlternatives = alternativeAliases
+                    .filterNot { it == oldLocalAlias }
+                    .distinct()
+                val nextCanonicalAlias = canonicalAlias.takeUnless { it == oldLocalAlias }
+                removeOwnedRoomAliasSafely(
+                    roomId = normalizedRoomId,
+                    resolveAliasRoomId = {
+                        activeClient.resolveRoomAlias(oldLocalAlias)?.roomId
+                    },
+                    removeAliasMapping = {
+                        room.removeRoomAliasFromRoomDirectory(oldLocalAlias)
+                    },
+                    clearAliasState = {
+                        room.updateCanonicalAlias(
+                            alias = nextCanonicalAlias,
+                            altAliases = retainedAlternatives
+                        )
+                    },
+                    ensureAliasMapping = {
+                        ensureRoomAliasMapping(
+                            activeClient = activeClient,
+                            room = room,
+                            roomId = normalizedRoomId,
+                            alias = oldLocalAlias
+                        )
+                    },
+                    restoreAliasState = {
+                        room.updateCanonicalAlias(
+                            alias = canonicalAlias,
+                            altAliases = alternativeAliases
+                        )
+                    }
+                )
+                return@use
+            }
+
+            val retainedAlternatives = alternativeAliases
+                .filterNot { alias ->
+                    matrixRoomAliasesEqual(alias, oldLocalAlias) ||
+                        matrixRoomAliasesEqual(alias, normalizedAlias)
+                }
+                .toMutableList()
+            val nextCanonicalAlias = when {
+                canonicalAlias == null -> normalizedAlias
+                matrixRoomAliasesEqual(canonicalAlias, oldLocalAlias) -> normalizedAlias
+                else -> canonicalAlias
+            }
+            if (!matrixRoomAliasesEqual(nextCanonicalAlias, normalizedAlias)) {
+                retainedAlternatives.add(0, normalizedAlias)
+            }
+            replaceOwnedRoomAliasSafely(
+                roomId = normalizedRoomId,
+                previousAlias = oldLocalAlias,
+                desiredAlias = normalizedAlias,
+                ensureDesiredAliasMapping = {
+                    ensureRoomAliasMapping(
+                        activeClient = activeClient,
+                        room = room,
+                        roomId = normalizedRoomId,
+                        alias = normalizedAlias
+                    )
+                },
+                updateAliasState = {
+                    room.updateCanonicalAlias(
+                        alias = nextCanonicalAlias,
+                        altAliases = retainedAlternatives.distinct()
+                    )
+                },
+                resolvePreviousAliasRoomId = {
+                    activeClient.resolveRoomAlias(requireNotNull(oldLocalAlias))?.roomId
+                },
+                removePreviousAliasMapping = {
+                    room.removeRoomAliasFromRoomDirectory(requireNotNull(oldLocalAlias))
+                }
+            )
+        } ?: error("Matrix room is not available")
     }
 
     suspend fun createRoom(
@@ -1228,6 +1530,31 @@ class MatrixClientService(
             }
         }
         return roomListRoom ?: activeClient.getRoom(roomId)
+    }
+
+    private suspend fun ensureRoomAliasMapping(
+        activeClient: Client,
+        room: Room,
+        roomId: String,
+        alias: String
+    ) {
+        when (val resolvedRoomId = activeClient.resolveRoomAlias(alias)?.roomId) {
+            roomId -> return
+            null -> Unit
+            else -> error("Room alias now belongs to $resolvedRoomId")
+        }
+        try {
+            val didPublish = room.publishRoomAliasInRoomDirectory(alias)
+            if (!didPublish) {
+                check(activeClient.resolveRoomAlias(alias)?.roomId == roomId) {
+                    "Failed to restore room alias"
+                }
+            }
+        } catch (publishError: Throwable) {
+            if (activeClient.resolveRoomAlias(alias)?.roomId != roomId) {
+                throw publishError
+            }
+        }
     }
 
     suspend fun uploadOwnAvatar(

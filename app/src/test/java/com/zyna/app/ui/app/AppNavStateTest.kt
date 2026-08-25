@@ -1,4 +1,5 @@
 package com.zyna.app.ui.app
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -934,6 +935,43 @@ class AppNavStateTest {
         assertEquals(chatState, chatState.openRoomPermissions())
         assertEquals(membersState, membersState.openRoomPermissions())
         assertEquals(AppNavState(), AppNavState().openRoomPermissions())
+    }
+
+    @Test
+    fun roomSecurityOwnsDetailsAndPreservesParentSpaceContext() {
+        val roomId = "!room:example.org"
+        val detailsState = AppNavState()
+            .enterMain()
+            .openSpace(
+                spaceId = "!story:example.org",
+                parentSpaceId = null,
+                displayName = "Story",
+                avatarUrl = null,
+                topic = null
+            )
+            .openChatFromSpace(roomId = roomId, displayName = "Room")
+            .openRoomDetails()
+
+        val securityState = detailsState.openRoomSecurity("Room")
+
+        assertEquals(AppRoute.RoomSecurity(roomId, "Room"), securityState.top)
+        assertEquals(AppRoute.RoomDetails(roomId), securityState.activeRoomDetailsRoute)
+        assertEquals(AppRoute.RoomSecurity(roomId, "Room"), securityState.activeRoomSecurityRoute)
+        assertEquals("!story:example.org", securityState.activeSpaceRoute?.spaceId)
+        assertEquals(detailsState, securityState.popActiveStack())
+        assertFalse(securityState.showsTabs)
+    }
+
+    @Test
+    fun openRoomSecurityRequiresTopRoomDetailsRoute() {
+        val chatState = AppNavState()
+            .enterMain()
+            .openChat(roomId = "!room:example.org", displayName = "Room")
+        val membersState = chatState.openRoomDetails().openRoomMembers()
+
+        assertEquals(chatState, chatState.openRoomSecurity("Room"))
+        assertEquals(membersState, membersState.openRoomSecurity("Room"))
+        assertEquals(AppNavState(), AppNavState().openRoomSecurity("Room"))
     }
 
     @Test

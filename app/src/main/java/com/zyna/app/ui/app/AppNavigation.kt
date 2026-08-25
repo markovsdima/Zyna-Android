@@ -80,6 +80,10 @@ sealed interface AppRoute {
     data class RoomPermissions(
         val roomId: String
     ) : AppRoute
+    data class RoomSecurity(
+        val roomId: String,
+        val displayName: String
+    ) : AppRoute
     data class RoomRoleManagement(
         val roomId: String
     ) : AppRoute
@@ -188,6 +192,7 @@ data class AppNavState(
                 is AppRoute.RoomMembers -> topRoute.roomId
                 is AppRoute.RoomMemberDetails -> topRoute.roomId
                 is AppRoute.RoomPermissions -> topRoute.roomId
+                is AppRoute.RoomSecurity -> topRoute.roomId
                 is AppRoute.RoomRoleManagement -> topRoute.roomId
                 is AppRoute.InviteRoomMembers -> topRoute.roomId
                 else -> return null
@@ -251,6 +256,7 @@ data class AppNavState(
                 is AppRoute.RoomMembers -> topRoute.roomId
                 is AppRoute.RoomMemberDetails -> topRoute.roomId
                 is AppRoute.RoomPermissions -> topRoute.roomId
+                is AppRoute.RoomSecurity -> topRoute.roomId
                 is AppRoute.RoomRoleManagement -> topRoute.roomId
                 is AppRoute.InviteRoomMembers -> topRoute.roomId
                 else -> return null
@@ -301,6 +307,12 @@ data class AppNavState(
             return chatsStack
                 .filterIsInstance<AppRoute.RoomPermissions>()
                 .lastOrNull { permissionsRoute -> permissionsRoute.roomId == roomId }
+        }
+
+    val activeRoomSecurityRoute: AppRoute.RoomSecurity?
+        get() {
+            if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return null
+            return chatsStack.lastOrNull() as? AppRoute.RoomSecurity
         }
 
     val showsTabs: Boolean
@@ -715,6 +727,17 @@ data class AppNavState(
         }
         val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
         return copy(chatsStack = chatsStack + AppRoute.RoomPermissions(detailsRoute.roomId))
+    }
+
+    fun openRoomSecurity(displayName: String): AppNavState {
+        if (mode != AppNavMode.Main || selectedTab != AppTab.CHATS) return this
+        val detailsRoute = chatsStack.lastOrNull() as? AppRoute.RoomDetails ?: return this
+        return copy(
+            chatsStack = chatsStack + AppRoute.RoomSecurity(
+                roomId = detailsRoute.roomId,
+                displayName = displayName.trim()
+            )
+        )
     }
 
     fun openRoomRoleManagement(): AppNavState {

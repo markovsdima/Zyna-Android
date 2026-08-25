@@ -8,6 +8,7 @@ import com.zyna.app.data.matrix.MatrixSpaceAccessJoinRule
 import com.zyna.app.data.matrix.MatrixSpaceAccessPermissions
 import com.zyna.app.data.matrix.MatrixSpaceAccessSnapshot
 import com.zyna.app.data.matrix.MatrixClientService
+import com.zyna.app.data.matrix.withCanonicalMatrixServerName
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -804,7 +805,7 @@ private fun MatrixSpaceAccessSnapshot.toLoadedSettings(
     }
     val localAddress = aliases.firstOrNull {
         it.endsWith(":$serverName", ignoreCase = true)
-    }
+    }?.withCanonicalMatrixServerName(serverName)
     return LoadedSpaceAccessSettings(
         access = access,
         displayedAddress = localAddress ?: canonicalAlias ?: alternativeAliases.firstOrNull(),

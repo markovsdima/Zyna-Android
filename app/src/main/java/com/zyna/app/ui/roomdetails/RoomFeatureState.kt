@@ -20,5 +20,6 @@ data class RoomFeatureState(
     val memberModeration: RoomMemberModerationState = RoomMemberModerationState(),
     val inviteMembers: InviteMembersState,
     val permissions: RoomPermissionsState = RoomPermissionsState(),
-    val roles: RoomRoleManagementState = RoomRoleManagementState()
+    val roles: RoomRoleManagementState = RoomRoleManagementState(),
+    val security: RoomSecurityState = RoomSecurityState()
 )

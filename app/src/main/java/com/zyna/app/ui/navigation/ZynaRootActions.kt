@@ -5,9 +5,10 @@ import com.zyna.app.data.matrix.MatrixContact
 import com.zyna.app.data.matrix.MatrixEditTarget
 import com.zyna.app.data.matrix.MatrixForwardTarget
 import com.zyna.app.data.matrix.MatrixReplyInfo
-import com.zyna.app.data.matrix.MatrixRoomPermission
+import com.zyna.app.data.matrix.MatrixRoomHistoryVisibility
 import com.zyna.app.data.matrix.MatrixRoomMember
 import com.zyna.app.data.matrix.MatrixRoomMemberModerationAction
+import com.zyna.app.data.matrix.MatrixRoomPermission
 import com.zyna.app.data.matrix.MatrixRoomSummary
 import com.zyna.app.data.matrix.MatrixSpaceRoom
 import com.zyna.app.data.matrix.MatrixUserProfile
@@ -20,6 +21,7 @@ import com.zyna.app.ui.app.AppTab
 import com.zyna.app.ui.chat.theme.ChatBubbleTheme
 import com.zyna.app.ui.createroom.CreateRoomAccess
 import com.zyna.app.ui.createroom.CreateRoomPostingPermission
+import com.zyna.app.ui.roomdetails.RoomSecurityAccessOption
 import com.zyna.app.ui.roompermissions.RoomPermissionAudience
 import com.zyna.app.ui.roomroles.RoomAssignableRole
 import com.zyna.app.ui.spaces.SpaceAccessOption
@@ -34,6 +36,7 @@ data class ZynaRootActions(
     val spaces: SpacesFeatureActions,
     val createRoom: CreateRoomActions,
     val roomDetails: RoomDetailsFeatureActions,
+    val roomSecurity: RoomSecurityFeatureActions,
     val roomPermissions: RoomPermissionsFeatureActions,
     val roomRoles: RoomRolesFeatureActions,
     val roomProfileEditor: RoomProfileEditorActions,
@@ -134,9 +137,26 @@ data class RoomDetailsFeatureActions(
     val onOpenInviteMembers: () -> Unit,
     val onOpenPermissions: () -> Unit,
     val onOpenSpaceAccess: () -> Unit,
+    val onOpenRoomSecurity: () -> Unit,
     val onRequestLeave: () -> Unit,
     val onConfirmLeave: () -> Unit,
     val onCancelLeave: () -> Unit
+)
+
+data class RoomSecurityFeatureActions(
+    val onRetry: () -> Unit,
+    val onAccessChanged: (RoomSecurityAccessOption) -> Unit,
+    val onAuthorizedSpaceToggled: (String) -> Unit,
+    val onHistoryChanged: (MatrixRoomHistoryVisibility) -> Unit,
+    val onEncryptionChanged: (Boolean) -> Unit,
+    val onConfirmEncryption: () -> Unit,
+    val onCancelEncryption: () -> Unit,
+    val onAddressChanged: (String) -> Unit,
+    val onRetryAddressCheck: () -> Unit,
+    val onDirectoryVisibilityChanged: (Boolean) -> Unit,
+    val onSave: () -> Unit,
+    val onConfirmDiscard: () -> Unit,
+    val onCancelDiscard: () -> Unit
 )
 
 data class RoomPermissionsFeatureActions(

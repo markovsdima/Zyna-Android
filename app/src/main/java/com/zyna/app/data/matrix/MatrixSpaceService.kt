@@ -252,6 +252,18 @@ class MatrixSpaceService(
         )
     }
 
+    /** Joined parent Spaces are the only safe candidates for restricted child-room access. */
+    suspend fun joinedParentsOfChild(
+        userId: String,
+        childId: String
+    ): List<MatrixSpaceRoom> = withContext(Dispatchers.IO) {
+        val normalizedChildId = childId.trim().takeIf(String::isNotEmpty)
+            ?: error("Child id is empty")
+        requireActiveService(userId)
+            .joinedParentsOfChild(normalizedChildId)
+            .map(SpaceRoom::toMatrixSpaceRoom)
+    }
+
     /** Loads fresh metadata for one preview without expanding hierarchy list mapping work. */
     suspend fun loadJoinContext(
         userId: String,
